@@ -2,7 +2,7 @@
 
 `voltage` provides native command-line access to the [Voltage API](https://voltageapi.com/v1/docs). It includes commands for all 47 operations in the checked-in API contract, account/environment discovery, and OAuth device login.
 
-**Release status:** source implementation. Browser login requires the accompanying auth-service and frontend changes in [the integration guide](docs/integration.md). Do not publish a release until the staging acceptance checks there have passed.
+**Release status:** draft PRs with a verified local browser/auth/CLI flow. Follow the [local demo runbook](docs/local-demo.md) to run all three components before merging. Browser login requires the accompanying auth-service and frontend changes in [the integration guide](docs/integration.md). Do not publish a release until the staging acceptance checks there have passed.
 
 ## Install from source
 

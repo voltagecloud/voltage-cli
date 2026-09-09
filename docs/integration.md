@@ -4,7 +4,9 @@ Browser login is a coordinated change across three repositories. A CLI binary al
 
 ## Source changes
 
-The CLI implementation is in this repository. Auth-service and frontend changes are developed in isolated checkouts on `codex/cli-device-login` and exported into `integration/` as patches with their base commits. Apply each patch to its matching repository with `git apply --check` first, or use the accompanying isolated checkout. The existing frontend checkout and its uncommitted work are untouched.
+The implementations are in draft PRs: [CLI #1](https://github.com/voltagecloud/voltage-cli/pull/1), [auth-service #327](***REMOVED-PRIVATE-REPO***), and [frontend-turbo #2560](***REMOVED-PRIVATE-REPO***). Auth-service and frontend use `codex/cli-device-login`; CLI uses `codex/voltage-cli`. The initial patch bundles have been replaced by these maintained PR branches. The existing frontend checkout and its uncommitted work are untouched.
+
+Use the [local demo runbook](local-demo.md) to run real native authentication, PostgreSQL, the frontend, and CLI before merging. Password login, MFA, approval/denial, discovery, refresh, and revocation have passed together locally. Keep all PRs in draft until the demo and review preparation are complete.
 
 Auth-service adds:
 
@@ -32,7 +34,7 @@ The frontend uses its existing auth URL configuration (`PUBLIC_AUTH_URL` / serve
 
 Auth-service: apply migrations to an isolated PostgreSQL database and run formatting, clippy, existing authentication tests, and the new `device_oauth` tests. The SQLx offline query cache includes the changed legacy refresh predicate. Its existing CI runs all tests with PostgreSQL.
 
-Frontend: run `yarn run check`, the CLI helper Jest tests, and `node packages/e2e/scripts/test-cli-authorization.mjs`. The runner starts two loopback services on temporary ports, writes fake browser cookies to a private temporary file, runs Chromium, and cleans up. It explicitly clears real account environment variables. Install the browser with `yarn playwright install chromium` first. The accompanying GitHub workflow runs this mock suite on frontend changes.
+Frontend: run `yarn run check`, the CLI helper Jest tests, and `node packages/e2e/scripts/test-cli-authorization.mjs`. The runner starts two loopback services on temporary ports, writes fake browser cookies to a private temporary file, runs Chromium, and cleans up. It explicitly clears real account environment variables. Install the browser with `yarn workspace @repo/e2e exec playwright install chromium` first. The accompanying GitHub workflow runs this mock suite on frontend changes.
 
 The browser tests use the existing Page Object Model and auth fixtures and deliberately skip without `E2E_CLI_MOCK_ORIGIN`, preventing accidental real authorization submissions. Do not interpret mock-browser tests as proof of deployed login or MFA. The local runner is used because Docker was unavailable in this development workspace.
 

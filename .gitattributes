@@ -1,2 +1,0 @@
-# Unified diff context intentionally contains leading spaces and blank context lines.
-integration/*.patch -whitespace

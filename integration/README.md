@@ -1,22 +1,11 @@
-# Coordinated service changes
+# Coordinated draft PRs
 
-These patches contain the complete auth-service and frontend implementation, including new files. They are kept here so the CLI repository does not depend on ignored development checkouts.
-
-| Repository | Patch | Base commit |
+| Repository | Draft PR | Branch |
 | --- | --- | --- |
-| [auth-service](***REMOVED-PRIVATE-REPO***) | [auth-service.patch](auth-service.patch) | `4060df4a9b8da84e51c29ef23984b5f536a76e8e` |
-| [frontend-turbo](***REMOVED-PRIVATE-REPO***) | [frontend-turbo.patch](frontend-turbo.patch) | `beea4b8319d151dcaf888ab3c986a183234e3cc0` |
+| voltage-cli | [#1](https://github.com/voltagecloud/voltage-cli/pull/1) | `codex/voltage-cli` |
+| auth-service | [#327](***REMOVED-PRIVATE-REPO***) | `codex/cli-device-login` |
+| frontend-turbo | [#2560](***REMOVED-PRIVATE-REPO***) | `codex/cli-device-login` |
 
-Patch SHA-256 values and base-application verification are recorded in [manifest.json](manifest.json). Each patch was applied to files from its base commit, then compared byte-for-byte with the implemented files.
+These PR branches replace the initial patch bundles and are the maintained source of the coordinated changes. All PRs remain **draft / not ready for review**. No service has been deployed or CLI release published.
 
-In a clean checkout of the matching repository and base commit:
-
-```sh
-git switch -c codex/cli-device-login
-git apply --check /path/to/voltage-cli/integration/auth-service.patch
-git apply /path/to/voltage-cli/integration/auth-service.patch
-```
-
-Use `frontend-turbo.patch` in the frontend repository. Do not apply over unrelated uncommitted changes. If applying to a newer revision, resolve changes there and rerun the repository checks.
-
-The isolated development copies remain at `.work/auth-service` and `.work/frontend-turbo`, each on `codex/cli-device-login` with its implementation staged. No service changes have been pushed, merged, or deployed. Review [verification](../docs/verification.md) and the [staging rollout](../docs/integration.md) before release.
+Use the [local demo runbook](../docs/local-demo.md) for checkouts, startup commands, fixture accounts, smoke tests, and browser recordings. The [integration guide](../docs/integration.md) describes the subsequent auth → frontend → CLI staging rollout and release gate.
