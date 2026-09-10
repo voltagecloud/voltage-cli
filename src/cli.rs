@@ -255,6 +255,9 @@ fn endpoint(mut cmd: Command, op: &Operation) -> Command {
                 continue;
             }
             let mut arg = text_arg(name, help);
+            if op.id == "create_wallet" && *name == "network" {
+                arg = arg.value_parser(["mainnet", "testnet3", "mutinynet"]);
+            }
             if ["metadata", "event"].contains(name) {
                 arg = arg.action(ArgAction::Append);
             }
@@ -278,10 +281,7 @@ fn friendly_fields(id: &str) -> Vec<(&'static str, &'static str)> {
             ("id", "Optional new resource UUID"),
             ("name", "Wallet name"),
             ("credit-line", "Backing line of credit UUID"),
-            (
-                "network",
-                "Explicit network: bitcoin, testnet, signet, regtest, or mutinynet as supported by the API",
-            ),
+            ("network", "Explicit wallet network"),
             (
                 "limit",
                 "Credit limit in the line of credit's integer base units",

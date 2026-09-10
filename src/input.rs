@@ -5,7 +5,7 @@ use crate::{
 };
 use clap::ArgMatches;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, io::Read};
+use std::io::Read;
 
 pub fn amount(value: &str, unit: &str) -> Result<Value> {
     let (currency, scale) = match unit {
@@ -81,22 +81,17 @@ fn metadata(m: &ArgMatches) -> Result<Value> {
     Ok(Value::Object(map))
 }
 fn events(m: &ArgMatches) -> Result<Value> {
-    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut events = Vec::new();
     for event in cli::values(m, "event") {
         let (kind, name) = event.split_once('.').ok_or_else(|| {
             Error::usage("Events must use kind.event, for example receive.completed")
         })?;
-        groups.entry(kind.into()).or_default().push(name.into());
+        events.push(json!({kind: name}));
     }
-    if groups.is_empty() {
+    if events.is_empty() {
         return Err(Error::usage("At least one --event is required"));
     }
-    Ok(Value::Array(
-        groups
-            .into_iter()
-            .map(|(kind, names)| json!({kind:names}))
-            .collect(),
-    ))
+    Ok(Value::Array(events))
 }
 
 pub fn body(
@@ -413,14 +408,8 @@ fn serialize_query(
             .ok_or_else(|| Error::usage("Metadata filters require KEY=VALUE"))?;
         out.push((format!("{}[{k}]", p.name), v.into()));
     } else if array {
-        out.push((
-            if p.style.as_deref() == Some("deepObject") {
-                format!("{}[]", p.name)
-            } else {
-                p.name.clone()
-            },
-            value.into(),
-        ));
+        // The API uses bracket arrays even where its OpenAPI style is omitted.
+        out.push((format!("{}[]", p.name), value.into()));
     } else {
         out.push((p.name.clone(), value.into()));
     }
@@ -430,8 +419,18 @@ fn serialize_query(
 pub fn consequential(op: &Operation, body: Option<&Value>) -> bool {
     op.method == "DELETE"
         || ["create_treasury_movement", "generate_webhook_key"].contains(&op.id.as_str())
-        || op.id == "create_payment" && body.is_some_and(|b| b.get("payment_kind").is_none())
+        || op.id == "create_payment" && !body.is_some_and(is_receive)
         || op.id == "update_sandbox_line_of_credit" && body.is_some_and(|b| b["disable"] == true)
+}
+
+fn is_receive(body: &Value) -> bool {
+    // A send discriminator or send data always requires confirmation, including
+    // mixed raw payloads. A nullable or unknown receive kind cannot exempt a send.
+    body.get("type").is_none()
+        && body.get("data").is_none()
+        && body["payment_kind"]
+            .as_str()
+            .is_some_and(|kind| ["bolt11", "onchain", "bip21", "taprootasset"].contains(&kind))
 }
 
 #[cfg(test)]

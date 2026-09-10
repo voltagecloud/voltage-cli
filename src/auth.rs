@@ -50,7 +50,11 @@ async fn auth_request(request: reqwest::RequestBuilder) -> Result<(u16, Value)> 
         .bytes()
         .await
         .map_err(|_| Error::io("Unable to read authentication response"))?;
-    let body = if bytes.is_empty() {
+    // Ingress rate limits can return plain text rather than an OAuth response.
+    // Device polling still needs to back off; token mutations are never retried.
+    let body = if status == 429 {
+        json!({"error": "slow_down"})
+    } else if bytes.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&bytes)

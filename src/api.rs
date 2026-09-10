@@ -345,6 +345,14 @@ pub async fn execute(
     let mut reconciled = false;
     let mut response = match result {
         Ok(r) => Ok(r),
+        Err(e) if op.id == "get_payment"
+            && cli::value(m, "wait").is_some()
+            && e.detail.as_ref().is_some_and(|v| v["http_status"] == 404) =>
+        {
+            // A submitted payment can be missing from the read projection initially.
+            // Only an explicit wait treats that 404 as pending; ordinary reads fail.
+            Ok(Response { status: 404, body: Value::Null, retry_after: None })
+        }
         Err(e) => {
             if e.code == 4 && ["create_payment", "create_treasury_movement"].contains(&op.id.as_str())
                 && let (Some(id), Some(org), Ok(env)) = (id.as_ref(), scope.org.as_ref(), input::single_env(scope))

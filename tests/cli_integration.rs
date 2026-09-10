@@ -169,9 +169,7 @@ async fn every_documented_operation_reaches_its_exact_route_and_auth_scheme() {
             let pair = if p.name == "metadata" {
                 ("metadata[order]".to_owned(), "a&b=3".to_owned())
             } else {
-                let name = if p.style.as_deref() == Some("deepObject")
-                    && (p.schema.get("items").is_some() || p.name == "statuses")
-                {
+                let name = if p.schema.get("items").is_some() {
                     format!("{}[]", p.name)
                 } else {
                     p.name.clone()
@@ -230,15 +228,28 @@ async fn every_documented_operation_reaches_its_exact_route_and_auth_scheme() {
 async fn raw_send_without_yes_never_submits() {
     let server = MockServer::start().await;
     let dir = private_tempdir();
-    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
-    cli(dir.path(), &server)
-        .args([
-            "payments", "create", "--org", ORG, "--env", ENV, "--data", "-",
-        ])
-        .write_stdin(body.to_string())
-        .assert()
-        .code(2);
+    let original = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    for kind in [
+        None,
+        Some(Value::Null),
+        Some(json!("bolt11")),
+        Some(json!("unknown")),
+    ] {
+        let mut body = original.clone();
+        if let Some(kind) = kind {
+            body["payment_kind"] = kind;
+        }
+        let result = cli(dir.path(), &server)
+            .args([
+                "payments", "create", "--org", ORG, "--env", ENV, "--data", "-",
+            ])
+            .write_stdin(body.to_string())
+            .assert()
+            .code(2);
+        assert!(String::from_utf8_lossy(&result.get_output().stderr).contains("requires --yes"));
+    }
     assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!dir.path().join("requests").exists());
 }
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_destination_is_required_before_request() {
@@ -448,8 +459,9 @@ async fn query_encoding_preserves_arrays_and_metadata() {
         query
             .iter()
             .filter(|(k, _)| k.starts_with("statuses"))
-            .count(),
-        2
+            .map(|(k, v)| (k.as_ref(), v.as_ref()))
+            .collect::<Vec<_>>(),
+        [("statuses[]", "completed"), ("statuses[]", "failed")]
     );
 }
 #[tokio::test(flavor = "multi_thread")]
@@ -538,6 +550,180 @@ fn saved_user(dir: &Path, server: &MockServer, expired: bool) -> Settings {
     settings.save().unwrap();
     settings
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn webhook_builders_send_documented_event_variants() {
+    for action in ["create", "update"] {
+        let server = MockServer::start().await;
+        let dir = private_tempdir();
+        let mut payload = json!({"events":[
+            {"send":"succeeded"}, {"send":"failed"},
+            {"receive":"completed"}, {"receive":"failed"}, {"test":"created"}
+        ]});
+        let mut command = cli(dir.path(), &server);
+        command.args(["webhooks", action, "--org", ORG, "--env", ENV]);
+        if action == "create" {
+            command.args([
+                "--id",
+                RESOURCE,
+                "--name",
+                "demo",
+                "--url",
+                "https://example.test/hook",
+                "--show-secrets",
+            ]);
+            payload["id"] = json!(RESOURCE);
+            payload["name"] = json!("demo");
+            payload["url"] = json!("https://example.test/hook");
+        } else {
+            command.arg(RESOURCE);
+        }
+        for event in [
+            "send.succeeded",
+            "send.failed",
+            "receive.completed",
+            "receive.failed",
+            "test.created",
+        ] {
+            command.args(["--event", event]);
+        }
+        Mock::given(method(if action == "create" { "POST" } else { "PATCH" }))
+            .and(body_json(payload))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        command.assert().success();
+        server.verify().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wallet_network_flags_match_the_wallet_contract() {
+    let spec: Value = serde_json::from_str(include_str!("../api/openapi.json")).unwrap();
+    for network in spec["components"]["schemas"]["SupportedNetwork"]["enum"]
+        .as_array()
+        .unwrap()
+    {
+        let server = MockServer::start().await;
+        let dir = private_tempdir();
+        Mock::given(method("POST"))
+            .and(body_json(json!({"id":RESOURCE,"environment_id":ENV,"line_of_credit_id":RESOURCE,"name":"demo","network":network,"limit":0,"metadata":{}})))
+            .respond_with(ResponseTemplate::new(202)).expect(1).mount(&server).await;
+        cli(dir.path(), &server)
+            .args([
+                "wallets",
+                "create",
+                "--org",
+                ORG,
+                "--env",
+                ENV,
+                "--id",
+                RESOURCE,
+                "--name",
+                "demo",
+                "--credit-line",
+                RESOURCE,
+                "--limit",
+                "0",
+                "--network",
+                network.as_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        server.verify().await;
+    }
+    let server = MockServer::start().await;
+    let dir = private_tempdir();
+    for network in ["bitcoin", "testnet", "signet", "regtest"] {
+        cli(dir.path(), &server)
+            .args(["wallets", "create", "--network", network])
+            .assert()
+            .code(2);
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_for_a_payment_tolerates_an_initial_missing_projection() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let server = MockServer::start().await;
+    let dir = private_tempdir();
+    let count = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .respond_with(move |_: &wiremock::Request| {
+            if count.fetch_add(1, Ordering::SeqCst) < 2 {
+                ResponseTemplate::new(404).set_body_json(json!({"error":"not_found"}))
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id":RESOURCE,"status":"completed"}))
+            }
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "get",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wait",
+            "completed",
+            "--timeout",
+            "5",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["outcome"], "completed");
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_payment_reads_fail_normally_and_explicit_waits_time_out() {
+    let server = MockServer::start().await;
+    let dir = private_tempdir();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error":"not_found"})))
+        .mount(&server)
+        .await;
+    cli(dir.path(), &server)
+        .args(["payments", "get", RESOURCE, "--org", ORG, "--env", ENV])
+        .assert()
+        .code(1);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "get",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wait",
+            "ready",
+            "--timeout",
+            "2",
+        ])
+        .assert()
+        .code(5);
+    assert!(String::from_utf8_lossy(&result.get_output().stderr).contains(RESOURCE));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_processes_refresh_once_and_save_the_rotated_token() {
     use wiremock::matchers::body_string_contains;
@@ -609,7 +795,7 @@ async fn browser_device_login_handles_pending_and_slowdown_without_exposing_toke
     Mock::given(method("POST")).and(path("/oauth/device_authorization")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"device_code":"device-secret","user_code":"ABCD-EFGH","verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5}))).expect(1).mount(&server).await;
     Mock::given(method("POST")).and(path("/oauth/token")).respond_with(move |_:&wiremock::Request|match count.fetch_add(1,Ordering::SeqCst) {
         0=>ResponseTemplate::new(400).set_body_json(json!({"error":"authorization_pending"})),
-        1=>ResponseTemplate::new(400).set_body_json(json!({"error":"slow_down"})),
+        1=>ResponseTemplate::new(429).set_body_string("Too Many Requests"),
         _=>ResponseTemplate::new(200).set_body_json(json!({"access_token":"login-access-secret","refresh_token":"login-refresh-secret","token_type":"Bearer","expires_in":600}))
     }).expect(3).mount(&server).await;
     Mock::given(method("GET"))

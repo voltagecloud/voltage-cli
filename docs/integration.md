@@ -18,21 +18,21 @@ Auth-service adds:
 - Transactional refresh rotation with an unchanged absolute session expiry. Reuse of a consumed refresh token revokes that CLI session. The legacy refresh query explicitly excludes CLI sessions. Global signout already deletes all sessions and therefore covers CLI sessions too.
 - No-store responses and query omission from OAuth request logs. Configure ingress logs to omit bodies, authorization headers, and OAuth query strings as well.
 
-Frontend adds `/cli/authorize`, reuses login/MFA through the existing browser session, preserves the verification-code return destination, and forwards decisions server-side. The page shows email, code, and permission scope; it requires approval or denial and rejects cross-origin form submissions. Analytics are suppressed on the approval route and login/MFA return paths. These responses use no-store and `Referrer-Policy: same-origin` (codes are not sent to other origins, and native form Origin headers remain usable). Account tokens are never placed in approval URLs or page data.
+Frontend adds `/cli/authorize`, reuses login/MFA through the existing browser session, preserves the verification-code return destination, and forwards decisions server-side. The page shows email, code, and permission scope; it requires approval or denial and rejects cross-origin form submissions. Decisions are bound to the displayed account ID: changing accounts in another tab requires reviewing the current account and approving again. Analytics are suppressed on the approval route and login/MFA return paths. These responses use no-store and `Referrer-Policy: same-origin` (codes are not sent to other origins, and native form Origin headers remain usable). Account tokens are never placed in approval URLs or page data.
 
 ## Configuration
 
 Auth-service defaults `VOLTAGE_CLI_VERIFICATION_URI` to `https://app.voltage.cloud/cli/authorize`. Set it to the staging frontend's approval URL in staging. HTTPS is required except for loopback development.
 
-The Helm chart exposes `cliOAuth.verificationUri` and `cliOAuth.trustProxyHeaders`. Its staging values use the existing `https://nextgen.staging.voltage.cloud/cli/authorize` frontend. The existing auth ingress is `https://auth.staging.voltage.cloud/api/v1`; confirm these remain the intended staging hosts before rollout.
+The Helm chart exposes `cliOAuth.verificationUri`. Its staging values use the existing `https://nextgen.staging.voltage.cloud/cli/authorize` frontend. The existing auth ingress is `https://auth.staging.voltage.cloud/api/v1`; confirm these remain the intended staging hosts before rollout.
 
-Rate limits use the peer socket IP by default. Set `OAUTH_TRUST_PROXY_HEADERS=true` only when the trusted ingress **overwrites** `X-Real-IP`; otherwise leave it disabled. Never trust a client-supplied forwarded IP. Limits are shared in PostgreSQL: 30 device starts/minute/IP, 240 token requests/minute/IP, 10 decisions/minute/account, and 60 revocations/minute/IP. Expired authorization and rate-limit rows are pruned on requests.
+The chart installs OAuth IP limits at Traefik and sets `OAUTH_IP_LIMITS_AT_INGRESS=true` together with those routes. Public routes reuse the existing `rateLimit.ipStrategy`; internal routes use `cliOAuth.internalIpStrategy` (default depth 0 for direct connections). Limits are 30 device starts/minute/IP, 240 token requests/minute/IP, and 60 revocations/minute/IP, with matching burst sizes. These token buckets are per ingress instance. Standalone auth runs retain PostgreSQL counters keyed by the socket peer; the application never trusts forwarded headers. Do not set the ingress environment flag without equivalent ingress protection, and restrict direct service access to trusted infrastructure. Account decisions (10/minute) and per-device polling intervals remain shared through PostgreSQL in both modes. The CLI also backs off on plain-text HTTP 429 responses from ingress. Expired authorization and rate-limit rows are pruned on requests.
 
 The frontend uses its existing auth URL configuration (`PUBLIC_AUTH_URL` / server `PROXY_TARGET_AUTH_URL`). No embedded CLI client secret or new user password flow is needed. Session expiry uses the existing refresh lifetime configuration.
 
 ## Verification before deployment
 
-Auth-service: apply migrations to an isolated PostgreSQL database and run formatting, clippy, existing authentication tests, and the new `device_oauth` tests. The SQLx offline query cache includes the changed legacy refresh predicate. Its existing CI runs all tests with PostgreSQL.
+Auth-service: apply migrations to an isolated PostgreSQL database and run formatting, clippy, existing authentication tests, and the new `device_oauth` tests. Real token signing is tested with a single pool connection; issuance and refresh read current permissions through their existing transaction. The SQLx offline query cache includes the changed legacy refresh predicate. CI runs all tests with PostgreSQL and renders production/staging Helm charts to verify route limits and IP strategies.
 
 Frontend: run `yarn run check`, the CLI helper Jest tests, and `node packages/e2e/scripts/test-cli-authorization.mjs`. The runner starts two loopback services on temporary ports, writes fake browser cookies to a private temporary file, runs Chromium, and cleans up. It explicitly clears real account environment variables. Install the browser with `yarn workspace @repo/e2e exec playwright install chromium` first. The accompanying GitHub workflow runs this mock suite on frontend changes.
 
@@ -42,7 +42,7 @@ CLI: run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warning
 
 ## Staging rollout
 
-1. Deploy the additive auth migration and service first. Confirm all four OAuth endpoints are present in the deployed auth OpenAPI contract and existing browser login/refresh still work.
+1. Deploy the additive auth migration and service first. Confirm all four OAuth endpoints are present in the deployed auth OpenAPI contract and existing browser login/refresh still work. Verify the ingress proxy-chain settings using two distinct client IPs and spoofed forwarding headers; throttling one client must not consume another client's bucket.
 2. Deploy the frontend approval route using frontend-turbo's documented release procedure. Set the auth service's verification URI to that staging route.
 3. Run the CLI with a fresh private config directory and `--auth-url` pointing at staging. Complete approval with an existing login, a fresh login, and an MFA-enabled account. Check that the terminal and browser codes match.
 4. Verify denial, expiry, early-poll slowdown, duplicate redemption, independent sessions on two devices, concurrent local processes, refresh rotation, session-specific logout, and global signout. Confirm an old refresh token fails and its session cannot continue refreshing.
