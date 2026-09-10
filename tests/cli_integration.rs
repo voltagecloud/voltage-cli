@@ -26,6 +26,9 @@ fn private_tempdir() -> tempfile::TempDir {
 }
 
 fn cli(dir: &Path, server: &MockServer) -> Command {
+    cli_at(dir, &server.uri())
+}
+fn cli_at(dir: &Path, api_url: &str) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
     for name in [
         "VOLTAGE_ORGANIZATION_ID",
@@ -41,7 +44,7 @@ fn cli(dir: &Path, server: &MockServer) -> Command {
         .arg("--config-dir")
         .arg(dir)
         .arg("--api-url")
-        .arg(server.uri())
+        .arg(api_url)
         .arg("--json");
     cmd
 }
@@ -250,6 +253,44 @@ async fn secret_destination_is_required_before_request() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn failed_wallet_reads_do_not_report_uncertain_writes() {
+    use std::io::{Read, Write};
+    for partial_response in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET "));
+            if partial_response {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{\"token\":\"private-response-token\"").unwrap();
+            }
+            // Disconnect either before headers or partway through the body.
+        });
+        let dir = private_tempdir();
+        let result = cli_at(dir.path(), &format!("http://{address}"))
+            .args(["wallets", "list", "--org", ORG, "--env", ENV])
+            .assert()
+            .code(4);
+        let message = String::from_utf8_lossy(&result.get_output().stderr);
+        assert!(message.contains("HTTP read"), "{message}");
+        assert!(!message.contains("write"), "{message}");
+        assert!(!message.contains("mutation"), "{message}");
+        assert!(!message.contains("test-account-key"));
+        assert!(!message.contains("private-response-token"));
+        peer.join().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn payment_timeout_preserves_id_and_does_not_retry() {
     let server = MockServer::start().await;
     let dir = private_tempdir();
@@ -277,6 +318,10 @@ async fn payment_timeout_preserves_id_and_does_not_retry() {
         .assert()
         .code(4);
     assert!(String::from_utf8_lossy(&result.get_output().stderr).contains(RESOURCE));
+    assert!(
+        String::from_utf8_lossy(&result.get_output().stderr)
+            .contains("a write may have been submitted. No mutation was retried.")
+    );
     assert!(
         dir.path()
             .join(format!("requests/{RESOURCE}.json"))

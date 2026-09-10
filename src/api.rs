@@ -109,7 +109,18 @@ impl Api {
         body: Option<&Value>,
         scheme: &str,
     ) -> Result<Response> {
-        let response=self.request(method,path,query,body,scheme)?.send().await.map_err(|_|Error::io("HTTP request failed; a write may have been submitted. No mutation was retried."))?;
+        let read_only = matches!(method, "GET" | "HEAD" | "OPTIONS");
+        let response = self
+            .request(method, path, query, body, scheme)?
+            .send()
+            .await
+            .map_err(|_| {
+                Error::io(if read_only {
+                    "HTTP read request failed. Check the API URL and whether the API service is running."
+                } else {
+                    "HTTP request failed; a write may have been submitted. No mutation was retried."
+                })
+            })?;
         let status = response.status().as_u16();
         let retry_after = response
             .headers()
@@ -132,7 +143,11 @@ impl Api {
                     })
             });
         let bytes = response.bytes().await.map_err(|_| {
-            Error::io("Response was interrupted; reconcile writes by their original ID")
+            Error::io(if read_only {
+                "HTTP read response was interrupted; retry this read."
+            } else {
+                "Response was interrupted; reconcile writes by their original ID"
+            })
         })?;
         let body = if bytes.is_empty() {
             Value::Null

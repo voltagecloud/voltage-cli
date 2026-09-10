@@ -8,6 +8,21 @@ The three draft PRs work together before merging or deploying:
 
 Keep these PRs in draft until the demo and review preparation are complete. The local stack proves browser password/MFA login, device approval and denial, CLI credentials, account/environment discovery, profiles, refresh rotation, and session-specific logout. It uses the real auth service, its real PostgreSQL migrations and JWT signing, the real frontend, and the development CLI binary.
 
+## What is running locally
+
+| Component | Local setup | What it provides |
+| --- | --- | --- |
+| Frontend | `http://localhost:3210` | Browser login, MFA, and explicit CLI approval/denial. |
+| Auth service | `http://127.0.0.1:8081/api/v1` | Password verification, device login, signed tokens, refresh/logout, and organization/environment discovery. |
+| PostgreSQL | `127.0.0.1:55432` | Persistent local users, permissions, the `Local demo` organization, the `local` environment, and auth sessions. |
+| Wallet/payment API | Not started | Wallets, payments, quotes, bills, webhooks, and checkout cannot be exercised against a real backend in this demo. |
+
+The seeded data is fictional; authentication uses the actual service implementation. Browser approval creates a real independent CLI session, and the CLI stores its local credentials separately from other configurations. The database and signing keys persist in `auth-service/.local-dev/` between restarts.
+
+`organizations list` and `environments list` work because they use the auth service. `wallets list --org … --env …` uses the separate Voltage API: the wrapper deliberately points it at `http://127.0.0.1:1/disabled-api`, so it fails with a transport error even with correct IDs and successful login. That failure does not mean an empty wallet list or a rejected login. The CLI's API tests use mock services; they are not a running wallet backend for this demo.
+
+To demonstrate wallet access using this browser login, we need either a local wallet/payment backend configured to trust these local auth keys and recognize these IDs, or the coordinated staging rollout with staging credentials and real staging IDs. Changing only the API URL does not make local tokens valid in staging. Separately, the CLI can exercise a deployed API using an existing API key and real organization/environment IDs in a separate configuration; the local demo wrapper does not enable that connection.
+
 ## Checkouts and prerequisites
 
 This machine has:
