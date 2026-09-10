@@ -32,6 +32,8 @@ yarn workspace @repo/e2e exec playwright install chromium
 
 ## Start the three components
 
+**Browser sign-in for this demo:** use `developer@example.test` with password `Testing123!`. Your normal Voltage account is not present in this isolated database; using it produces `AccessRightProblem` even when your real password is correct. The local runners provide their own configuration and keys, so no certificates or `.env` files from another checkout are needed.
+
 Terminal 1 — auth and its dedicated PostgreSQL cluster:
 
 ```sh
@@ -112,6 +114,6 @@ Browser videos are saved as `.work/local-demo/password.webm`, `mfa.webm`, and `d
 - Native local accounts bypass the legacy Cognito migration path. This does not demonstrate legacy account migration, email delivery, or deployed ingress behavior. Local analytics are disabled and email is routed to an unused loopback endpoint.
 - Auth logs: `auth-service/.local-dev/auth.log`; PostgreSQL logs: `.local-dev/postgres.log`. These directories and CLI credentials are private. Never include token files or signing keys in recordings or commits.
 - Restart auth after updating its Rust code. Older builds returned HTTP 500 for invalid browser refresh tokens, causing a 502 on `/cli/authorize` when a localhost cookie belonged to another environment. The corrected build returns 401; the frontend clears that rejected session and returns to login with the verification code preserved. A private browser window is a workaround while restarting. Run `voltage login` again if the original code has expired.
-- A port conflict fails startup instead of replacing another service. Auth supports `--port`, `--pg-port`, and `--web-url`; frontend supports `LOCAL_AUTH_URL` and `LOCAL_WEB_PORT`. The CLI wrapper and automated demo intentionally use the documented default ports.
+- The auth runner supports immediate restarts. An older port check could report `[Errno 48] Address already in use` for a recently closed connection on macOS, even with no server listening. The corrected check permits this; a real conflict reports the port and an `lsof` command to identify the listener. Stop that process in its terminal before retrying. Auth supports `--port`, `--pg-port`, and `--web-url`; frontend supports `LOCAL_AUTH_URL` and `LOCAL_WEB_PORT`. The CLI wrapper and automated demo intentionally use the documented default ports.
 - If a process was forcibly killed, restart `scripts/dev.py run`; it can reuse its private cluster. To reset, stop this checkout's service/cluster first, then remove only its `.local-dev` directory and the CLI's `.work/local-demo/cli` directory. A reset invalidates all old local sessions.
 - The deployed staging flow and test-network payment acceptance remain required before releasing the CLI. All three PRs remain drafts; no deployment or release is part of this setup.
