@@ -267,6 +267,20 @@ pub async fn execute(
     out: &mut Output,
 ) -> Result<()> {
     let body = input::body(op, command, m, scope)?;
+    let invoice_action = cli::enabled(m, "qr") || cli::enabled(m, "copy");
+    if invoice_action && command != ["payments", "receive"] && op.id != "get_payment" {
+        return Err(Error::usage(
+            "--qr and --copy are only available for payments receive and payments get",
+        ));
+    }
+    if invoice_action
+        && command == ["payments", "receive"]
+        && body.as_ref().and_then(|b| b["payment_kind"].as_str()) != Some("bolt11")
+    {
+        return Err(Error::usage(
+            "--qr and --copy require a BOLT11 receive (--kind bolt11)",
+        ));
+    }
     let path = input::path(op, m, scope)?;
     let mut query = input::query(op, m, scope)?;
     if [
@@ -390,7 +404,12 @@ pub async fn execute(
             "Wallet does not belong to the selected environment",
         ));
     }
-    if let Some(until) = cli::value(m, "wait") {
+    if invoice_action && response.body["direction"].as_str() == Some("send") {
+        return Err(Error::usage(
+            "--qr and --copy require a BOLT11 receive payment",
+        ));
+    }
+    if let Some(until) = cli::value(m, "wait").or_else(|| invoice_action.then(|| "ready".into())) {
         let id = id
             .as_ref()
             .ok_or_else(|| Error::usage("Waiting requires a payment ID"))?;
@@ -406,7 +425,26 @@ pub async fn execute(
             eprintln!("Payment {id} accepted; waiting for {until}.");
         }
         let mut pause = Duration::from_secs(1);
+        let mut invoice_presented = false;
+        let mut last_status: Option<String> = None;
+        let mut last_notice = tokio::time::Instant::now() - Duration::from_secs(15);
         loop {
+            let status = response.body["status"].as_str();
+            if let Some(status) = status
+                && (Some(status) != last_status.as_deref()
+                    || last_notice.elapsed() >= Duration::from_secs(15))
+            {
+                eprintln!("Payment {id} status: {status}; waiting for {until}.");
+                last_status = Some(status.into());
+                last_notice = tokio::time::Instant::now();
+            }
+            if invoice_action && !invoice_presented && payment_request(&response.body).is_some() {
+                present_invoice(&response.body, m)?;
+                invoice_presented = true;
+                if until == "completed" {
+                    eprintln!("Invoice is ready; continuing to poll for settlement.");
+                }
+            }
             let state = wait_state(&response.body, &until).map_err(|mut error| {
                 if let Some(detail) = &mut error.detail {
                     output::redact(detail, &api.secrets());
@@ -414,6 +452,9 @@ pub async fn execute(
                 error
             })?;
             if let Some(outcome) = state {
+                if invoice_action && !invoice_presented {
+                    present_invoice(&response.body, m)?;
+                }
                 return out.write(
                     output::envelope(
                         Some(response.status),
@@ -518,9 +559,59 @@ pub fn wait_state(body: &Value, until: &str) -> Result<Option<&'static str>> {
         )
         .detail(body.clone())),
         Some("completed") => Ok(Some("completed")),
-        Some("receiving") if until == "ready" => Ok(Some("ready")),
+        Some("receiving") if until == "ready" && payment_request_ready(body) => Ok(Some("ready")),
         _ => Ok(None),
     }
+}
+
+fn payment_request_ready(body: &Value) -> bool {
+    [
+        body["data"]["payment_request"].as_str(),
+        body["data"]["address"].as_str(),
+        body["bip21_uri"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| !value.is_empty())
+}
+
+fn payment_request(body: &Value) -> Option<&str> {
+    body["data"]["payment_request"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+}
+
+fn present_invoice(body: &Value, m: &ArgMatches) -> Result<()> {
+    let invoice = payment_request(body)
+        .ok_or_else(|| Error::usage("The ready payment does not contain a BOLT11 invoice"))?;
+    if cli::enabled(m, "copy") {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(invoice)) {
+            Ok(()) => eprintln!("Invoice copied to the clipboard."),
+            Err(_) => eprintln!(
+                "Warning: the invoice is ready, but it could not be copied to the clipboard."
+            ),
+        }
+    }
+    if cli::enabled(m, "qr") {
+        // BOLT11 is case-insensitive. Uppercase enables QR alphanumeric mode, while
+        // low error correction and a two-module margin keep terminal output compact.
+        let code = qrcode::QrCode::with_error_correction_level(
+            invoice.to_ascii_uppercase(),
+            qrcode::EcLevel::L,
+        )
+        .map_err(|_| Error::io("Could not encode the invoice as a QR code"))?;
+        let image = code
+            .render::<qrcode::render::unicode::Dense1x2>()
+            .quiet_zone(false)
+            .build();
+        let image = image
+            .lines()
+            .map(|line| format!("  {line}  "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        eprintln!("\nScan to pay:\n\n{image}\n");
+    }
+    Ok(())
 }
 fn next_page(body: &Value, query: &[(String, String)]) -> Result<Option<(String, String)>> {
     let offset_mode = query
@@ -640,10 +731,12 @@ fn journal(
 mod tests {
     use super::*;
     #[test]
-    fn readiness_is_not_completion() {
-        let b = json!({"status":"receiving"});
-        assert_eq!(wait_state(&b, "ready").unwrap(), Some("ready"));
-        assert_eq!(wait_state(&b, "completed").unwrap(), None);
+    fn readiness_requires_a_generated_payment_request() {
+        let pending = json!({"status":"receiving","data":{"payment_request":null}});
+        assert_eq!(wait_state(&pending, "ready").unwrap(), None);
+        let ready = json!({"status":"receiving","data":{"payment_request":"invoice"}});
+        assert_eq!(wait_state(&ready, "ready").unwrap(), Some("ready"));
+        assert_eq!(wait_state(&ready, "completed").unwrap(), None);
         assert!(wait_state(&json!({"status":"failed"}), "completed").is_err());
     }
     #[test]

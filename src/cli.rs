@@ -244,6 +244,17 @@ fn endpoint(mut cmd: Command, op: &Operation) -> Command {
                 .value_parser(["ready", "completed"]),
         );
     }
+    if op.id == "create_payment" || op.id == "get_payment" {
+        cmd = cmd
+            .arg(flag(
+                "qr",
+                "Render a ready BOLT11 invoice as a compact terminal QR code; implies --wait ready",
+            ))
+            .arg(flag(
+                "copy",
+                "Copy a ready BOLT11 invoice to the clipboard; implies --wait ready",
+            ));
+    }
     if op.body {
         cmd = cmd.arg(
             text_arg("data", "Complete JSON object from @file or - for stdin")

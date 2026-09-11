@@ -838,6 +838,61 @@ async fn browser_device_login_handles_pending_and_slowdown_without_exposing_toke
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn qr_implies_invoice_readiness_wait() {
+    let server = MockServer::start().await;
+    let dir = private_tempdir();
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/organizations/{ORG}/environments/{ENV}/payments"
+        )))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/organizations/{ORG}/environments/{ENV}/payments/{RESOURCE}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": RESOURCE,
+            "direction": "receive",
+            "type": "bolt11",
+            "status": "receiving",
+            "data": {"payment_request": "lntbs1example"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .env("VOLTAGE_WALLET_ID", WALLET)
+        .args([
+            "payments",
+            "receive",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--id",
+            RESOURCE,
+            "--currency",
+            "btc",
+            "--kind",
+            "bolt11",
+            "--amount",
+            "1",
+            "--unit",
+            "sats",
+            "--qr",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["outcome"], "ready");
+    let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+    assert!(stderr.contains("Payment 44444444-4444-4444-8444-444444444444 status: receiving"));
+    assert!(stderr.contains("Scan to pay:"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wait_tolerates_projection_delay_and_distinguishes_invoice_from_settlement() {
     use std::sync::{
         Arc,

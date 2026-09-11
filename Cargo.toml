@@ -28,6 +28,8 @@ futures-util = "0.3"
 url = "2"
 zeroize = "1"
 httpdate = "1"
+qrcode = { version = "0.14.1", default-features = false }
+arboard = { version = "3.6.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

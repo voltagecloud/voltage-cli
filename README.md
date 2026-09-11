@@ -37,7 +37,7 @@ Before creating a payment, inspect the selected wallet and confirm that its repo
 ```sh
 ./scripts/voltage-staging payments receive \
   --currency btc --kind bolt11 --amount 150 --unit sats \
-  --wait ready --json
+  --qr --copy --json
 ```
 
 ## Authenticate
@@ -126,7 +126,9 @@ The contract has a canonical request-shape gap for Taproot Asset sends. Raw docu
 
 ### Submission and recovery
 
-An empty HTTP 202 means **accepted**, not completed. Use `--wait ready` for an invoice/address becoming available or `--wait completed` for settlement. `receiving` never counts as completed. Waiting tolerates initial payment projection 404s and stops at `--timeout SECONDS` (default 60). The timeout exit includes the original resource ID.
+An empty HTTP 202 means **accepted**, not completed. Use `--wait ready` for an invoice/address becoming available or `--wait completed` for settlement. `receiving` does not count as ready until the payer-facing request is present, and it never counts as completed. Waiting tolerates initial payment projection 404s and stops at `--timeout SECONDS` (default 60). The timeout exit includes the original resource ID.
+
+For BOLT11 receives, `--qr` renders the invoice as a compact terminal QR code and `--copy` copies the original invoice text to the system clipboard as soon as it is ready. Either flag implies `--wait ready` when no explicit wait is supplied; with `--wait completed`, the invoice is presented first and polling then continues through settlement. Waits print status changes and a notice every 15 seconds to stderr. QR and clipboard diagnostics also go to stderr, preserving JSON stdout for scripts. Clipboard unavailability produces a warning without misreporting the accepted payment as failed.
 
 Convenience creates generate a UUID before sending; `--id` preserves a supplied UUID. A private recovery journal under `requests/` records the ID, operation, scope, timestamp, and request hash before submission, without storing the body. Mutation requests are never retried automatically. After an ambiguous payment or treasury submission, the CLI makes one read of the original ID, bounded to five seconds. If the payment is visible, it reports acceptance; otherwise it returns exit 4 and an unknown outcome. An initially missing projection does not prove submission failed. Read the original payment ID before deciding whether to resubmit:
 
