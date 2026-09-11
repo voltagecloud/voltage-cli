@@ -17,6 +17,29 @@ The repository pins its build toolchain in `rust-toolchain.toml`. On Linux, buil
 
 The release workflow builds archives for Apple Silicon/Intel macOS and ARM64/x86-64 Linux, includes completions and SHA-256 checksums, and generates a Homebrew formula. Release publishing is manual and gated on staging validation. Windows credential support is included in source; Windows packaging is outside this release.
 
+### Staging wrapper
+
+The development staging wrapper pins the API and auth endpoints, isolates CLI state under `.work/staging/cli`, and reads the four Voltage variables in the repository's private `.env` without evaluating it as shell code:
+
+```sh
+cp .env.example .env
+# Replace placeholders with one matching staging environment and test-network wallet.
+chmod 600 .env
+./scripts/voltage-staging --build
+./scripts/voltage-staging auth status
+./scripts/voltage-staging wallets list --json
+```
+
+`VOLTAGE_API_KEY`, `VOLTAGE_ORGANIZATION_ID`, and `VOLTAGE_ENVIRONMENT_ID` are required. `VOLTAGE_WALLET_ID` is an optional default for commands accepting `--wallet`; an explicit flag takes precedence. The wrapper refuses endpoint and config-directory overrides so staging commands cannot silently target another deployment. Use `target/debug/voltage` directly for other configurations.
+
+Before creating a payment, inspect the selected wallet and confirm that its reported network is a test network. Then a fixed-amount Lightning receive can be requested with:
+
+```sh
+./scripts/voltage-staging payments receive \
+  --currency btc --kind bolt11 --amount 150 --unit sats \
+  --wait ready --json
+```
+
 ## Authenticate
 
 ```sh
@@ -62,7 +85,7 @@ Resource IDs are positional. Enclosing scope uses `--org`, `--env`, `--wallet`, 
 
 An explicit profile selects its organization, environment, and credential together, ignoring ambient scope and API-key variables. Explicit command flags override scope without changing the profile. Known API-key scope mismatches fail before submission. There is no global active profile.
 
-Without a profile, scope flags override `VOLTAGE_ORGANIZATION_ID` and `VOLTAGE_ENVIRONMENT_ID`. An explicit `--account` selects saved credentials; otherwise `VOLTAGE_API_KEY` wins, then a sole saved credential. Configuration lives in `$XDG_CONFIG_HOME/voltage` or `~/.config/voltage`; override with `VOLTAGE_CONFIG_DIR` or `--config-dir`.
+Without a profile, scope flags override `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMENT_ID`, and the optional `VOLTAGE_WALLET_ID`. An explicit `--account` selects saved credentials; otherwise `VOLTAGE_API_KEY` wins, then a sole saved credential. Configuration lives in `$XDG_CONFIG_HOME/voltage` or `~/.config/voltage`; override with `VOLTAGE_CONFIG_DIR` or `--config-dir`.
 
 Only endpoints that support environment filtering receive that filter. Organization-wide commands identify that limitation in their help. Wallet mutations validate a supplied environment against the wallet first. An environment's name never determines its network.
 

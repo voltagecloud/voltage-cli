@@ -139,7 +139,7 @@ impl Settings {
         let scope = Scope {
             org,
             envs,
-            wallet: cli::value(m, "wallet"),
+            wallet: cli::value(m, "wallet").or_else(|| from_env("VOLTAGE_WALLET_ID")),
             webhook: cli::value(m, "webhook"),
             account: cli::value(m, "account").or_else(|| profile.map(|p| p.account.clone())),
         };

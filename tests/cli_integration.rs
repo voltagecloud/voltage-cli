@@ -856,6 +856,7 @@ async fn wait_tolerates_projection_delay_and_distinguishes_invoice_from_settleme
         .await;
     Mock::given(method("GET")).and(path(format!("/organizations/{ORG}/environments/{ENV}/payments/{RESOURCE}"))).respond_with(move|_:&wiremock::Request|match count.fetch_add(1,Ordering::SeqCst){0=>ResponseTemplate::new(404).set_body_json(json!({"error":"not_found"})),1=>ResponseTemplate::new(200).set_body_json(json!({"id":RESOURCE,"status":"receiving","data":{"payment_request":"invoice"}})),_=>ResponseTemplate::new(200).set_body_json(json!({"id":RESOURCE,"status":"completed"}))}).expect(3).mount(&server).await;
     let a = cli(dir.path(), &server)
+        .env("VOLTAGE_WALLET_ID", WALLET)
         .args([
             "payments",
             "receive",
@@ -863,8 +864,6 @@ async fn wait_tolerates_projection_delay_and_distinguishes_invoice_from_settleme
             ORG,
             "--env",
             ENV,
-            "--wallet",
-            WALLET,
             "--id",
             RESOURCE,
             "--currency",

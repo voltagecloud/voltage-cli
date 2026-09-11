@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Run the development CLI against staging using the repository's private .env."""
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+
+STAGING_API_URL = "https://staging.voltageapi.com/v1"
+STAGING_AUTH_URL = "https://auth.staging.voltage.cloud/api/v1"
+SUPPORTED_ENV = {
+    "VOLTAGE_API_KEY",
+    "VOLTAGE_ORGANIZATION_ID",
+    "VOLTAGE_ENVIRONMENT_ID",
+    "VOLTAGE_WALLET_ID",
+}
+REQUIRED_ENV = SUPPORTED_ENV - {"VOLTAGE_WALLET_ID"}
+
+root = Path(__file__).resolve().parents[1]
+env_path = root / ".env"
+args = sys.argv[1:]
+
+# Building does not need or expose staging credentials.
+if args == ["--build"]:
+    build_env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
+    if not shutil.which("cargo") and (root / ".work/cargo/bin/cargo").exists():
+        build_env.update(CARGO_HOME=str(root / ".work/cargo"), RUSTUP_HOME=str(root / ".work/rustup"))
+        build_env["PATH"] = str(root / ".work/cargo/bin") + os.pathsep + build_env["PATH"]
+    sys.exit(subprocess.call(["cargo", "build", "--locked"], cwd=root, env=build_env))
+
+for arg in args:
+    if arg.split("=", 1)[0] in ("--config-dir", "--auth-url", "--api-url"):
+        sys.exit(
+            "This staging wrapper fixes its endpoints and credential directory; "
+            "use target/debug/voltage for other configurations."
+        )
+
+if not env_path.exists():
+    sys.exit("Missing .env. Copy .env.example to .env and fill in the staging values.")
+if env_path.is_symlink() or not env_path.is_file():
+    sys.exit(".env must be a regular file, not a symlink.")
+if os.name != "nt":
+    info = env_path.stat()
+    if info.st_uid != os.geteuid():
+        sys.exit(".env must be owned by the current user.")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        sys.exit(".env contains credentials and must have mode 600: chmod 600 .env")
+
+loaded = {}
+for number, raw in enumerate(env_path.read_text().splitlines(), 1):
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    if line.startswith("export "):
+        line = line[7:].lstrip()
+    if "=" not in line:
+        sys.exit(f"Invalid .env line {number}: expected NAME=VALUE")
+    key, value = line.split("=", 1)
+    key, value = key.strip(), value.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        sys.exit(f"Invalid variable name on .env line {number}")
+    if key not in SUPPORTED_ENV:
+        sys.exit(f"Unsupported .env variable {key}; see .env.example")
+    if key in loaded:
+        sys.exit(f"Duplicate .env variable {key}")
+    if value[:1] in ("'", '"'):
+        if len(value) < 2 or value[-1] != value[0]:
+            sys.exit(f"Unmatched quote on .env line {number}")
+        value = value[1:-1]
+    if not value:
+        sys.exit(f".env variable {key} must not be empty")
+    loaded[key] = value
+
+missing = sorted(REQUIRED_ENV - loaded.keys())
+if missing:
+    sys.exit("Missing required .env variables: " + ", ".join(missing))
+
+env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
+env.update(loaded)
+binary = root / "target/debug/voltage"
+if not binary.is_file():
+    sys.exit("Build the development CLI first: ./scripts/voltage-staging --build")
+
+os.execve(
+    binary,
+    [
+        str(binary),
+        "--config-dir",
+        str(root / ".work/staging/cli"),
+        "--auth-url",
+        STAGING_AUTH_URL,
+        "--api-url",
+        STAGING_API_URL,
+        *args,
+    ],
+    env,
+)
