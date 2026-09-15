@@ -1,6 +1,6 @@
 # Local auth, frontend, and CLI validation
 
-The current auth stack contains [storage #328](***REMOVED-PRIVATE-REPO***) followed by [device login #330](***REMOVED-PRIVATE-REPO***). Each implementation includes its behavioral tests.
+Auth storage [#328](***REMOVED-PRIVATE-REPO***) has landed. [Device login #330](***REMOVED-PRIVATE-REPO***) builds on it and includes its behavioral tests.
 
 [Frontend #2560](***REMOVED-PRIVATE-REPO***) displays the allowlisted application and binds approval to the displayed request. [CLI #1](https://github.com/voltagecloud/voltage-cli/pull/1) exchanges its independent login token before organization API calls. Existing organization-token validation covers those calls.
 
@@ -23,6 +23,6 @@ The frontend helper `node scripts/dev-cli-auth.mjs` and CLI wrapper `./scripts/v
 
 The CLI wrapper isolates credentials and disables wallet/payment requests by default. It does not start auth, provision accounts, or start an API backend.
 
-Configure matching local signing keys, test accounts, and the frontend verification URL. Use a fresh disposable database because the unmerged device migration changed.
+Configure matching local signing keys, test accounts, and the frontend verification URL. Use a disposable database with the current migrations applied.
 
 The previous recording harness expects a deferred seeded auth environment. Historical recordings cover an earlier implementation and do not establish acceptance for this revision.
