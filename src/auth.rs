@@ -308,6 +308,67 @@ pub async fn resolve(settings: &Settings, scope: &Scope, m: &ArgMatches) -> Resu
     Ok(credential)
 }
 
+pub async fn resolve_organization(
+    settings: &Settings,
+    scope: &Scope,
+    m: &ArgMatches,
+) -> Result<Credential> {
+    let login = resolve(settings, scope, m).await?;
+    if login.api_key.is_some() {
+        return Ok(login);
+    }
+    let organization = scope
+        .org
+        .as_deref()
+        .ok_or_else(|| Error::usage("--org is required"))?;
+    let subject = login
+        .access_token
+        .as_deref()
+        .ok_or_else(|| Error::auth("Missing login token; log in again"))?;
+    let name = settings.account_name(scope)?;
+    let url = base_url(&settings.config.accounts[&name].auth_url)?;
+    let (status, body) = auth_request(client(30)?.post(format!("{url}/oauth/token")).form(&[
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ),
+        ("subject_token", subject),
+        (
+            "subject_token_type",
+            "urn:ietf:params:oauth:token-type:access_token",
+        ),
+        ("audience", organization),
+    ]))
+    .await?;
+    require_success(status, &body)?;
+    #[derive(Deserialize)]
+    struct OrganizationToken {
+        access_token: String,
+        issued_token_type: String,
+        token_type: String,
+        expires_in: u64,
+    }
+    let token: OrganizationToken = serde_json::from_value(body)
+        .map_err(|_| Error::auth("Invalid organization token response"))?;
+    if token.access_token.is_empty()
+        || token.issued_token_type != "urn:ietf:params:oauth:token-type:access_token"
+        || !token.token_type.eq_ignore_ascii_case("bearer")
+        || token.expires_in == 0
+    {
+        return Err(Error::auth("Invalid organization token response"));
+    }
+    // Keep login and refresh credentials in their account store. Organization
+    // tokens belong to this command and are never reused for another organization.
+    Ok(Credential {
+        access_token: Some(token.access_token),
+        expires_at: Some(now().saturating_add(token.expires_in)),
+        api_key: None,
+        refresh_token: None,
+        user_id: None,
+        email: None,
+    })
+}
+
 pub async fn logout(settings: &mut Settings, scope: &Scope, m: &ArgMatches) -> Result<Value> {
     let _lock = settings.lock().await?;
     settings.config = Settings::load(m)?.config;
@@ -399,7 +460,11 @@ pub async fn discover(
     m: &ArgMatches,
     organizations: bool,
 ) -> Result<Value> {
-    let cred = resolve(settings, scope, m).await?;
+    let cred = if organizations {
+        resolve(settings, scope, m).await?
+    } else {
+        resolve_organization(settings, scope, m).await?
+    };
     let token = cred
         .access_token
         .as_ref()

@@ -297,7 +297,7 @@ pub async fn execute(
         ));
     }
     let credential = if op.auth == "account" {
-        auth::resolve(settings, scope, m).await?
+        auth::resolve_organization(settings, scope, m).await?
     } else {
         Credential::default()
     };

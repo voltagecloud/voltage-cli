@@ -2,7 +2,7 @@
 
 `voltage` provides native command-line access to the [Voltage API](https://voltageapi.com/v1/docs). It includes commands for all 47 operations in the checked-in API contract, account/environment discovery, and OAuth device login.
 
-**Release status:** draft PRs with a verified local browser/auth/CLI flow. Follow the [local demo runbook](docs/local-demo.md) to run all three components before merging. Browser login requires the accompanying auth-service and frontend changes in [the integration guide](docs/integration.md). Do not publish a release until the staging acceptance checks there have passed.
+**Release status:** browser login requires the two auth-service PRs and frontend approval page in [the integration guide](docs/integration.md). Local validation is recorded in [verification](docs/verification.md). Complete staging acceptance before publishing a release.
 
 ## Install from source
 
@@ -53,6 +53,8 @@ voltage logout
 ```
 
 Login prints a verification URL and code to stderr. Approve the matching code in your browser after your usual login and MFA. This grants your existing account permissions across its organizations. Profiles do **not** restrict those permissions.
+
+Organization discovery uses the saved login token. Before organization API calls, the CLI exchanges that token for the selected organization's token. Exchange uses the account's saved auth endpoint and preserves its login and refresh credentials. Switching organizations performs a new exchange.
 
 Credentials default to macOS Keychain or Linux Secret Service. There is no automatic plaintext fallback. `--credential-store file` explicitly chooses owner-only files in an owner-only directory. Do not share this directory or commit it to source control. On Windows, use the native credential store.
 

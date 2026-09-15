@@ -1,16 +1,28 @@
 # Local auth, frontend, and CLI validation
 
-The auth PRs now use a registered-client and stored-consent contract. The earlier Python auth launcher and seeded one-command demo have been deferred to a separate development-tooling proposal. Existing local fixture data is preserved, but the old startup commands are no longer supplied by the auth stack; use a fresh disposable test database for its changed, unmerged migration.
+The current auth stack contains [storage #328](***REMOVED-PRIVATE-REPO***) followed by [device login #330](***REMOVED-PRIVATE-REPO***). Each implementation includes its behavioral tests.
 
-Current review stack:
+[Frontend #2560](***REMOVED-PRIVATE-REPO***) displays the allowlisted application and binds approval to the displayed request. [CLI #1](https://github.com/voltagecloud/voltage-cli/pull/1) exchanges its independent login token before organization API calls. Existing organization-token validation covers those calls.
 
-- Auth [#328](***REMOVED-PRIVATE-REPO***) → [#329](***REMOVED-PRIVATE-REPO***) → [#330](***REMOVED-PRIVATE-REPO***) → [#327](***REMOVED-PRIVATE-REPO***), all ready for review.
-- [Frontend #2560](***REMOVED-PRIVATE-REPO***): displays the registered application and stored access, and binds the decision to the request shown.
-- [CLI #1](https://github.com/voltagecloud/voltage-cli/pull/1): device login, credentials, discovery and API commands.
-- The backend API and checkout must deploy strict OAuth issuer/audience/scope validation before these tokens are released to CLI users.
+## Automated checks
 
-Run auth's Rust/PostgreSQL tests using its existing database configuration. Run the frontend's mock suite with `node packages/e2e/scripts/test-cli-authorization.mjs`; it exercises consent, session recovery and no-JavaScript approval without deployed credentials. Run the CLI checks described in its README. See [auth validation and rollout](***REMOVED-PRIVATE-REPO***) for the current contract and acceptance requirements.
+Run auth's Rust/PostgreSQL tests against a disposable database. Run the frontend's isolated browser suite:
 
-The frontend helper `node scripts/dev-cli-auth.mjs` and this repository's `./scripts/voltage-local --build` still support a separately configured loopback auth service at port 8081. The wrapper isolates CLI credentials and disables wallet/payment requests by default. It does not start auth, provision accounts or start a wallet backend. Browser login requires the updated frontend, a fresh/auth-compatible database and matching local signing keys. Deployed accounts and tokens cannot be substituted for local fixtures.
+```sh
+yarn workspace @repo/e2e exec playwright install chromium
+node packages/e2e/scripts/test-cli-authorization.mjs
+```
 
-The previous opt-in recording harness expects the deferred seeded auth environment. Historical recordings demonstrate the earlier flow, not the new grant contract; do not treat them as current staging acceptance. Repeating that recorded demo requires a separately agreed local setup. The existing `.local-dev` data and pre-feedback Git backup are preserved for that work.
+The dedicated mock runner uses temporary loopback services and fake credentials. It covers consent, session recovery, and approval without JavaScript.
+
+Run CLI formatting, clippy, tests, and operation coverage as documented in [integration](integration.md). See [auth rollout](***REMOVED-PRIVATE-REPO***) for acceptance requirements.
+
+## Separately configured local services
+
+The frontend helper `node scripts/dev-cli-auth.mjs` and CLI wrapper `./scripts/voltage-local --build` support loopback auth on port 8081.
+
+The CLI wrapper isolates credentials and disables wallet/payment requests by default. It does not start auth, provision accounts, or start an API backend.
+
+Configure matching local signing keys, test accounts, and the frontend verification URL. Use a fresh disposable database because the unmerged device migration changed.
+
+The previous recording harness expects a deferred seeded auth environment. Historical recordings cover an earlier implementation and do not establish acceptance for this revision.

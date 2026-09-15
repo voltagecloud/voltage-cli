@@ -731,9 +731,10 @@ async fn concurrent_processes_refresh_once_and_save_the_rotated_token() {
     let dir = private_tempdir();
     let settings = saved_user(dir.path(), &server, true);
     Mock::given(method("POST")).and(path("/oauth/token")).and(body_string_contains("refresh_token=old-refresh")).respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(100)).set_body_json(json!({"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":600}))).expect(1).mount(&server).await;
+    organization_exchange(&server, "new-access", ORG, "org-access", 2).await;
     Mock::given(method("GET"))
         .and(path(format!("/organizations/{ORG}/wallets")))
-        .and(header("authorization", "Bearer new-access"))
+        .and(header("authorization", "Bearer org-access"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .expect(2)
         .mount(&server)
@@ -755,10 +756,151 @@ async fn concurrent_processes_refresh_once_and_save_the_rotated_token() {
         settings
             .read_credential("person")
             .unwrap()
+            .access_token
+            .as_deref(),
+        Some("new-access")
+    );
+    assert_eq!(
+        settings
+            .read_credential("person")
+            .unwrap()
             .refresh_token
             .as_deref(),
         Some("new-refresh")
     );
+}
+
+async fn organization_exchange(
+    server: &MockServer,
+    login: &str,
+    org: &str,
+    access: &str,
+    count: u64,
+) {
+    use wiremock::matchers::body_string_contains;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange",
+        ))
+        .and(body_string_contains(
+            "subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token",
+        ))
+        .and(body_string_contains(format!("subject_token={login}")))
+        .and(body_string_contains(format!("audience={org}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": access,
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "token_type": "Bearer", "expires_in": 600, "scope": "read write"
+        })))
+        .expect(count)
+        .up_to_n_times(count)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn organization_exchange_uses_the_saved_auth_origin_and_keeps_discovery_on_login() {
+    let auth = MockServer::start().await;
+    let api = MockServer::start().await;
+    let dir = private_tempdir();
+    let settings = saved_user(dir.path(), &auth, false);
+    Mock::given(method("GET"))
+        .and(path("/users/current"))
+        .and(header("authorization", "Bearer old-access"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"organizations": [{"id": ORG}]})),
+        )
+        .expect(1)
+        .mount(&auth)
+        .await;
+    cli(dir.path(), &api)
+        .args(["organizations", "list", "--account", "person"])
+        .assert()
+        .success();
+    for (org, token) in [(ORG, "first-org-access"), (RESOURCE, "second-org-access")] {
+        organization_exchange(&auth, "old-access", org, token, 1).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/organizations/{org}/wallets")))
+            .and(header("authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&api)
+            .await;
+        cli(dir.path(), &api)
+            .args(["wallets", "list", "--account", "person", "--org", org])
+            .assert()
+            .success();
+    }
+    organization_exchange(&auth, "old-access", ORG, "environment-access", 1).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/organizations/{ORG}/environments")))
+        .and(header("authorization", "Bearer environment-access"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&auth)
+        .await;
+    cli(dir.path(), &api)
+        .args(["environments", "list", "--account", "person", "--org", ORG])
+        .assert()
+        .success();
+    let saved = settings.read_credential("person").unwrap();
+    assert_eq!(saved.access_token.as_deref(), Some("old-access"));
+    assert_eq!(saved.refresh_token.as_deref(), Some("old-refresh"));
+    assert!(
+        api.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| {
+                !request.headers.contains_key("x-api-key") && request.url.path() != "/oauth/token"
+            })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_or_invalid_exchanges_never_fall_back_to_the_login_token() {
+    for (status, body) in [
+        (400, json!({"error": "invalid_target"})),
+        (
+            200,
+            json!({"access_token":"bad-access","token_type":"Bearer","expires_in":600}),
+        ),
+        (
+            200,
+            json!({"access_token":"bad-access","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":0}),
+        ),
+    ] {
+        let auth = MockServer::start().await;
+        let api = MockServer::start().await;
+        let dir = private_tempdir();
+        let settings = saved_user(dir.path(), &auth, false);
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let result = cli(dir.path(), &api)
+            .args(["wallets", "list", "--account", "person", "--org", ORG])
+            .assert()
+            .code(3);
+        let output = String::from_utf8_lossy(&result.get_output().stdout);
+        assert!(
+            !output.contains("old-access")
+                && !output.contains("old-refresh")
+                && !output.contains("bad-access")
+        );
+        assert!(api.received_requests().await.unwrap().is_empty());
+        assert_eq!(
+            settings
+                .read_credential("person")
+                .unwrap()
+                .access_token
+                .as_deref(),
+            Some("old-access")
+        );
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn logout_retains_credentials_on_revocation_failure_and_local_is_explicit() {
