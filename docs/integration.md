@@ -15,7 +15,7 @@ flowchart LR
 
 | PR | Purpose |
 | --- | --- |
-| [Auth #328](***REMOVED-PRIVATE-REPO***) | Three tables and one nullable session column, including storage tests |
+| [Auth #328](***REMOVED-PRIVATE-REPO***) | Two tables and one nullable session column, including storage tests |
 | [Auth #330](***REMOVED-PRIVATE-REPO***) | Device authorization and refresh grants on the existing token route; depends on #328 |
 | [Frontend #2560](***REMOVED-PRIVATE-REPO***) | Explicit consent through the existing browser login and MFA flow |
 | [CLI #1](https://github.com/voltagecloud/voltage-cli/pull/1) | Device login, credential storage, organization exchange, and API commands |
@@ -50,9 +50,9 @@ The frontend requires explicit approval and binds the decision to the displayed 
 
 Set auth's `VOLTAGE_CLI_VERIFICATION_URI` to the frontend's `/cli/authorize` URL. HTTPS is required except for loopback development.
 
-Helm exposes `cliOAuth.verificationUri`. Existing ingress routing and IP limits cover OAuth endpoints. Shared account counters and per-device polling limits remain in PostgreSQL.
+Helm exposes `cliOAuth.verificationUri`. Existing ingress routing and IP limits cover OAuth endpoints. Device polling intervals remain in PostgreSQL; consent requests have no additional account limiter.
 
-Periodic bounded cleanup removes expired device rows, rate-limit buckets, and device sessions. No special OAuth ingress or database client registry is required.
+Periodic bounded cleanup removes expired device authorization rows and device sessions. No special OAuth ingress or database client registry is required.
 
 The frontend uses its existing `PUBLIC_AUTH_URL` or server `PROXY_TARGET_AUTH_URL`. Session expiry uses auth's existing refresh lifetime configuration.
 
