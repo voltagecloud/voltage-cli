@@ -15,7 +15,7 @@ node packages/e2e/scripts/test-cli-authorization.mjs
 
 The dedicated mock runner uses temporary loopback services and fake credentials. It covers consent, session recovery, and approval without JavaScript.
 
-Run CLI formatting, clippy, tests, and operation coverage as documented in [integration](integration.md). See [auth rollout](***REMOVED-PRIVATE-REPO***) for acceptance requirements.
+Run CLI formatting, clippy, tests, and operation coverage as documented in [integration](integration.md). See the [device login client contract](***REMOVED-PRIVATE-REPO***) for the request sequence and token behavior.
 
 ## Separately configured local services
 
