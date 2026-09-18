@@ -1,0 +1,349 @@
+{
+  "get_all_organization_supported_assets": {
+    "command": [
+      "assets",
+      "list"
+    ],
+    "target": null
+  },
+  "get_all_organizations_wallets_as_user": {
+    "command": [
+      "wallets",
+      "list"
+    ],
+    "target": null
+  },
+  "create_wallet": {
+    "command": [
+      "wallets",
+      "create"
+    ],
+    "target": null
+  },
+  "get_wallet": {
+    "command": [
+      "wallets",
+      "get"
+    ],
+    "target": "wallet_id"
+  },
+  "delete_wallet": {
+    "command": [
+      "wallets",
+      "delete"
+    ],
+    "target": "wallet_id"
+  },
+  "update_wallet": {
+    "command": [
+      "wallets",
+      "update"
+    ],
+    "target": "wallet_id"
+  },
+  "get_wallet_ledger_as_user": {
+    "command": [
+      "wallets",
+      "ledger",
+      "list"
+    ],
+    "target": "wallet_id"
+  },
+  "get_wallet_policies": {
+    "command": [
+      "wallets",
+      "policies",
+      "get"
+    ],
+    "target": "wallet_id"
+  },
+  "update_wallet_policies": {
+    "command": [
+      "wallets",
+      "policies",
+      "update"
+    ],
+    "target": "wallet_id"
+  },
+  "get_payments": {
+    "command": [
+      "payments",
+      "list"
+    ],
+    "target": null
+  },
+  "create_payment": {
+    "command": [
+      "payments",
+      "create"
+    ],
+    "target": null
+  },
+  "create_treasury_movement": {
+    "command": [
+      "treasury",
+      "movements",
+      "create"
+    ],
+    "target": null
+  },
+  "check_payment": {
+    "command": [
+      "payments",
+      "check"
+    ],
+    "target": null
+  },
+  "get_payment_summary": {
+    "command": [
+      "payments",
+      "summary"
+    ],
+    "target": null
+  },
+  "get_wallet_payment_summary": {
+    "command": [
+      "wallets",
+      "payments",
+      "summary"
+    ],
+    "target": "wallet_id"
+  },
+  "get_payment": {
+    "command": [
+      "payments",
+      "get"
+    ],
+    "target": "payment_id"
+  },
+  "get_payment_history": {
+    "command": [
+      "payments",
+      "history"
+    ],
+    "target": "payment_id"
+  },
+  "update_sandbox_line_of_credit": {
+    "command": [
+      "credit-lines",
+      "update-sandbox"
+    ],
+    "target": "line_id"
+  },
+  "get_line_of_credit_summary_as_user": {
+    "command": [
+      "credit-lines",
+      "get"
+    ],
+    "target": "line_id"
+  },
+  "get_lines_of_credit_summaries_as_user": {
+    "command": [
+      "credit-lines",
+      "list"
+    ],
+    "target": null
+  },
+  "get_bill_as_user": {
+    "command": [
+      "bills",
+      "get"
+    ],
+    "target": "bill_id"
+  },
+  "get_bills_as_user": {
+    "command": [
+      "bills",
+      "list"
+    ],
+    "target": null
+  },
+  "get_bill_summary_as_user": {
+    "command": [
+      "bills",
+      "summary"
+    ],
+    "target": null
+  },
+  "get_webhooks_as_user": {
+    "command": [
+      "webhooks",
+      "list"
+    ],
+    "target": null
+  },
+  "create_webhook": {
+    "command": [
+      "webhooks",
+      "create"
+    ],
+    "target": null
+  },
+  "get_webhook": {
+    "command": [
+      "webhooks",
+      "get"
+    ],
+    "target": "webhook_id"
+  },
+  "delete_webhook": {
+    "command": [
+      "webhooks",
+      "delete"
+    ],
+    "target": "webhook_id"
+  },
+  "update_webhook": {
+    "command": [
+      "webhooks",
+      "update"
+    ],
+    "target": "webhook_id"
+  },
+  "generate_webhook_key": {
+    "command": [
+      "webhooks",
+      "keys",
+      "rotate"
+    ],
+    "target": "webhook_id"
+  },
+  "test_webhook": {
+    "command": [
+      "webhooks",
+      "test"
+    ],
+    "target": "webhook_id"
+  },
+  "start_webhook_as_user": {
+    "command": [
+      "webhooks",
+      "start"
+    ],
+    "target": "webhook_id"
+  },
+  "stop_webhook_as_user": {
+    "command": [
+      "webhooks",
+      "stop"
+    ],
+    "target": "webhook_id"
+  },
+  "get_webhook_deliveries_as_user": {
+    "command": [
+      "webhooks",
+      "deliveries",
+      "list"
+    ],
+    "target": null
+  },
+  "get_webhook_delivery_summary_as_user": {
+    "command": [
+      "webhooks",
+      "deliveries",
+      "summary"
+    ],
+    "target": null
+  },
+  "get_webhook_delivery": {
+    "command": [
+      "webhooks",
+      "deliveries",
+      "get"
+    ],
+    "target": "delivery_id"
+  },
+  "abandon_webhook_delivery": {
+    "command": [
+      "webhooks",
+      "deliveries",
+      "abandon"
+    ],
+    "target": "delivery_id"
+  },
+  "retry_webhook_delivery": {
+    "command": [
+      "webhooks",
+      "deliveries",
+      "retry"
+    ],
+    "target": "delivery_id"
+  },
+  "get_quotes_as_user": {
+    "command": [
+      "quotes",
+      "list"
+    ],
+    "target": null
+  },
+  "request_a_quote": {
+    "command": [
+      "quotes",
+      "create"
+    ],
+    "target": null
+  },
+  "get_a_quote_as_user": {
+    "command": [
+      "quotes",
+      "get"
+    ],
+    "target": "quote_id"
+  },
+  "get_events": {
+    "command": [
+      "checkout",
+      "events",
+      "watch"
+    ],
+    "target": null
+  },
+  "create_event_stream_token": {
+    "command": [
+      "checkout",
+      "streams",
+      "create"
+    ],
+    "target": null
+  },
+  "get_settings": {
+    "command": [
+      "checkout",
+      "settings",
+      "get"
+    ],
+    "target": null
+  },
+  "update_settings": {
+    "command": [
+      "checkout",
+      "settings",
+      "update"
+    ],
+    "target": null
+  },
+  "create_session": {
+    "command": [
+      "checkout",
+      "sessions",
+      "create"
+    ],
+    "target": null
+  },
+  "get_session": {
+    "command": [
+      "checkout",
+      "sessions",
+      "get"
+    ],
+    "target": "session_id"
+  },
+  "get_session_allowed_origins": {
+    "command": [
+      "checkout",
+      "sessions",
+      "allowed-origins"
+    ],
+    "target": "session_id"
+  }
+}
