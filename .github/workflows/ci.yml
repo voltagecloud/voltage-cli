@@ -34,7 +34,7 @@ jobs:
           rustup show active-toolchain
 
       - name: Cache Cargo registry and build outputs
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: Check formatting
         run: cargo fmt --check
@@ -83,7 +83,7 @@ jobs:
           rustup show active-toolchain
 
       - name: Cache Cargo registry and build outputs
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: Compile tests
         run: cargo test --locked --no-run
@@ -116,7 +116,7 @@ jobs:
           rustup show active-toolchain
 
       - name: Cache Cargo registry and build outputs
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
       - name: Run Clippy with warnings denied
         run: cargo clippy --locked --all-targets -- -D warnings
