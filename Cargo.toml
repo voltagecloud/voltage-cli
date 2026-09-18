@@ -2,7 +2,7 @@
 name = "voltage-cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.98"
 description = "The command-line interface for the Voltage API"
 repository = "https://github.com/voltagecloud/voltage-cli"
 
@@ -10,46 +10,45 @@ repository = "https://github.com/voltagecloud/voltage-cli"
 name = "voltage"
 path = "src/main.rs"
 
+# Every dependency is pinned to the exact version in Cargo.lock; bump both deliberately.
 [dependencies]
-clap = { version = "4.6", features = ["string"] }
-clap_complete = "4.6"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
-toml = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-fs2 = "0.4"
-sha2 = "0.10"
-hex = "0.4"
-rpassword = "7"
-webbrowser = "1"
-futures-util = "0.3"
-url = "2"
-zeroize = "1"
-httpdate = "1"
-qrcode = { version = "0.14.1", default-features = false }
-arboard = { version = "3.6.1", default-features = false }
+clap = { version = "=4.6.6", features = ["derive", "string"] }
+clap_complete = "=4.6.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
+toml = "=1.1.5"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "json", "form", "query", "stream"] }
+# The TLS provider is ring, installed at startup; aws-lc-rs would need a C toolchain on every platform.
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+uuid = { version = "=1.26.0", features = ["v4", "serde"] }
+sha2 = "=0.11.0"
+hex = "=0.4.3"
+rpassword = "=7.5.4"
+webbrowser = "=1.2.4"
+futures-util = "=0.3.34"
+url = "=2.5.8"
+zeroize = { version = "=1.9.0", features = ["serde"] }
+bytes = "=1.12.1"
+fastrand = "=2.5.0"
+httpdate = "=1.0.3"
+qrcode = { version = "=0.14.1", default-features = false }
+arboard = { version = "=3.6.1", default-features = false }
+
+# `v1` selects the native stores: Keychain, Windows Credential Manager, and the
+# pure-Rust Secret Service client, so Linux builds need no D-Bus development library.
+keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", features = ["windows-native"] }
+libc = "=0.2.189"
 
 [build-dependencies]
-serde_json = "1"
+serde_json = "=1.0.151"
 
 [dev-dependencies]
-tempfile = "3"
-assert_cmd = "2"
-wiremock = "0.6"
+tempfile = "=3.27.0"
+assert_cmd = "=2.2.2"
+wiremock = "=0.6.5"
 
 [profile.release]
 lto = "thin"

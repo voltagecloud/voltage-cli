@@ -1,0 +1,146 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CoinPrice API",
+    "description": "API for retrieving cryptocurrency price data",
+    "license": {
+      "name": ""
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Health check endpoint",
+        "operationId": "health_check",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/currency/{pair}/{time}": {
+      "get": {
+        "tags": [
+          "prices"
+        ],
+        "summary": "Get cryptocurrency price for a specific pair and time",
+        "operationId": "quote_price",
+        "parameters": [
+          {
+            "name": "pair",
+            "in": "path",
+            "description": "Currency pair (e.g., BTCUSD)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "time",
+            "in": "path",
+            "description": "Time in ISO format or 'now'",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Price data retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoinPriceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoinPriceResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CoinPriceResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CurrencyPrice"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ]
+      },
+      "CurrencyPair": {
+        "type": "string",
+        "enum": [
+          "BTCUSD"
+        ]
+      },
+      "CurrencyPrice": {
+        "type": "object",
+        "required": [
+          "pair",
+          "time",
+          "price"
+        ],
+        "properties": {
+          "pair": {
+            "$ref": "#/components/schemas/CurrencyPair"
+          },
+          "price": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "prices",
+      "description": "Cryptocurrency price operations"
+    },
+    {
+      "name": "health",
+      "description": "Health check operations"
+    }
+  ]
+}

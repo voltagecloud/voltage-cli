@@ -1,0 +1,22 @@
+# Dependabot keeps the exact pins in Cargo.toml, Cargo.lock, and the SHA-pinned
+# GitHub Actions current. Minor and patch Cargo updates arrive as one weekly
+# pull request; major updates get their own so they are reviewed deliberately.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      versions:
+        applies-to: version-updates
+        update-types: [minor, patch]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        applies-to: version-updates
+        update-types: [minor, patch]

@@ -1,0 +1,3 @@
+Contact: mailto:security@voltage.cloud
+Expires: 2027-09-18T00:00:00Z
+Preferred-Languages: en

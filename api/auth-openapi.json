@@ -1,0 +1,3313 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Auth Service API",
+    "description": "API documentation for Authentication Service - handles user authentication, organization management, API keys, and user roles",
+    "contact": {
+      "name": "Voltage Engineering",
+      "email": "engineering@voltage.cloud"
+    },
+    "license": {
+      "name": ""
+    },
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Local server"
+    }
+  ],
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "User login endpoint",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordLogin"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input format"
+          },
+          "401": {
+            "description": "Invalid credentials or unconfirmed email"
+          },
+          "429": {
+            "description": "Too many login attempts"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Refresh authentication token",
+        "operationId": "refresh_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRefreshToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Token refreshed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Auth"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input format"
+          },
+          "401": {
+            "description": "Invalid or expired refresh token"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/oauth/token": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "OAuth 2.0 token endpoint",
+        "description": "Accepts JSON and UTF-8 `application/x-www-form-urlencoded`. Form support is required by\n[RFC 8693 \u00a72.1](https://www.rfc-editor.org/rfc/rfc8693#section-2.1).",
+        "operationId": "oauth_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Organization access token or device login/refresh tokens issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthTokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, client, grant, target or scope; pending, denied, expired or slow device polling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "server_error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/oauth/device_authorization": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "operationId": "device_authorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/oauth/device/request": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "operationId": "device_request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InspectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/oauth/device/decision": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "operationId": "device_decision",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/oauth/revoke": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "operationId": "revoke",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/mfa_challenge": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "MFA challenge verification endpoint",
+        "operationId": "mfa_challenge",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SrpChallengeResponse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "MFA challenge successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input format"
+          },
+          "401": {
+            "description": "Invalid MFA code"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/forgot": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Request password reset code",
+        "operationId": "auth_forgot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Email"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Password reset code sent"
+          },
+          "400": {
+            "description": "Invalid email format"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Reset password with confirmation code",
+        "operationId": "auth_reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPwReset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password reset successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input format or weak password"
+          },
+          "401": {
+            "description": "Invalid or expired reset code"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/signup": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "User signup",
+        "operationId": "auth_signup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserSignup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User successfully signed up"
+          },
+          "400": {
+            "description": "Invalid input format or weak password"
+          },
+          "409": {
+            "description": "Email already exists"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/confirm": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Confirm user email",
+        "operationId": "auth_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserConfirm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Email confirmed successfully"
+          },
+          "400": {
+            "description": "Invalid input format"
+          },
+          "401": {
+            "description": "Invalid or expired confirmation code"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/request-confirm-code": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Request email confirmation code",
+        "operationId": "request_confirm_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Email"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Confirmation code sent"
+          },
+          "400": {
+            "description": "Invalid email format"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/auth/confirm-email-change": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Confirm email change with confirmation code",
+        "operationId": "confirm_email_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserConfirm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Email change confirmed successfully"
+          },
+          "400": {
+            "description": "Invalid input format"
+          },
+          "401": {
+            "description": "Invalid or expired confirmation code"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/organizations/{organization_id}/api_keys": {
+      "get": {
+        "tags": [
+          "api-keys"
+        ],
+        "summary": "Get all API keys for an organization",
+        "operationId": "get_all_api_keys",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of API keys retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKeyRead"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "api-keys"
+        ],
+        "summary": "Create a new API key",
+        "operationId": "create_api_key",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewApiKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "API key created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input data"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/api_keys/{api_key_id}": {
+      "delete": {
+        "tags": [
+          "api-keys"
+        ],
+        "summary": "Delete an API key",
+        "operationId": "delete_api_key",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "api_key_id",
+            "in": "path",
+            "description": "API key ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key deleted successfully"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "API key or organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations": {
+      "get": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Get all organizations (admin only)",
+        "operationId": "organizations",
+        "parameters": [
+          {
+            "name": "per_page",
+            "in": "query",
+            "description": "Number of items per page. Explicit values are clamped to 1-100.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "u-int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (1-indexed). Values below 1 are treated as 1.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "u-int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Filter by organization name",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of organizations retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationPagination"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Create a new organization",
+        "operationId": "create_organization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrganizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Organization created successfully"
+          },
+          "400": {
+            "description": "Invalid input data"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "409": {
+            "description": "Organization with this name already exists"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}": {
+      "get": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Get a specific organization by ID",
+        "operationId": "organization",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/users": {
+      "get": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Get all users in an organization",
+        "operationId": "organizations_users",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization users retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrganizationUser"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Get current user's organizations",
+        "operationId": "current_user_organizations",
+        "responses": {
+          "200": {
+            "description": "User organizations retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserOrganization"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/environments": {
+      "get": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Get environments for an organization",
+        "operationId": "current_user_organization_environments",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization environments retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrganizationEnvironment"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Update an existing environment",
+        "operationId": "update_environment",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Environment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Environment updated successfully"
+          },
+          "400": {
+            "description": "Invalid input data"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Environment not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Create a new environment",
+        "operationId": "create_environment",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Environment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Environment created successfully"
+          },
+          "400": {
+            "description": "Invalid input data"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/invitations": {
+      "get": {
+        "tags": [
+          "organizations",
+          "invitations"
+        ],
+        "summary": "Get invitations for an organization",
+        "operationId": "list_organization_invitations",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization invitations retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrganizationInvitation"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "organizations",
+          "invitations"
+        ],
+        "summary": "Invite a user to join an organization",
+        "operationId": "invite_organization_member",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "User invited successfully"
+          },
+          "400": {
+            "description": "Invalid input data"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "409": {
+            "description": "User already exists in organization"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/invitations/{invitation_id}": {
+      "delete": {
+        "tags": [
+          "organizations",
+          "invitations"
+        ],
+        "summary": "Cancel an organization invitation",
+        "operationId": "cancel_organization_invitation",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "description": "Invitation ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Invitation cancelled successfully"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Invitation not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/invitations/accept": {
+      "post": {
+        "tags": [
+          "organizations",
+          "invitations"
+        ],
+        "summary": "Accept an organization invitation",
+        "operationId": "accept_organization_invitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Invitation accepted successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationInvitation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid invitation code"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Invitation not found"
+          },
+          "410": {
+            "description": "Invitation expired or already used"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/invitations/{invitation_id}/accept": {
+      "post": {
+        "tags": [
+          "organizations",
+          "invitations"
+        ],
+        "summary": "Accept an organization invitation using the legacy ID-based route",
+        "operationId": "accept_organization_invitation_legacy",
+        "parameters": [
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "description": "Invitation ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Invitation accepted successfully"
+          },
+          "400": {
+            "description": "Invalid invitation code"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Invitation not found"
+          },
+          "410": {
+            "description": "Invitation expired or already used"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/name": {
+      "put": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Edit organization name",
+        "operationId": "edit_organization_name",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditOrganizationNameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Organization name updated successfully"
+          },
+          "400": {
+            "description": "Invalid input data"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions (TeamManager required)"
+          },
+          "404": {
+            "description": "Organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/users/{user_id}/permissions": {
+      "put": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Change user permissions in organization",
+        "operationId": "change_user_permissions",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeUserPermissionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User permissions updated successfully"
+          },
+          "400": {
+            "description": "Invalid permissions"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions (TeamManager required)"
+          },
+          "404": {
+            "description": "Organization or user not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/users/{user_id}": {
+      "delete": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Remove user from organization",
+        "operationId": "remove_user_from_organization",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "User removed from organization successfully"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions (TeamManager required)"
+          },
+          "404": {
+            "description": "Organization or user not found"
+          },
+          "409": {
+            "description": "Cannot remove organization owner"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{organization_id}/owner": {
+      "put": {
+        "tags": [
+          "organizations"
+        ],
+        "summary": "Transfer organization ownership",
+        "operationId": "transfer_organization_ownership",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferOwnershipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Ownership transferred successfully"
+          },
+          "400": {
+            "description": "Invalid new owner ID"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions (Owner required)"
+          },
+          "404": {
+            "description": "Organization or new owner not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/current": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Get current user information based on JWT token",
+        "operationId": "get_current_user",
+        "responses": {
+          "200": {
+            "description": "Current user information retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentUser"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}": {
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Delete (deactivate) a user",
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User deactivated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeactivatedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/organizations/{organization_id}/roles/{role}": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Add a role to a user in an organization",
+        "operationId": "add_user_role",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "role",
+            "in": "path",
+            "description": "Comma-separated role names to add",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User role added successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid role"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "User or organization not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Remove a role from a user in an organization",
+        "operationId": "delete_user_role",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "organization_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "role",
+            "in": "path",
+            "description": "Role name to remove",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User role removed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeactivatedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "User, organization, or role not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/organizations": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Get organizations for a specific user",
+        "operationId": "users_organizations",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User organizations retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserOrganization"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/search": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Search for users by email",
+        "operationId": "get_user",
+        "parameters": [
+          {
+            "name": "email",
+            "in": "query",
+            "description": "Email address to search for",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Email"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SimpleUser"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "No users found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/email": {
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Change authenticated user's email address",
+        "operationId": "change_user_email",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Email change initiated successfully"
+          },
+          "400": {
+            "description": "Invalid email format"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "409": {
+            "description": "Email already in use"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AcceptInvitationRequest": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Invitation code received via email"
+          }
+        }
+      },
+      "AddedResponse": {
+        "type": "object",
+        "required": [
+          "is_added"
+        ],
+        "properties": {
+          "is_added": {
+            "type": "boolean",
+            "description": "Whether the role was successfully added"
+          }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "environment_id",
+          "name",
+          "api_key",
+          "created_at",
+          "updated_at",
+          "permissions",
+          "valid_ips"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "environment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "api_key": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/Permissions"
+          },
+          "valid_ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ApiKeyRead": {
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "environment_id",
+          "name",
+          "created_at",
+          "updated_at",
+          "permissions",
+          "valid_ips"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "environment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/Permissions"
+          },
+          "valid_ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Auth": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "email",
+          "access_token",
+          "id_token",
+          "refresh_token",
+          "expires_in",
+          "expires_at",
+          "first_login"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "User ID"
+          },
+          "email": {
+            "type": "string",
+            "description": "User's email address"
+          },
+          "access_token": {
+            "type": "string",
+            "description": "JWT access token"
+          },
+          "id_token": {
+            "type": "string",
+            "description": "ID token (deprecated, will be removed)"
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "Refresh token for token renewal"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Token expiration time in seconds"
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Token expiration timestamp"
+          },
+          "first_login": {
+            "type": "boolean",
+            "description": "Whether this is the user's first login"
+          }
+        }
+      },
+      "AuthSession": {
+        "type": "object",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Auth",
+                "description": "Authentication information if login successful"
+              }
+            ]
+          },
+          "session": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionToken",
+                "description": "Session token information"
+              }
+            ]
+          },
+          "mfa_secret": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MfaSetup",
+                "description": "MFA setup information if required"
+              }
+            ]
+          }
+        }
+      },
+      "ChangeEmailRequest": {
+        "type": "object",
+        "required": [
+          "new_email"
+        ],
+        "properties": {
+          "new_email": {
+            "$ref": "#/components/schemas/Email",
+            "description": "New email address"
+          }
+        }
+      },
+      "ChangeUserPermissionsRequest": {
+        "type": "object",
+        "required": [
+          "permissions"
+        ],
+        "properties": {
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            },
+            "description": "List of permissions to assign to the user"
+          }
+        }
+      },
+      "ConsentRequest": {
+        "type": "object",
+        "required": [
+          "authorization_id",
+          "client_id",
+          "client_name",
+          "audience",
+          "scope"
+        ],
+        "properties": {
+          "authorization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_name": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateOrganizationRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the organization"
+          }
+        }
+      },
+      "CurrentUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "mfa_enabled",
+          "created_at",
+          "organizations"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "User ID"
+          },
+          "email": {
+            "type": "string",
+            "description": "User email address"
+          },
+          "mfa_enabled": {
+            "type": "boolean",
+            "description": "Whether MFA is enabled"
+          },
+          "created_at": {
+            "type": "string",
+            "description": "When the user was created"
+          },
+          "organizations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserOrganization"
+            },
+            "description": "Organizations the user belongs to"
+          }
+        }
+      },
+      "DateTime": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "DeactivatedResponse": {
+        "type": "object",
+        "required": [
+          "is_deactivated"
+        ],
+        "properties": {
+          "is_deactivated": {
+            "type": "boolean",
+            "description": "Whether the user was successfully deactivated"
+          }
+        }
+      },
+      "Decision": {
+        "type": "string",
+        "enum": [
+          "approve",
+          "deny"
+        ]
+      },
+      "DecisionRequest": {
+        "type": "object",
+        "required": [
+          "user_code",
+          "authorization_id",
+          "decision"
+        ],
+        "properties": {
+          "user_code": {
+            "type": "string"
+          },
+          "authorization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/Decision"
+          }
+        }
+      },
+      "DeviceRequest": {
+        "type": "object",
+        "required": [
+          "client_id"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DeviceResponse": {
+        "type": "object",
+        "required": [
+          "device_code",
+          "user_code",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in",
+          "interval"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string"
+          },
+          "user_code": {
+            "type": "string"
+          },
+          "verification_uri": {
+            "type": "string"
+          },
+          "verification_uri_complete": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "u-int64",
+            "minimum": 0
+          },
+          "interval": {
+            "type": "integer",
+            "format": "u-int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EditOrganizationNameRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "New name for the organization"
+          }
+        }
+      },
+      "Email": {
+        "type": "string",
+        "example": "user@example.com"
+      },
+      "Environment": {
+        "type": "object",
+        "required": [
+          "environment_id",
+          "organization_id",
+          "name"
+        ],
+        "properties": {
+          "environment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Environment ID"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Organization ID this environment belongs to"
+          },
+          "name": {
+            "type": "string",
+            "description": "Environment name"
+          }
+        }
+      },
+      "GrantType": {
+        "type": "string",
+        "enum": [
+          "urn:ietf:params:oauth:grant-type:token-exchange",
+          "urn:ietf:params:oauth:grant-type:device_code",
+          "refresh_token"
+        ]
+      },
+      "GreaterThanZero": {
+        "type": "integer",
+        "format": "u-int64",
+        "minimum": 0
+      },
+      "InspectRequest": {
+        "type": "object",
+        "required": [
+          "user_code"
+        ],
+        "properties": {
+          "user_code": {
+            "type": "string"
+          }
+        }
+      },
+      "InviteUserRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "permissions"
+        ],
+        "properties": {
+          "email": {
+            "$ref": "#/components/schemas/Email",
+            "description": "Email address of the user to invite"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            },
+            "description": "Permissions to grant to the invited user"
+          }
+        }
+      },
+      "MfaSetup": {
+        "type": "object",
+        "required": [
+          "secret_code",
+          "setup_url"
+        ],
+        "properties": {
+          "secret_code": {
+            "type": "string",
+            "description": "Base32 encoded secret code for MFA setup"
+          },
+          "setup_url": {
+            "type": "string",
+            "description": "QR code URL for MFA setup"
+          }
+        }
+      },
+      "NewApiKey": {
+        "type": "object",
+        "required": [
+          "name",
+          "environment_id",
+          "permissions"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name for the API key"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional expiration date for the API key"
+          },
+          "environment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Environment ID this API key belongs to"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permissions granted to this API key"
+          },
+          "valid_ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "IP address restrictions for this API key (max 100)"
+          }
+        }
+      },
+      "OAuthError": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthTokenResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TokenExchangeResponse"
+          },
+          {
+            "$ref": "#/components/schemas/TokenResponse"
+          }
+        ]
+      },
+      "Organization": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OrganizationEnvironment": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "organization_id",
+          "organization_name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Environment ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "Environment name"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Organization ID"
+          },
+          "organization_name": {
+            "type": "string",
+            "description": "Organization name"
+          }
+        }
+      },
+      "OrganizationInvitation": {
+        "type": "object",
+        "required": [
+          "id",
+          "organization_id",
+          "email",
+          "state",
+          "permissions",
+          "created_at",
+          "expiry_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organization_id": {
+            "type": "string"
+          },
+          "email": {
+            "$ref": "#/components/schemas/Email"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OrganizationInvitationState"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            }
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "expiry_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "accepted_at": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DateTime"
+              }
+            ]
+          },
+          "cancelled_at": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DateTime"
+              }
+            ]
+          }
+        }
+      },
+      "OrganizationInvitationState": {
+        "type": "string",
+        "enum": [
+          "Pending",
+          "Accepted",
+          "Cancelled"
+        ]
+      },
+      "OrganizationPagination": {
+        "type": "object",
+        "required": [
+          "items",
+          "pagination_info"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Organization"
+            }
+          },
+          "pagination_info": {
+            "$ref": "#/components/schemas/PaginationInfo"
+          }
+        }
+      },
+      "OrganizationUser": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "email",
+          "mfa_enabled",
+          "permissions"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "User ID"
+          },
+          "email": {
+            "$ref": "#/components/schemas/Email",
+            "description": "User's email address"
+          },
+          "mfa_enabled": {
+            "type": "boolean",
+            "description": "Whether MFA is enabled"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            },
+            "description": "User's permissions in this organization"
+          }
+        }
+      },
+      "PaginationInfo": {
+        "type": "object",
+        "required": [
+          "total_pages",
+          "total_items",
+          "page",
+          "per_page",
+          "has_next_page",
+          "has_previous_page"
+        ],
+        "properties": {
+          "total_pages": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total number of pages"
+          },
+          "total_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total number of items"
+          },
+          "page": {
+            "$ref": "#/components/schemas/GreaterThanZero",
+            "description": "Current page number"
+          },
+          "per_page": {
+            "$ref": "#/components/schemas/GreaterThanZero",
+            "description": "Number of items per page"
+          },
+          "has_next_page": {
+            "type": "boolean",
+            "description": "When paginating forwards, are there more items?"
+          },
+          "has_previous_page": {
+            "type": "boolean",
+            "description": "When paginating backwards, are there more items?"
+          }
+        }
+      },
+      "PasswordLogin": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "$ref": "#/components/schemas/Email",
+            "description": "User's email address"
+          },
+          "password": {
+            "type": "string",
+            "description": "User's password"
+          }
+        }
+      },
+      "Permission": {
+        "type": "string",
+        "enum": [
+          "Read",
+          "Receive",
+          "Write",
+          "TeamManager",
+          "Billing",
+          "Owner",
+          "Administrator"
+        ]
+      },
+      "Permissions": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Permission"
+        }
+      },
+      "RevokeRequest": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "token"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "token_type_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Accepted for compatibility; lookup always uses the opaque refresh token."
+          }
+        }
+      },
+      "SessionToken": {
+        "type": "object",
+        "required": [
+          "token",
+          "email",
+          "is_cognito"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Session token"
+          },
+          "email": {
+            "type": "string",
+            "description": "User's email address"
+          },
+          "is_cognito": {
+            "type": "boolean",
+            "description": "Whether the session is managed by Cognito"
+          }
+        }
+      },
+      "SimpleUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "is_active"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "User ID"
+          },
+          "email": {
+            "type": "string",
+            "description": "User's email address"
+          },
+          "is_active": {
+            "type": "boolean",
+            "description": "Whether the user is active"
+          }
+        }
+      },
+      "SrpChallengeResponse": {
+        "type": "object",
+        "required": [
+          "session",
+          "code",
+          "email"
+        ],
+        "properties": {
+          "session": {
+            "type": "string",
+            "description": "Session token from previous authentication step"
+          },
+          "code": {
+            "type": "string",
+            "description": "MFA verification code"
+          },
+          "email": {
+            "$ref": "#/components/schemas/Email",
+            "description": "User's email address"
+          }
+        }
+      },
+      "TokenExchangeResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "issued_token_type",
+          "token_type",
+          "expires_in",
+          "scope"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "JWT whose organization claims contain only the requested organization"
+          },
+          "issued_token_type": {
+            "type": "string",
+            "description": "Always `urn:ietf:params:oauth:token-type:access_token`"
+          },
+          "token_type": {
+            "type": "string",
+            "description": "Always `Bearer`"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "u-int64",
+            "description": "Token lifetime in seconds",
+            "minimum": 0
+          },
+          "scope": {
+            "type": "string",
+            "description": "Space-delimited permissions carried by the issued token"
+          }
+        }
+      },
+      "TokenRequest": {
+        "type": "object",
+        "description": "OAuth token request. Required fields depend on the selected grant.",
+        "required": [
+          "grant_type"
+        ],
+        "properties": {
+          "grant_type": {
+            "$ref": "#/components/schemas/GrantType",
+            "description": "Token exchange, device code, or `refresh_token` grant"
+          },
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for device login and refresh; not required for token exchange"
+          },
+          "device_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for the device-code grant"
+          },
+          "refresh_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for the refresh-token grant"
+          },
+          "subject_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The login access token being exchanged"
+          },
+          "subject_token_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`urn:ietf:params:oauth:token-type:access_token` or `urn:ietf:params:oauth:token-type:jwt`"
+          },
+          "audience": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "UUID of the organization the issued token is confined to"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional space-delimited scope names for both exchange and refresh.\nExchange accepts organization permissions, for example `read write` (two scopes).\nDevice-session refresh accepts only `voltage:account` (one scope name).\nOAuth specifies this delimiter in [RFC 6749 \u00a73.3](https://www.rfc-editor.org/rfc/rfc6749#section-3.3)\nand [RFC 8693 \u00a72.1](https://www.rfc-editor.org/rfc/rfc8693#section-2.1)."
+          },
+          "requested_token_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional; only access tokens are issued"
+          },
+          "actor_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Delegation is not supported; any value is rejected"
+          }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "refresh_token",
+          "expires_in",
+          "scope"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string"
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "u-int64",
+            "minimum": 0
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "TransferOwnershipRequest": {
+        "type": "object",
+        "required": [
+          "new_owner_id"
+        ],
+        "properties": {
+          "new_owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the user to transfer ownership to"
+          }
+        }
+      },
+      "UserConfirm": {
+        "type": "object",
+        "required": [
+          "email",
+          "confirmation_code"
+        ],
+        "properties": {
+          "email": {
+            "$ref": "#/components/schemas/Email"
+          },
+          "confirmation_code": {
+            "type": "string"
+          }
+        }
+      },
+      "UserOrganization": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "permissions"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            }
+          }
+        }
+      },
+      "UserPwReset": {
+        "type": "object",
+        "required": [
+          "email",
+          "confirmation_code",
+          "new_password"
+        ],
+        "properties": {
+          "email": {
+            "$ref": "#/components/schemas/Email"
+          },
+          "confirmation_code": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        }
+      },
+      "UserRefreshToken": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "refresh_token"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "User ID for token refresh"
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "Refresh token"
+          }
+        }
+      },
+      "UserSignup": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "$ref": "#/components/schemas/Email"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT token for user authentication via Bearer scheme"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "Authentication endpoints"
+    },
+    {
+      "name": "api-keys",
+      "description": "API key management endpoints"
+    },
+    {
+      "name": "organizations",
+      "description": "Organization management endpoints"
+    },
+    {
+      "name": "users",
+      "description": "User management endpoints"
+    },
+    {
+      "name": "environments",
+      "description": "Environment management endpoints"
+    },
+    {
+      "name": "invitations",
+      "description": "Organization invitation endpoints"
+    },
+    {
+      "name": "health",
+      "description": "Health check endpoint"
+    },
+    {
+      "name": "metrics",
+      "description": "Metrics endpoint"
+    }
+  ]
+}

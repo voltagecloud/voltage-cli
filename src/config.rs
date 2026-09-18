@@ -1,15 +1,31 @@
-use crate::{Error, Result, cli};
-use clap::ArgMatches;
+//! Settings, saved credentials, and the private files under the configuration directory.
+//!
+//! Every file the CLI writes here is owner-only and written atomically. Credentials default
+//! to the operating system store; file storage is an explicit choice with the same
+//! ownership and permission checks on every read.
+
+use crate::{Error, Result, secret::Secret};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
+use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub const API_URL: &str = "https://voltageapi.com/v1";
 pub const AUTH_URL: &str = "https://auth.voltage.cloud/api/v1";
+
+const CONFIG_FILE: &str = "config.toml";
+const CREDENTIALS_DIR: &str = "credentials";
+const LOCK_FILE: &str = "credentials.lock";
+const KEYRING_SERVICE: &str = "voltage-cli";
+const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+const LOCK_RETRY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -18,142 +34,263 @@ pub struct Config {
     #[serde(default)]
     pub accounts: BTreeMap<String, Account>,
 }
+
+/// A named organization, environment, and credential selected together.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {
-    pub organization_id: String,
-    pub environment_id: String,
+    pub organization_id: Uuid,
+    pub environment_id: Uuid,
     pub account: String,
 }
+
+/// How a saved credential was obtained.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountKind {
+    /// A browser login whose tokens refresh and can be revoked.
+    User,
+    /// An environment API key imported with its scope binding.
+    ApiKey,
+}
+
+/// Where a saved credential's secret lives.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialStore {
+    /// The operating system credential store.
+    Keychain,
+    /// An owner-only file under the configuration directory.
+    File,
+}
+
+/// Non-secret facts about one saved credential.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Account {
-    pub store: String,
-    pub kind: String,
+    pub store: CredentialStore,
+    pub kind: AccountKind,
     pub email: Option<String>,
-    pub organization_id: Option<String>,
-    pub environment_id: Option<String>,
+    pub organization_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     pub auth_url: String,
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct Credential {
-    pub api_key: Option<String>,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
-    pub expires_at: Option<u64>,
+
+/// A browser login's tokens and identity.
+pub struct Login {
+    pub access_token: Secret,
+    pub refresh_token: Secret,
+    /// Unix seconds after which the access token needs a refresh.
+    pub expires_at: u64,
     pub user_id: Option<String>,
     pub email: Option<String>,
 }
-impl Drop for Credential {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        for v in [
-            &mut self.api_key,
-            &mut self.access_token,
-            &mut self.refresh_token,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            v.zeroize();
+
+/// A saved credential in its typed form.
+pub enum Credential {
+    ApiKey(Secret),
+    Login(Login),
+}
+
+/// Storage form of a credential, read from the store and validated into `Credential`.
+#[derive(Deserialize)]
+struct StoredCredential {
+    api_key: Option<Zeroizing<String>>,
+    access_token: Option<Zeroizing<String>>,
+    refresh_token: Option<Zeroizing<String>>,
+    expires_at: Option<u64>,
+    user_id: Option<String>,
+    email: Option<String>,
+}
+
+impl TryFrom<StoredCredential> for Credential {
+    type Error = Error;
+
+    fn try_from(stored: StoredCredential) -> Result<Self> {
+        let invalid = || Error::auth("Invalid saved credential");
+        match (stored.api_key, stored.access_token, stored.refresh_token) {
+            (Some(api_key), None, None) => Ok(Self::ApiKey(api_key.into())),
+            (None, Some(access_token), Some(refresh_token)) => Ok(Self::Login(Login {
+                access_token: access_token.into(),
+                refresh_token: refresh_token.into(),
+                expires_at: stored.expires_at.unwrap_or(0),
+                user_id: stored.user_id,
+                email: stored.email,
+            })),
+            _ => Err(invalid()),
         }
     }
 }
+
+/// Storage form of a credential borrowed for writing; the same fields as `StoredCredential`.
+#[derive(Serialize)]
+struct StoredCredentialRef<'a> {
+    api_key: Option<&'a str>,
+    access_token: Option<&'a str>,
+    refresh_token: Option<&'a str>,
+    expires_at: Option<u64>,
+    user_id: Option<&'a str>,
+    email: Option<&'a str>,
+}
+
+impl<'a> From<&'a Credential> for StoredCredentialRef<'a> {
+    fn from(credential: &'a Credential) -> Self {
+        match credential {
+            Credential::ApiKey(key) => Self {
+                api_key: Some(key.expose()),
+                access_token: None,
+                refresh_token: None,
+                expires_at: None,
+                user_id: None,
+                email: None,
+            },
+            Credential::Login(login) => Self {
+                api_key: None,
+                access_token: Some(login.access_token.expose()),
+                refresh_token: Some(login.refresh_token.expose()),
+                expires_at: Some(login.expires_at),
+                user_id: login.user_id.as_deref(),
+                email: login.email.as_deref(),
+            },
+        }
+    }
+}
+
+/// The organization, environments, and resources a command acts on.
+#[derive(Default)]
+pub struct Scope {
+    pub org: Option<Uuid>,
+    pub envs: Vec<Uuid>,
+    pub wallet: Option<Uuid>,
+    pub webhook: Option<Uuid>,
+    pub account: Option<String>,
+}
+
+impl Scope {
+    pub fn require_org(&self) -> Result<Uuid> {
+        self.org.ok_or_else(|| Error::usage("--org is required"))
+    }
+
+    /// Operations bound to one environment refuse an ambiguous list.
+    pub fn single_env(&self) -> Result<Uuid> {
+        match self.envs.as_slice() {
+            [env] => Ok(*env),
+            _ => Err(Error::usage(
+                "Exactly one --env is required for this operation",
+            )),
+        }
+    }
+}
+
+/// Scope-affecting inputs resolved from flags, a profile, or ambient variables.
+pub struct ScopeSelection {
+    pub profile: Option<String>,
+    pub account: Option<String>,
+    pub org: Option<Uuid>,
+    pub envs: Vec<Uuid>,
+    pub wallet: Option<Uuid>,
+    pub webhook: Option<Uuid>,
+}
+
+/// The configuration directory: `--config-dir`, then `VOLTAGE_CONFIG_DIR`, then XDG.
+pub fn directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    let dir = explicit
+        .or_else(|| std::env::var_os("VOLTAGE_CONFIG_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+                })
+                .join("voltage")
+        });
+    if !dir.is_absolute() {
+        return Err(Error::usage(
+            "The configuration directory must be an absolute path",
+        ));
+    }
+    Ok(dir)
+}
+
 pub struct Settings {
     pub dir: PathBuf,
     pub config: Config,
 }
-#[derive(Default)]
-pub struct Scope {
-    pub org: Option<String>,
-    pub envs: Vec<String>,
-    pub wallet: Option<String>,
-    pub webhook: Option<String>,
-    pub account: Option<String>,
-}
 
 impl Settings {
-    pub fn load(m: &ArgMatches) -> Result<Self> {
-        let dir = cli::value(m, "config-dir")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("VOLTAGE_CONFIG_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| {
-                std::env::var_os("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-                    })
-                    .join("voltage")
-            });
-        if !dir.is_absolute() {
-            return Err(Error::usage(
-                "The configuration directory must be an absolute path",
-            ));
-        }
-        let path = dir.join("config.toml");
-        let config = if path.exists() {
-            private_dir(&dir)?;
-            check_private(&path)?;
-            toml::from_str(&fs::read_to_string(path)?)
-                .map_err(|_| Error::usage("Invalid config.toml"))?
-        } else {
-            Config::default()
-        };
+    /// Read `config.toml` from an absolute directory, or start empty when it does not exist.
+    pub fn open(dir: PathBuf) -> Result<Self> {
+        let config = read_config(&dir)?;
         Ok(Self { dir, config })
     }
+
+    /// Re-read the configuration after taking the lock, so concurrent edits are not lost.
+    pub fn reload(&mut self) -> Result<()> {
+        self.config = read_config(&self.dir)?;
+        Ok(())
+    }
+
     pub fn save(&self) -> Result<()> {
         private_dir(&self.dir)?;
-        atomic_write(
-            &self.dir.join("config.toml"),
-            toml::to_string_pretty(&self.config)
-                .map_err(Error::io)?
-                .as_bytes(),
-        )
+        let text = toml::to_string_pretty(&self.config)
+            .map_err(|error| Error::transport(error.to_string()))?;
+        atomic_write(&self.dir.join(CONFIG_FILE), text.as_bytes())
     }
-    pub fn scope(&self, m: &ArgMatches) -> Result<Scope> {
-        let profile = cli::value(m, "profile")
+
+    /// A profile selects everything together and ignores ambient variables; otherwise
+    /// explicit flags override `VOLTAGE_*` variables.
+    pub fn scope(&self, selection: ScopeSelection) -> Result<Scope> {
+        let profile = selection
+            .profile
+            .as_deref()
             .map(|name| {
                 self.config
                     .profiles
-                    .get(&name)
+                    .get(name)
                     .ok_or_else(|| Error::usage(format!("Unknown profile {name}")))
             })
             .transpose()?;
-        let from_env = |name: &str| {
-            if profile.is_none() {
-                std::env::var(name).ok()
-            } else {
-                None
+        let ambient = |name: &str| -> Result<Option<Uuid>> {
+            if profile.is_some() {
+                return Ok(None);
+            }
+            std::env::var(name)
+                .ok()
+                .map(|value| {
+                    Uuid::parse_str(&value)
+                        .map_err(|_| Error::usage(format!("Expected UUID, got {value}")))
+                })
+                .transpose()
+        };
+        let org = match selection.org {
+            Some(org) => Some(org),
+            None => match profile {
+                Some(profile) => Some(profile.organization_id),
+                None => ambient("VOLTAGE_ORGANIZATION_ID")?,
+            },
+        };
+        let envs = if !selection.envs.is_empty() {
+            selection.envs
+        } else {
+            match profile {
+                Some(profile) => vec![profile.environment_id],
+                None => ambient("VOLTAGE_ENVIRONMENT_ID")?.into_iter().collect(),
             }
         };
-        let org = cli::value(m, "org")
-            .or_else(|| profile.map(|p| p.organization_id.clone()))
-            .or_else(|| from_env("VOLTAGE_ORGANIZATION_ID"));
-        let explicit_envs = cli::values(m, "env");
-        let envs = if !explicit_envs.is_empty() {
-            explicit_envs
-        } else {
-            profile
-                .map(|p| vec![p.environment_id.clone()])
-                .or_else(|| from_env("VOLTAGE_ENVIRONMENT_ID").map(|e| vec![e]))
-                .unwrap_or_default()
+        let wallet = match selection.wallet {
+            Some(wallet) => Some(wallet),
+            None => ambient("VOLTAGE_WALLET_ID")?,
         };
-        let scope = Scope {
+        Ok(Scope {
             org,
             envs,
-            wallet: cli::value(m, "wallet").or_else(|| from_env("VOLTAGE_WALLET_ID")),
-            webhook: cli::value(m, "webhook"),
-            account: cli::value(m, "account").or_else(|| profile.map(|p| p.account.clone())),
-        };
-        for id in scope
-            .org
-            .iter()
-            .chain(scope.envs.iter())
-            .chain(scope.wallet.iter())
-            .chain(scope.webhook.iter())
-        {
-            validate_uuid(id)?;
-        }
-        Ok(scope)
+            wallet,
+            webhook: selection.webhook,
+            account: selection
+                .account
+                .or_else(|| profile.map(|profile| profile.account.clone())),
+        })
     }
+
+    /// The saved credential a command uses: the selected one, or the only one.
     pub fn account_name(&self, scope: &Scope) -> Result<String> {
         if let Some(name) = &scope.account {
             if !self.config.accounts.contains_key(name) {
@@ -161,72 +298,95 @@ impl Settings {
             }
             return Ok(name.clone());
         }
-        match self.config.accounts.len() {
-            0 => Err(Error::auth("Run voltage login or provide VOLTAGE_API_KEY")),
-            1 => Ok(self.config.accounts.keys().next().unwrap().clone()),
-            _ => Err(Error::usage(
+        let mut names = self.config.accounts.keys();
+        match (names.next(), names.next()) {
+            (None, _) => Err(Error::auth("Run voltage login or provide VOLTAGE_API_KEY")),
+            (Some(name), None) => Ok(name.clone()),
+            (Some(_), Some(_)) => Err(Error::usage(
                 "Multiple credentials are saved; select --account or --profile",
             )),
         }
     }
+
+    pub fn account(&self, name: &str) -> Result<&Account> {
+        self.config
+            .accounts
+            .get(name)
+            .ok_or_else(|| Error::auth("Unknown credential"))
+    }
+
     fn credential_path(&self, name: &str) -> PathBuf {
         use sha2::{Digest, Sha256};
-        self.dir.join("credentials").join(format!(
+        self.dir.join(CREDENTIALS_DIR).join(format!(
             "{}.json",
             hex::encode(Sha256::digest(name.as_bytes()))
         ))
     }
+
+    /// The keyring entry is bound to the configuration directory so two directories
+    /// never share a saved credential.
+    fn keyring_entry(&self, name: &str) -> Result<keyring::Entry> {
+        keyring::Entry::new(KEYRING_SERVICE, &format!("{}:{name}", self.dir.display()))
+            .map_err(|_| Error::auth("Cannot access OS credential store"))
+    }
+
     pub fn read_credential(&self, name: &str) -> Result<Credential> {
-        let account = self
-            .config
-            .accounts
-            .get(name)
-            .ok_or_else(|| Error::auth("Unknown credential"))?;
-        let mut raw = if account.store == "file" {
-            read_private(&self.credential_path(name))?
-        } else {
-            keyring::Entry::new("voltage-cli",&format!("{}:{name}",self.dir.display())).map_err(|_|Error::auth("Cannot access OS credential store"))?
-                .get_password().map_err(|_|Error::auth("Cannot read OS credential store; unlock it or log in with --credential-store file"))?
+        let raw: Zeroizing<String> = match self.account(name)?.store {
+            CredentialStore::File => read_private(&self.credential_path(name))?,
+            CredentialStore::Keychain => {
+                Zeroizing::new(self.keyring_entry(name)?.get_password().map_err(|_| {
+                    Error::auth(
+                        "Cannot read OS credential store; unlock it or log in with --credential-store file",
+                    )
+                })?)
+            }
         };
-        let result =
-            serde_json::from_str(&raw).map_err(|_| Error::auth("Invalid saved credential"));
-        use zeroize::Zeroize;
-        raw.zeroize();
-        result
+        let stored: StoredCredential =
+            serde_json::from_str(&raw).map_err(|_| Error::auth("Invalid saved credential"))?;
+        Credential::try_from(stored)
     }
-    pub fn write_credential(&self, name: &str, store: &str, credential: &Credential) -> Result<()> {
-        let mut raw = serde_json::to_string(credential)?;
-        let result = if store == "file" {
-            private_dir(&self.dir)?;
-            private_dir(&self.dir.join("credentials"))?;
-            atomic_write(&self.credential_path(name), raw.as_bytes())
-        } else {
-            keyring::Entry::new("voltage-cli",&format!("{}:{name}",self.dir.display())).map_err(|_|Error::auth("Cannot access OS credential store"))?
-            .set_password(&raw).map_err(|_|Error::auth("Cannot write OS credential store; explicitly select --credential-store file if needed"))
-        };
-        use zeroize::Zeroize;
-        raw.zeroize();
-        result
+
+    pub fn write_credential(
+        &self,
+        name: &str,
+        store: CredentialStore,
+        credential: &Credential,
+    ) -> Result<()> {
+        let raw = Zeroizing::new(serde_json::to_string(&StoredCredentialRef::from(
+            credential,
+        ))?);
+        match store {
+            CredentialStore::File => {
+                private_dir(&self.dir)?;
+                private_dir(&self.dir.join(CREDENTIALS_DIR))?;
+                atomic_write(&self.credential_path(name), raw.as_bytes())
+            }
+            CredentialStore::Keychain => self
+                .keyring_entry(name)?
+                .set_password(&raw)
+                .map_err(|_| {
+                    Error::auth(
+                        "Cannot write OS credential store; explicitly select --credential-store file if needed",
+                    )
+                }),
+        }
     }
+
     pub fn delete_credential(&self, name: &str) -> Result<()> {
-        let account = self
-            .config
-            .accounts
-            .get(name)
-            .ok_or_else(|| Error::auth("Unknown credential"))?;
-        if account.store == "file" {
-            fs::remove_file(self.credential_path(name))?;
-        } else {
-            keyring::Entry::new("voltage-cli", &format!("{}:{name}", self.dir.display()))
-                .map_err(|_| Error::auth("Cannot access OS credential store"))?
+        match self.account(name)?.store {
+            CredentialStore::File => fs::remove_file(self.credential_path(name))?,
+            CredentialStore::Keychain => self
+                .keyring_entry(name)?
                 .delete_credential()
-                .map_err(|_| Error::auth("Cannot remove saved credential"))?;
+                .map_err(|_| Error::auth("Cannot remove saved credential"))?,
         }
         Ok(())
     }
+
+    /// Exclusive process lock for credential and configuration writes.
     pub async fn lock(&self) -> Result<File> {
         private_dir(&self.dir)?;
-        let path = self.dir.join("credentials.lock");
+        let path = self.dir.join(LOCK_FILE);
         if path.exists() {
             check_private(&path)?;
         }
@@ -240,27 +400,33 @@ impl Settings {
         }
         let file = options.open(path)?;
         check_owner(&file.metadata()?)?;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + LOCK_TIMEOUT;
         loop {
-            match fs2::FileExt::try_lock_exclusive(&file) {
+            match file.try_lock() {
                 Ok(()) => return Ok(file),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(TryLockError::WouldBlock) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Err(Error::io("Timed out waiting for credential lock"));
+                        return Err(Error::transport("Timed out waiting for credential lock"));
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(LOCK_RETRY).await;
                 }
-                Err(e) => return Err(e.into()),
+                Err(TryLockError::Error(error)) => return Err(error.into()),
             }
         }
     }
 }
 
-pub fn validate_uuid(value: &str) -> Result<()> {
-    uuid::Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| Error::usage(format!("Expected UUID, got {value}")))
+fn read_config(dir: &Path) -> Result<Config> {
+    let path = dir.join(CONFIG_FILE);
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    private_dir(dir)?;
+    check_private(&path)?;
+    toml::from_str(&fs::read_to_string(path)?).map_err(|_| Error::usage("Invalid config.toml"))
 }
+
+/// Create or verify an owner-only directory that is not a symlink.
 pub fn private_dir(path: &Path) -> Result<()> {
     if !path.exists() {
         fs::create_dir_all(path)?;
@@ -287,6 +453,8 @@ pub fn private_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Verify an existing owner-only regular file that is not a symlink.
 pub fn check_private(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path)?;
     check_owner(&meta)?;
@@ -307,7 +475,9 @@ pub fn check_private(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub fn read_private(path: &Path) -> Result<String> {
+
+/// Read a private file into zeroized memory, rechecking the opened file's ownership and mode.
+pub fn read_private(path: &Path) -> Result<Zeroizing<String>> {
     check_private(path)?;
     let mut options = OpenOptions::new();
     options.read(true);
@@ -326,16 +496,18 @@ pub fn read_private(path: &Path) -> Result<String> {
             return Err(Error::usage("Credential file is not private"));
         }
     }
-    let mut raw = String::new();
+    let mut raw = Zeroizing::new(String::new());
     file.read_to_string(&mut raw)?;
     Ok(raw)
 }
+
 fn check_owner(meta: &fs::Metadata) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        // geteuid has no arguments, no side effects, and cannot fail.
-        if meta.uid() != unsafe { libc::geteuid() } {
+        // SAFETY: geteuid takes no arguments, has no side effects, and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
             return Err(Error::usage(
                 "Private storage must be owned by the current user",
             ));
@@ -345,6 +517,8 @@ fn check_owner(meta: &fs::Metadata) -> Result<()> {
     let _ = meta;
     Ok(())
 }
+
+/// Reserve a new owner-only file; an existing path is an error so secrets never overwrite.
 pub fn new_private(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -355,20 +529,22 @@ pub fn new_private(path: &Path) -> Result<File> {
     }
     options
         .open(path)
-        .map_err(|e| Error::usage(format!("Cannot reserve output {}: {e}", path.display())))
+        .map_err(|error| Error::usage(format!("Cannot reserve output {}: {error}", path.display())))
 }
+
+/// Write through a private temporary file and rename, so readers never see a partial file.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     if path.exists() {
         check_private(path)?;
     }
-    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let temp = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let result = (|| {
         let mut file = new_private(&temp)?;
         file.write_all(data)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
         #[cfg(unix)]
-        File::open(path.parent().unwrap())?.sync_all()?;
+        File::open(path.parent().unwrap_or(Path::new("/")))?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
@@ -376,50 +552,152 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     }
     result
 }
-pub fn read_secret(source: &str) -> Result<String> {
-    let mut value = String::new();
-    if source == "-" {
-        std::io::stdin().read_to_string(&mut value)?;
-    } else {
-        value = read_private(Path::new(source))?;
-    }
-    let value = value.trim().to_owned();
+
+/// Where a command reads a payload or credential from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InputSource {
+    Stdin,
+    File(PathBuf),
+}
+
+/// A credential from stdin or a private file, trimmed and never empty.
+pub fn read_secret(source: &InputSource) -> Result<Secret> {
+    let raw = match source {
+        InputSource::Stdin => {
+            let mut raw = Zeroizing::new(String::new());
+            std::io::stdin().read_to_string(&mut raw)?;
+            raw
+        }
+        InputSource::File(path) => read_private(path)?,
+    };
+    let value = raw.trim();
     if value.is_empty() {
         return Err(Error::usage("Credential is empty"));
     }
-    Ok(value)
+    Ok(Secret::new(value.to_owned()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings(dir: PathBuf) -> Settings {
+        Settings {
+            dir,
+            config: Config::default(),
+        }
+    }
+
     #[test]
     fn private_files_refuse_overwrite() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("secret");
-        new_private(&p).unwrap();
-        assert!(new_private(&p).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        new_private(&path).unwrap();
+        assert!(new_private(&path).is_err());
     }
+
     #[test]
     fn profiles_ignore_ambient_scope() {
-        let mut s = Settings {
-            dir: PathBuf::from("/tmp/test"),
-            config: Config::default(),
-        };
-        s.config.profiles.insert(
+        let mut settings = settings(PathBuf::from("/tmp/test"));
+        settings.config.profiles.insert(
             "stage".into(),
             Profile {
-                organization_id: uuid::Uuid::nil().to_string(),
-                environment_id: uuid::Uuid::nil().to_string(),
+                organization_id: Uuid::nil(),
+                environment_id: Uuid::nil(),
                 account: "user".into(),
             },
         );
-        let m = cli::command()
-            .try_get_matches_from(["voltage", "wallets", "list", "--profile", "stage"])
+        let scope = settings
+            .scope(ScopeSelection {
+                profile: Some("stage".into()),
+                account: None,
+                org: None,
+                envs: Vec::new(),
+                wallet: None,
+                webhook: None,
+            })
             .unwrap();
+        assert_eq!(scope.account.as_deref(), Some("user"));
+        assert_eq!(scope.org, Some(Uuid::nil()));
+        assert_eq!(scope.envs, [Uuid::nil()]);
+    }
+
+    #[test]
+    fn stored_credentials_round_trip_and_reject_mixed_records() {
+        let login = Credential::Login(Login {
+            access_token: Secret::new("access".into()),
+            refresh_token: Secret::new("refresh".into()),
+            expires_at: 7,
+            user_id: Some("user".into()),
+            email: None,
+        });
+        let text = serde_json::to_string(&StoredCredentialRef::from(&login)).unwrap();
         assert_eq!(
-            s.scope(cli::leaf(&m).1).unwrap().account.as_deref(),
-            Some("user")
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!({
+                "api_key": null, "access_token": "access", "refresh_token": "refresh",
+                "expires_at": 7, "user_id": "user", "email": null
+            })
         );
+        let stored: StoredCredential = serde_json::from_str(&text).unwrap();
+        let Credential::Login(restored) = Credential::try_from(stored).unwrap() else {
+            panic!("expected a login");
+        };
+        assert_eq!(restored.expires_at, 7);
+        assert_eq!(restored.refresh_token.expose(), "refresh");
+        let mixed: StoredCredential =
+            serde_json::from_str(r#"{"api_key":"k","access_token":"a","refresh_token":"r"}"#)
+                .unwrap();
+        assert!(Credential::try_from(mixed).is_err());
+    }
+
+    #[test]
+    fn account_records_keep_their_config_spelling() {
+        let account = Account {
+            store: CredentialStore::File,
+            kind: AccountKind::ApiKey,
+            email: None,
+            organization_id: None,
+            environment_id: None,
+            auth_url: AUTH_URL.into(),
+        };
+        let text = toml::to_string(&account).unwrap();
+        assert!(text.contains("store = \"file\""), "{text}");
+        assert!(text.contains("kind = \"api_key\""), "{text}");
+    }
+
+    #[test]
+    fn file_credentials_round_trip_through_private_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut settings = settings(dir.path().to_path_buf());
+        settings.config.accounts.insert(
+            "key".into(),
+            Account {
+                store: CredentialStore::File,
+                kind: AccountKind::ApiKey,
+                email: None,
+                organization_id: None,
+                environment_id: None,
+                auth_url: AUTH_URL.into(),
+            },
+        );
+        settings
+            .write_credential(
+                "key",
+                CredentialStore::File,
+                &Credential::ApiKey(Secret::new("api-key".into())),
+            )
+            .unwrap();
+        let Credential::ApiKey(key) = settings.read_credential("key").unwrap() else {
+            panic!("expected an API key");
+        };
+        assert_eq!(key.expose(), "api-key");
+        settings.delete_credential("key").unwrap();
+        assert!(settings.read_credential("key").is_err());
     }
 }

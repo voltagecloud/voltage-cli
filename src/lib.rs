@@ -1,10 +1,21 @@
-pub mod api;
-pub mod auth;
-pub mod cli;
-pub mod config;
-pub mod error;
-pub mod input;
-pub mod output;
-pub mod registry;
+//! Command-line access to the Voltage API.
+//!
+//! `config`, `registry`, and `secret` are public so integration tests can seed saved
+//! credentials and walk the operation contract; everything else is process-internal.
 
-pub use error::{Error, Result};
+mod api;
+mod auth;
+mod backoff;
+mod cli;
+pub mod config;
+mod error;
+mod input;
+mod output;
+mod payment;
+mod price;
+pub mod registry;
+pub mod secret;
+mod startup;
+
+pub(crate) use error::{Error, Result};
+pub use startup::run;

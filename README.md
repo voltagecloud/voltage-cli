@@ -1,192 +1,197 @@
 # Voltage CLI
 
-`voltage` provides native command-line access to the [Voltage API](https://voltageapi.com/v1/docs). It includes commands for all 47 operations in the checked-in API contract, account/environment discovery, and OAuth device login.
+`voltage` is the command-line client for the [Voltage API](https://voltageapi.com/v1/docs). It covers wallets, payments, quotes, lines of credit, bills, webhooks, and checkout, and it signs you in through your browser or with an environment API key.
 
-**Release status:** browser login requires the two auth-service PRs and frontend approval page in [the integration guide](docs/integration.md). Local validation is recorded in [verification](docs/verification.md). Complete staging acceptance before publishing a release.
+## Install
 
-## Install from source
+Download the archive for your platform from the [releases page](https://github.com/voltagecloud/voltage-cli/releases). Each release ships macOS (Apple Silicon and Intel), Linux (x86-64 and ARM64), and Windows (x86-64) archives with shell completions, a `SHA256SUMS` file, and a Homebrew formula (`voltage.rb`). Extract the archive and put `voltage` (or `voltage.exe`) on your `PATH`.
 
-Install [Rust](https://rustup.rs), then:
+To build from source, install [Rust](https://rustup.rs) and run:
 
 ```sh
 cargo install --path . --locked
-voltage --help
+voltage --version
 ```
 
-The repository pins its build toolchain in `rust-toolchain.toml`. On Linux, build with a C compiler, `pkg-config`, and the D-Bus development library (`libdbus-1-dev` on Debian/Ubuntu). At runtime, native credential storage requires an unlocked Secret Service implementation. Use explicit file storage on headless machines.
+The toolchain is pinned in `rust-toolchain.toml`; no system libraries are needed.
 
-The release workflow builds archives for Apple Silicon/Intel macOS and ARM64/x86-64 Linux, includes completions and SHA-256 checksums, and generates a Homebrew formula. Release publishing is manual and gated on staging validation. Windows credential support is included in source; Windows packaging is outside this release.
+Credentials are stored in the macOS Keychain, the Linux Secret Service (over D-Bus, with no system library required), or the Windows Credential Manager. On a headless Linux machine without an unlocked Secret Service, pass `--credential-store file` when you log in or import a key.
 
-### Staging wrapper
-
-The development staging wrapper pins the API and auth endpoints, isolates CLI state under `.work/staging/cli`, and reads the four Voltage variables in the repository's private `.env` without evaluating it as shell code:
-
-```sh
-cp .env.example .env
-# Replace placeholders with one matching staging environment and test-network wallet.
-chmod 600 .env
-./scripts/voltage-staging --build
-./scripts/voltage-staging auth status
-./scripts/voltage-staging wallets list --json
-```
-
-`VOLTAGE_API_KEY`, `VOLTAGE_ORGANIZATION_ID`, and `VOLTAGE_ENVIRONMENT_ID` are required. `VOLTAGE_WALLET_ID` is an optional default for commands accepting `--wallet`; an explicit flag takes precedence. The wrapper refuses endpoint and config-directory overrides so staging commands cannot silently target another deployment. Use `target/debug/voltage` directly for other configurations.
-
-Before creating a payment, inspect the selected wallet and confirm that its reported network is a test network. Then a fixed-amount Lightning receive can be requested with:
-
-```sh
-./scripts/voltage-staging payments receive \
-  --currency btc --kind bolt11 --amount 150 --unit sats \
-  --qr --copy --json
-```
-
-## Authenticate
+## Quick start
 
 ```sh
 voltage login
-# SSH/headless machines:
-voltage login --no-browser --credential-store file
-voltage auth status
 voltage organizations list
 voltage environments list --org ORG_ID
-voltage logout
+voltage profiles create prod --org ORG_ID --env ENV_ID --account you@example.com
+voltage wallets list --profile prod
 ```
 
-Login prints a verification URL and code to stderr. Approve the matching code in your browser after your usual login and MFA. This grants your existing account permissions across its organizations. Profiles do **not** restrict those permissions.
+Replace `ORG_ID`, `ENV_ID`, and the other placeholders in this document with real UUIDs.
 
-Organization discovery uses the saved login token. Before organization API calls, the CLI exchanges that token for the selected organization's token. Exchange uses the account's saved auth endpoint and preserves its login and refresh credentials. Switching organizations performs a new exchange.
+## Authenticate
 
-Credentials default to macOS Keychain or Linux Secret Service. There is no automatic plaintext fallback. `--credential-store file` explicitly chooses owner-only files in an owner-only directory. Do not share this directory or commit it to source control. On Windows, use the native credential store.
-
-Save separate accounts with `voltage login --account work`. With multiple saved credentials, select `--account` or a profile. Access tokens refresh automatically under a process-shared lock; refresh tokens rotate. An interrupted refresh may require a new login. `logout` revokes the selected session before removing credentials; failures leave credentials available for another attempt. `logout --local` removes only local credentials. Already-issued access JWTs may remain valid until expiry.
-
-For automation, set `VOLTAGE_API_KEY` through your secret manager. To save an API key without placing it in shell history:
+`voltage login` prints a verification URL and a code, opens the URL in your browser, and waits for your approval after your usual login and MFA. Use `--no-browser` on a remote machine and open the URL yourself. The saved login refreshes its tokens automatically; the refresh token rotates.
 
 ```sh
-voltage auth import-key --account staging-key --org ORG_ID --env ENV_ID
-# Or pipe your secret manager's output:
-secret-manager-command | voltage auth import-key --stdin \
-  --account staging-key --org ORG_ID --env ENV_ID --credential-store file
+voltage login                                   # saved under your email address
+voltage login --account work                    # saved under a name of your choice
+voltage login --no-browser --credential-store file
+voltage auth status                             # identity and expiry, never the secret
+voltage logout                                  # revokes the session, then removes it
+voltage logout --local                          # removes local credentials only
 ```
 
-API-key scope bindings are supplied when importing and checked locally. Keys from `VOLTAGE_API_KEY` have unknown local scope; the server enforces their permissions. Organization/environment discovery requires a user login.
+A login grants the permissions your account already has. Profiles do not restrict them.
+
+For automation, use an environment API key. Import one so it never lands in shell history, or pass it through `VOLTAGE_API_KEY`:
+
+```sh
+voltage auth import-key --account ci --org ORG_ID --env ENV_ID
+secret-manager-command | voltage auth import-key --stdin --account ci --org ORG_ID --env ENV_ID
+VOLTAGE_API_KEY=... voltage wallets list --org ORG_ID
+```
+
+An imported key remembers the organization and environment it belongs to, and a command that selects a different one fails before any request is sent. `VOLTAGE_API_KEY` is used only when neither `--profile` nor `--account` is given. `organizations list` and `environments list` require a browser login.
+
+With several saved credentials, select one with `--account` or through a profile.
 
 ## Scope and profiles
+
+Resource IDs are positional. The enclosing scope comes from `--org`, `--env`, `--wallet`, and `--webhook`:
 
 ```sh
 voltage wallets list --org ORG_ID --env ENV_ID
 voltage wallets get WALLET_ID --org ORG_ID
+voltage payments list --org ORG_ID --env ENV_ID --env OTHER_ENV_ID
+```
+
+Without a profile, flags override `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMENT_ID`, and `VOLTAGE_WALLET_ID`. A profile bundles an organization, an environment, and a credential, and ignores those variables and `VOLTAGE_API_KEY`; flags still override its scope for one command.
+
+```sh
 voltage profiles create staging --org ORG_ID --env ENV_ID --account work
-voltage wallets list --profile staging
 voltage profiles list
 voltage profiles get staging
 voltage profiles delete staging
 ```
 
-Resource IDs are positional. Enclosing scope uses `--org`, `--env`, `--wallet`, and `--webhook`. UUID placeholders in this README must be replaced with real IDs.
+Configuration lives in `$XDG_CONFIG_HOME/voltage` or `~/.config/voltage`; override the directory with `VOLTAGE_CONFIG_DIR` or `--config-dir`. The directory and everything in it are owner-only.
 
-An explicit profile selects its organization, environment, and credential together, ignoring ambient scope and API-key variables. Explicit command flags override scope without changing the profile. Known API-key scope mismatches fail before submission. There is no global active profile.
+Only endpoints that filter by environment receive `--env`. Organization-wide commands say so in their help, and wallet mutations verify a supplied environment against the wallet before changing anything.
 
-Without a profile, scope flags override `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMENT_ID`, and the optional `VOLTAGE_WALLET_ID`. An explicit `--account` selects saved credentials; otherwise `VOLTAGE_API_KEY` wins, then a sole saved credential. Configuration lives in `$XDG_CONFIG_HOME/voltage` or `~/.config/voltage`; override with `VOLTAGE_CONFIG_DIR` or `--config-dir`.
+## Commands and help
 
-Only endpoints that support environment filtering receive that filter. Organization-wide commands identify that limitation in their help. Wallet mutations validate a supplied environment against the wallet first. An environment's name never determines its network.
-
-## Requests and payments
-
-Every body-bearing operation supports its complete API payload, including undocumented extension fields, without floating-point conversion:
+Commands mirror the API contract; see [the command reference](docs/commands.md) for the full list with routes. Every command and group has `--help`:
 
 ```sh
-voltage payments create --profile production --data @payment.json --json --yes
-cat payment.json | voltage payments create --profile production --data - --yes
+voltage --help
+voltage payments --help
+voltage payments receive --help
 ```
 
-Raw bodies and friendly body-building flags are mutually exclusive. Scope flags remain available and conflicting body/scope IDs are rejected. Unknown query parameters are rejected. Repeated documented filters and metadata work through their generated flags or `--query NAME=VALUE`:
-
-```sh
-voltage payments list --org ORG_ID --env ENV_ID \
-  --statuses completed --statuses failed --metadata order_id=123 --all
-```
-
-Common operations have friendly inputs; consult command help for complete flags:
-
-```sh
-voltage wallets create --profile staging --name treasury \
-  --network mutinynet --credit-line CREDIT_LINE_ID --limit 0
-voltage payments receive --profile staging --wallet WALLET_ID \
-  --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready
-voltage payments send --profile staging --wallet WALLET_ID \
-  --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --yes
-voltage payments send --profile staging --wallet WALLET_ID \
-  --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --yes
-voltage quotes create --profile staging --credit-line CREDIT_LINE_ID \
-  --network mutinynet --amount 10 --unit usd --to btc
-```
-
-Payment creation requires an explicit wallet. Amounts use checked integer conversion: BTC is represented in millisatoshis and USD in cents. Decimal values are accepted only when exactly representable in the requested unit. `--currency` identifies the send wallet currency; `--unit` identifies the payment amount currency. Network/provider fee limits exclude processing fees. JSON responses retain all original amount and fee fields. USD flows require an explicit `--quote`; use the API's documented quote ID for the selected request.
-
-The contract has a canonical request-shape gap for Taproot Asset sends. Raw documented JSON is available, but no Taproot Asset send convenience builder or verified-support claim is provided.
-
-### Submission and recovery
-
-An empty HTTP 202 means **accepted**, not completed. Use `--wait ready` for an invoice/address becoming available or `--wait completed` for settlement. `receiving` does not count as ready until the payer-facing request is present, and it never counts as completed. Waiting tolerates initial payment projection 404s and stops at `--timeout SECONDS` (default 60). The timeout exit includes the original resource ID.
-
-For BOLT11 receives, `--qr` renders the invoice as a compact terminal QR code and `--copy` copies the original invoice text to the system clipboard as soon as it is ready. Either flag implies `--wait ready` when no explicit wait is supplied; with `--wait completed`, the invoice is presented first and polling then continues through settlement. Waits print status changes and a notice every 15 seconds to stderr. QR and clipboard diagnostics also go to stderr, preserving JSON stdout for scripts. Clipboard unavailability produces a warning without misreporting the accepted payment as failed.
-
-Convenience creates generate a UUID before sending; `--id` preserves a supplied UUID. A private recovery journal under `requests/` records the ID, operation, scope, timestamp, and request hash before submission, without storing the body. Mutation requests are never retried automatically. After an ambiguous payment or treasury submission, the CLI makes one read of the original ID, bounded to five seconds. If the payment is visible, it reports acceptance; otherwise it returns exit 4 and an unknown outcome. An initially missing projection does not prove submission failed. Read the original payment ID before deciding whether to resubmit:
-
-```sh
-voltage payments get PAYMENT_ID --profile staging --wait completed --timeout 120
-```
-
-Reusing a journaled ID with a different payload is rejected. Keep the original request separately if you need to resubmit it. The journal does not promise server-side idempotency. Ctrl-C exits 130; a submitted payment continues on the server.
-
-Sends, treasury movements, deletes, disabling credit lines, and webhook key rotation require confirmation. Resolved scope and request details go to stderr. Noninteractive execution requires `--yes`, including raw JSON requests.
-
-## Output, secrets, and checkout
-
-TTY output is readable; piped output defaults to JSON. `--json` forces JSON; `--output ndjson` streams page/event envelopes. Diagnostics and prompts go to stderr. The stable result envelope is:
-
-```json
-{"http_status":202,"resource_id":"payment-uuid","outcome":"accepted","data":null}
-```
-
-API fields remain inside `data`. `--all --json` returns a `data.pages` array of intact page envelopes; NDJSON emits each page as it arrives. Cursor pagination is the default where supported; explicit offset pagination remains available. Use `--timeout` to bound pagination and waits.
-
-Credentials and known secret fields are redacted from normal output, including errors. Operations returning a one-time secret require `--output-file PATH` (new, private file; full JSON) or an explicit `--show-secrets` before making the request. A file must not already exist. Treat arbitrary metadata as potentially sensitive: automatic redaction cannot identify user-defined secrets.
-
-Checkout uses separate credentials and never falls back to your account key. Supply `VOLTAGE_CHECKOUT_TOKEN` for session reads or `VOLTAGE_STREAM_TOKEN` for event watching, or use `--token-file PATH` (private file) / `--token-file -`. Stream-token creation accepts the API's complete `checkout_tokens` body. Supply `--origin https://your-checkout.example` when required by the session. Session projection reads honor retry hints; `checkout events watch` reads SSE and emits event objects, and Ctrl-C exits cleanly. The connection is bounded by `--timeout` and does not reconnect automatically.
-
-## Shell completions
+Shell completions come from the same definitions:
 
 ```sh
 voltage completions bash > voltage.bash
 voltage completions zsh > _voltage
 voltage completions fish > voltage.fish
+voltage completions powershell > _voltage.ps1
 ```
 
-Help and completions come from the same command definitions. See [the operation registry](docs/commands.md) for the full command list.
+## Requests
+
+Every operation that takes a body accepts its complete API payload from a file or stdin. The JSON is sent exactly as given, including fields the CLI does not know about, and is limited to 16 MiB:
+
+```sh
+voltage payments create --profile prod --data @payment.json --yes
+cat payment.json | voltage payments create --profile prod --data - --yes
+```
+
+Common operations also offer friendly flags (`wallets create`, `wallets update`, `payments receive`, `payments send`, `quotes create`, `webhooks create`, `webhooks update`); `--help` lists them. Friendly flags and `--data` are mutually exclusive, and a payload whose IDs conflict with the selected scope is rejected.
+
+Documented query filters are flags named after the parameter. Parameters with a fixed set of values accept only those values, case-insensitively, and are sent in the contract's spelling. `--query NAME=VALUE` sets any documented parameter and can be repeated:
+
+```sh
+voltage payments list --profile prod --statuses completed --statuses failed \
+  --metadata order_id=123 --query sort_order=desc --all
+```
+
+`--all` follows pagination by cursor, which the API recommends and the CLI requests by default; endpoints that only page by offset are followed by offset and count. The API has deprecated explicit offset paging (`--offset`, `--pagination offset`) where cursors exist, and the CLI warns when you use it. `--timeout SECONDS` (default 60) bounds the whole request, including paging and waits.
+
+## Payments
+
+```sh
+voltage payments receive --profile prod --wallet WALLET_ID \
+  --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready
+voltage payments send --profile prod --wallet WALLET_ID \
+  --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --yes
+voltage payments send --profile prod --wallet WALLET_ID \
+  --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --yes
+voltage quotes create --profile prod --credit-line CREDIT_LINE_ID \
+  --network mutinynet --amount 10 --unit usd --to btc
+```
+
+Amounts are decimals in the unit you name (`msats`, `sats`, `btc`, `cents`, `usd`) and are converted to the API's integer base units exactly; a value with more precision than the unit allows is rejected. `--currency` is the wallet currency for sends and the receive currency for open-amount receives. Fee limits cover network and provider fees only.
+
+Quotes apply to USD lines of credit: a USD payment requires `--quote` with a quote for that line of credit. On-chain and BIP21 payments and treasury movements are features Voltage enables per organization; the API rejects them with `feature_flag_disabled` until then, and the CLI says so.
+
+To see what an amount is worth in the other currency, or the current BTC/USD price, use the price service (no credentials needed):
+
+```sh
+voltage price
+voltage convert 10 usd --to btc
+voltage convert 21000 sats --to usd --at 2026-09-01T00:00:00Z
+```
+
+A conversion reports the result in every unit of its currency (`msats`, `sats`, and `btc`, or `cents` and `usd`) together with the quote it used, including the minute the service rounded to.
+
+An accepted submission returns immediately with `outcome: accepted`. To wait, add `--wait ready` (the invoice or address exists) or `--wait completed` (the payment settled). Waiting polls the payment, starting quickly and backing off with jitter, and honors the API's retry hints. It tolerates a payment that is not visible yet and stops at `--timeout`, reporting the payment ID with exit code 5 so you can keep watching:
+
+```sh
+voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120
+```
+
+For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--copy` puts it on the clipboard as soon as it is ready. Either flag implies `--wait ready`; with `--wait completed` the invoice is shown first and polling continues to settlement.
+
+Sends, treasury movements, deletes, webhook key rotation, and disabling a credit line ask for confirmation after printing the resolved scope and request to stderr. Non-interactive use needs `--yes`.
+
+Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if the payment is visible, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130 and never cancels a submitted payment.
+
+## Output
+
+On a terminal, results are readable tables; when piped, they are JSON. `--json` forces JSON and `--output table|json|ndjson` selects explicitly. The JSON envelope is stable:
+
+```json
+{"http_status":202,"data":null,"resource_id":"PAYMENT_ID","outcome":"accepted"}
+```
+
+API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr.
+
+Known secret fields and the credentials the CLI presented are redacted from normal output and from error details. Operations that return a one-time secret (webhook creation and key rotation, checkout sessions, stream tokens) refuse to run unless you pass `--output-file PATH`, which writes the complete response to a new owner-only file, or `--show-secrets`. Treat your own metadata as potentially sensitive; redaction cannot recognise it.
+
+## Checkout
+
+Checkout commands use their own credentials and never fall back to your account. Provide a session token through `VOLTAGE_CHECKOUT_TOKEN` and a stream token through `VOLTAGE_STREAM_TOKEN`, or read either from a private file or stdin with `--token-file PATH` / `--token-file -`. Pass `--origin https://shop.example.com` when the session requires a browser origin.
+
+```sh
+voltage checkout sessions get SESSION_ID --token-file ./session.token
+voltage checkout events watch --token-file - < ./stream.token
+```
+
+`checkout sessions get` retries while the session projection is being created, following the API's retry hints. `checkout events watch` streams server-sent events as `outcome: event` envelopes until the connection closes or `--timeout` passes; it does not reconnect. Ctrl-C exits cleanly.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | Success, or accepted submission without waiting |
-| 1 | API or business failure |
+| 0 | Success, or an accepted submission without waiting |
+| 1 | The API rejected the request or a payment failed |
 | 2 | Invalid invocation or configuration |
 | 3 | Authentication or authorization failure |
-| 4 | Transport failure or uncertain submission |
-| 5 | Wait/pagination timeout |
+| 4 | Transport failure or a submission with an unknown outcome |
+| 5 | A wait or pagination deadline passed |
 | 130 | Interrupted |
 
-## Development
+## Contributing
 
-```sh
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-python3 scripts/check-coverage.py
-```
-
-Tests use mock HTTP services. They cover all 47 routes and authentication mappings, arbitrary request JSON, query encoding, secret output, confirmation, pagination, payment waiting, uncertainty, and credential lifecycle. CI runs native tests and packaged-binary smoke checks on all required platforms. The versioned API snapshot is `api/openapi.json`; `api/commands.json` explicitly maps operation IDs to human-facing commands. `build.rs` refuses incomplete coverage and generates request metadata. Refresh the snapshot deliberately, then review the command mapping and request tests.
-
-Live payment tests must use an explicitly configured test-network wallet. Routine tests never send a live payment. Infrastructure and unrelated account-management APIs are outside this CLI's scope.
+Report security issues as described in [SECURITY.md](SECURITY.md). Build, test, and release instructions are in [the development guide](docs/development.md); code conventions are in [the style guide](docs/quality.md).

@@ -1,20 +1,66 @@
-name: Prepare release
+name: Release
+
+# Pushing a stable version tag (vX.Y.Z) that sits on main builds the release
+# archives and opens a draft GitHub release. Publishing the draft stays manual
+# and follows the staging acceptance in docs/development.md.
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing version tag (vX.Y.Z) that passed staging integration
-        required: true
-      staging_verified:
-        description: Approval, issuance, refresh, revocation, and test-wallet integration passed
-        type: boolean
-        required: true
-        default: false
+  push:
+    tags:
+      - "v*"
+
 permissions:
   contents: read
+
+# A release is never cancelled halfway through its dependency chain.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
 jobs:
+  verify:
+    name: Verify the release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Check out the tagged commit with history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Require a stable semantic version on the default branch
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo '::error::Use a stable version tag such as v0.1.0.'
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ "$version" != "$manifest" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match Cargo.toml version $manifest."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Tag $RELEASE_TAG is not on $DEFAULT_BRANCH."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   build:
-    if: inputs.staging_verified
+    name: Verify, build, and package (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -27,52 +73,79 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - name: Verify tag/version
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
+      - name: Check out the tagged commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
         run: |
-          python3 - <<'PY'
-          import os, re
-          tag = os.environ["RELEASE_TAG"]
-          assert re.fullmatch(r"v\d+\.\d+\.\d+", tag)
-          version = re.search(r'^version = "([^"]+)"', open('Cargo.toml').read(), re.M)[1]
-          assert tag[1:] == version
-          PY
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
-      - run: cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
-      - run: python3 scripts/check-coverage.py
-      - run: bash scripts/package.sh '${{ matrix.target }}'
-      - uses: actions/upload-artifact@v4
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy with warnings denied
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        if: runner.os != 'Windows'
+        run: cargo test --locked
+
+      # Integration tests assert Unix file ownership and permissions.
+      - name: Run unit tests
+        if: runner.os == 'Windows'
+        run: cargo test --locked --lib
+
+      - name: Verify the API contract mapping and command reference
+        shell: bash
+        run: |
+          "$(command -v python3 || command -v python)" scripts/check-coverage.py
+
+      - name: Package and smoke test the extracted archive
+        run: bash scripts/package.sh '${{ matrix.target }}'
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
   release:
-    needs: build
+    name: Create the draft GitHub release
+    needs: [verify, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - uses: actions/download-artifact@v4
+      - name: Check out the tagged commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download every package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - name: Checksums and Homebrew formula
+
+      - name: Write checksums and the Homebrew formula
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: python3 scripts/release-manifest.py "${RELEASE_TAG#v}" dist
-      - name: Create draft release
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          python3 scripts/release-manifest.py "$RELEASE_VERSION" dist
+          cat dist/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the draft release for review
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes dist/*
