@@ -12,16 +12,16 @@ path = "src/main.rs"
 
 # Every dependency is pinned to the exact version in Cargo.lock; bump both deliberately.
 [dependencies]
-clap = { version = "=4.6.6", features = ["derive", "string"] }
-clap_complete = "=4.6.9"
+clap = { version = "=4.6.7", features = ["derive", "string"] }
+clap_complete = "=4.6.11"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
-toml = "=1.1.5"
+toml = "=1.1.6"
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "signal"] }
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "json", "form", "query", "stream"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "form", "query", "stream"] }
 # The TLS provider is ring, installed at startup; aws-lc-rs would need a C toolchain on every platform.
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
-uuid = { version = "=1.26.0", features = ["v4", "serde"] }
+uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 rpassword = "=7.5.4"
