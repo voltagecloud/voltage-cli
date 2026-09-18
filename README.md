@@ -195,3 +195,7 @@ voltage checkout events watch --token-file - < ./stream.token
 ## Contributing
 
 Report security issues as described in [SECURITY.md](SECURITY.md). Build, test, and release instructions are in [the development guide](docs/development.md); code conventions are in [the style guide](docs/quality.md).
+
+## License
+
+MIT; see [LICENSE](LICENSE).

@@ -8,15 +8,17 @@ import stat
 import subprocess
 import sys
 
-STAGING_API_URL = "https://staging.voltageapi.com/v1"
-STAGING_AUTH_URL = "https://auth.staging.voltage.cloud/api/v1"
-SUPPORTED_ENV = {
+# Endpoints come from .env so the repository never names a deployment. The CLI
+# variables are optional: browser login and profiles need none of them.
+ENDPOINT_ENV = {"VOLTAGE_STAGING_API_URL", "VOLTAGE_STAGING_AUTH_URL"}
+CLI_ENV = {
     "VOLTAGE_API_KEY",
     "VOLTAGE_ORGANIZATION_ID",
     "VOLTAGE_ENVIRONMENT_ID",
     "VOLTAGE_WALLET_ID",
 }
-REQUIRED_ENV = SUPPORTED_ENV - {"VOLTAGE_WALLET_ID"}
+SUPPORTED_ENV = CLI_ENV | ENDPOINT_ENV
+REQUIRED_ENV = ENDPOINT_ENV
 
 root = Path(__file__).resolve().parents[1]
 env_path = root / ".env"
@@ -33,12 +35,12 @@ if args == ["--build"]:
 for arg in args:
     if arg.split("=", 1)[0] in ("--config-dir", "--auth-url", "--api-url"):
         sys.exit(
-            "This staging wrapper fixes its endpoints and credential directory; "
+            "This staging wrapper takes its endpoints from .env and fixes its credential directory; "
             "use target/debug/voltage for other configurations."
         )
 
 if not env_path.exists():
-    sys.exit("Missing .env. Copy .env.example to .env and fill in the staging values.")
+    sys.exit("Missing .env. Copy .env.example to .env and set the staging endpoints.")
 if env_path.is_symlink() or not env_path.is_file():
     sys.exit(".env must be a regular file, not a symlink.")
 if os.name != "nt":
@@ -76,9 +78,12 @@ for number, raw in enumerate(env_path.read_text().splitlines(), 1):
 missing = sorted(REQUIRED_ENV - loaded.keys())
 if missing:
     sys.exit("Missing required .env variables: " + ", ".join(missing))
+for key in sorted(ENDPOINT_ENV):
+    if not loaded[key].startswith("https://"):
+        sys.exit(f".env variable {key} must be an https:// URL")
 
 env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
-env.update(loaded)
+env.update({key: value for key, value in loaded.items() if key in CLI_ENV})
 binary = root / "target/debug/voltage"
 if not binary.is_file():
     sys.exit("Build the development CLI first: ./scripts/voltage-staging --build")
@@ -90,9 +95,9 @@ os.execve(
         "--config-dir",
         str(root / ".work/staging/cli"),
         "--auth-url",
-        STAGING_AUTH_URL,
+        loaded["VOLTAGE_STAGING_AUTH_URL"],
         "--api-url",
-        STAGING_API_URL,
+        loaded["VOLTAGE_STAGING_API_URL"],
         *args,
     ],
     env,

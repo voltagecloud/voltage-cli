@@ -76,13 +76,15 @@ build when they disagree. `docs/commands.md` is generated; regenerate it with
 
 - `scripts/voltage-local` runs the development binary with isolated credentials, loopback
   auth on port 8081, and a disabled API endpoint. `--build` compiles it first.
-- `scripts/voltage-staging` runs the development binary against staging. It reads
-  `VOLTAGE_API_KEY`, `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMENT_ID`, and the optional
-  `VOLTAGE_WALLET_ID` from the repository's private `.env` (copy `.env.example`, fill it in,
-  `chmod 600 .env`) without evaluating it as shell code, keeps CLI state under
-  `.work/staging/cli`, and refuses `--config-dir`, `--api-url`, and `--auth-url` so a staging
-  command cannot target another deployment. Before creating a payment, confirm the wallet's
-  reported network is a test network.
+- `scripts/voltage-staging` runs the development binary against staging. It reads the
+  staging endpoints (`VOLTAGE_STAGING_API_URL`, `VOLTAGE_STAGING_AUTH_URL`) and, only for
+  API-key runs, the optional `VOLTAGE_API_KEY`, `VOLTAGE_ORGANIZATION_ID`,
+  `VOLTAGE_ENVIRONMENT_ID`, and `VOLTAGE_WALLET_ID` from the repository's private `.env`
+  (copy `.env.example`, fill it in, `chmod 600 .env`) without evaluating it as shell code,
+  keeps CLI state under `.work/staging/cli`, and refuses `--config-dir`, `--api-url`, and
+  `--auth-url` so a staging command cannot target another deployment. Browser login and
+  profiles need no credential variables. The repository itself names no deployment. Before
+  creating a payment, confirm the wallet's reported network is a test network.
 - `scripts/package.sh TARGET` builds the release archive for one Rust target and smoke-tests
   the extracted binary.
 - `scripts/release-manifest.py VERSION DIR` writes `SHA256SUMS` and `voltage.rb` for the
@@ -91,6 +93,58 @@ build when they disagree. `docs/commands.md` is generated; regenerate it with
   that every auth-service route the login, credential, and profile commands use exists in
   the auth contract, and that `docs/commands.md` is current (`--write` regenerates it).
 - `scripts/crap-report.sh` measures the CRAP score of every function; see the style guide.
+
+## Running against staging
+
+`scripts/voltage-staging` is a drop-in `voltage` for the staging deployment. Alias it for the
+shell session so commands read exactly as they do in the README, then work through a profile
+the same way you would against production.
+
+1. Copy `.env.example` to `.env`, set `VOLTAGE_STAGING_API_URL` and
+   `VOLTAGE_STAGING_AUTH_URL` (ask the team for the current hosts), and `chmod 600 .env`.
+   Leave the credential variables commented out; browser login needs none of them.
+2. From the repository root, alias the wrapper and build the development binary:
+
+   ```sh
+   alias voltage="$PWD/scripts/voltage-staging"
+   voltage --build
+   ```
+
+3. Sign in through the browser and discover your organization and environment. These two
+   list commands require a browser login; an API key cannot use them. `--credential-store
+   file` keeps the login under `.work/staging/cli` with the rest of the staging state.
+
+   ```sh
+   voltage login --account me --credential-store file
+   voltage organizations list --account me
+   voltage environments list --account me --org ORG_ID
+   ```
+
+4. Save a profile and use it exactly as the README quick start does for production:
+
+   ```sh
+   voltage profiles create staging --account me --org ORG_ID --env ENV_ID
+   voltage wallets list --profile staging
+   voltage payments receive --profile staging --wallet WALLET_ID \
+     --currency btc --kind bolt11 --amount 1000 --unit sats --qr
+   ```
+
+   Once the profile exists, fold it into the alias to drop the flag as well:
+   `alias voltage="$PWD/scripts/voltage-staging --profile staging"`.
+
+5. When finished, revoke the session and remove every trace of the staging state:
+
+   ```sh
+   voltage logout --account me
+   rm -rf .work/staging
+   unalias voltage
+   ```
+
+The wrapper keeps staging state apart from `~/.config/voltage`, passes the endpoints from
+`.env` as `--api-url` and `--auth-url`, and refuses those flags and `--config-dir` on the
+command line. A profile ignores `VOLTAGE_WALLET_ID` and the other ambient variables, so pass
+`--wallet` explicitly. Confirm a wallet's reported network is a test network before creating
+a payment. Browser login needs the device-login release deployed on the staging auth service.
 
 ## Staging acceptance
 

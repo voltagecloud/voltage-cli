@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 description = "The command-line interface for the Voltage API"
+license = "MIT"
 repository = "https://github.com/voltagecloud/voltage-cli"
 
 [[bin]]
