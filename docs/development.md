@@ -40,7 +40,7 @@ The manual CRAP risk check is described in [the style guide](quality.md#crap-ris
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, and on demand:
+`.github/workflows/ci.yml` runs on pull requests, pushes to `master`, and on demand:
 
 - `lint` (Ubuntu): formatting, Clippy with warnings denied, `cargo machete`, and the
   contract mapping check.
@@ -53,7 +53,7 @@ The manual CRAP risk check is described in [the style guide](quality.md#crap-ris
 manifest or lock file changes.
 
 Releases are tag driven (`.github/workflows/release.yml`). Push a stable `vX.Y.Z` tag that
-matches the `Cargo.toml` version and sits on `main`:
+matches the `Cargo.toml` version and sits on `master`:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0

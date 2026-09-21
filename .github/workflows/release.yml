@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a stable version tag (vX.Y.Z) that sits on main builds the release
+# Pushing a stable version tag (vX.Y.Z) that sits on master builds the release
 # archives and opens a draft GitHub release. Publishing the draft stays manual
 # and follows the staging acceptance in docs/development.md.
 on:

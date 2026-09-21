@@ -165,7 +165,7 @@ cargo test --locked
 python3 scripts/check-coverage.py
 ```
 
-GitHub Actions runs the same gate on every pull request and push to `main`,
+GitHub Actions runs the same gate on every pull request and push to `master`,
 the package smoke test on each release platform, and a daily RustSec audit of
 `Cargo.lock`. Do not claim another documentation, audit, or security gate
 until the repository configures it.
