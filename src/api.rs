@@ -341,19 +341,24 @@ pub(crate) async fn bounded_body(
     Ok(body)
 }
 
+/// A server hint never waits longer than this, so a hostile header cannot overflow an
+/// `Instant` or stall a poll forever.
+const MAX_RETRY_HINT: Duration = Duration::from_secs(300);
+
 /// `x-retry-after-ms` wins; `retry-after` may be seconds or an HTTP date.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     if let Some(millis) = text("x-retry-after-ms").and_then(|value| value.parse::<u64>().ok()) {
-        return Some(Duration::from_millis(millis));
+        return Some(Duration::from_millis(millis).min(MAX_RETRY_HINT));
     }
     let value = text("retry-after")?;
     if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+        return Some(Duration::from_secs(seconds).min(MAX_RETRY_HINT));
     }
     httpdate::parse_http_date(value).ok().map(|at| {
         at.duration_since(std::time::SystemTime::now())
             .unwrap_or_default()
+            .min(MAX_RETRY_HINT)
     })
 }
 
@@ -1165,6 +1170,24 @@ mod tests {
             HeaderValue::from_static("Thu, 01 Jan 1970 00:00:00 GMT"),
         );
         assert_eq!(retry_after(&headers), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_hints_are_clamped_so_they_cannot_overflow_an_instant() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-retry-after-ms",
+            HeaderValue::from_static("18446744073709551615"),
+        );
+        assert_eq!(retry_after(&headers), Some(MAX_RETRY_HINT));
+        headers.remove("x-retry-after-ms");
+        headers.insert(
+            "retry-after",
+            HeaderValue::from_static("18446744073709551615"),
+        );
+        assert_eq!(retry_after(&headers), Some(MAX_RETRY_HINT));
+        headers.insert("retry-after", HeaderValue::from_static("10"));
+        assert_eq!(retry_after(&headers), Some(Duration::from_secs(10)));
     }
 
     #[test]

@@ -265,20 +265,26 @@ fn human(out: &mut impl Write, envelope: &Envelope) -> Result<()> {
         writeln!(out, "{}", serde_json::to_string_pretty(data)?)?;
     }
     if let Some(cursor) = data.get("next_cursor").and_then(Value::as_str) {
-        writeln!(out, "Next cursor: {cursor}")?;
+        writeln!(out, "Next cursor: {}", scrub(cursor))?;
     }
     Ok(())
 }
 
-/// One table cell; control characters would let API data rewrite the terminal.
-fn cell(value: &Value) -> String {
-    value
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| value.to_string())
-        .chars()
+/// Untrusted text bound for the terminal; control characters would let API data rewrite it.
+fn scrub(text: &str) -> String {
+    text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+
+/// One table cell; control characters would let API data rewrite the terminal.
+fn cell(value: &Value) -> String {
+    scrub(
+        &value
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| value.to_string()),
+    )
 }
 
 #[derive(Serialize)]
@@ -308,7 +314,8 @@ pub fn report_error(error: &Error, format: OutputFormat) {
     if format.is_machine_readable() {
         eprintln!("{body}");
     } else {
-        eprintln!("{}", error.message);
+        // The message can interpolate untrusted input; keep control characters off the terminal.
+        eprintln!("{}", scrub(&error.message));
         if let Some(detail) = body["error"]["detail"].as_object() {
             eprintln!("{}", json!(detail));
         }
@@ -363,6 +370,21 @@ mod tests {
         human(&mut out, &envelope).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text, "retrieved\nID  NAME\na [31m  x\nNext cursor: n\n");
+    }
+
+    #[test]
+    fn cursors_strip_control_characters() {
+        let envelope = Envelope::new(
+            Some(200),
+            json!({"items":[{"id":"a"}],"next_cursor":"n\u{1b}[2J\u{7}"}),
+            None,
+            Outcome::Retrieved,
+        );
+        let mut out = Vec::new();
+        human(&mut out, &envelope).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+        assert!(text.ends_with("Next cursor: n [2J \n"));
     }
 
     #[test]

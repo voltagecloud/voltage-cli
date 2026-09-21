@@ -422,8 +422,16 @@ fn read_config(dir: &Path) -> Result<Config> {
         return Ok(Config::default());
     }
     private_dir(dir)?;
-    check_private(&path)?;
-    toml::from_str(&fs::read_to_string(path)?).map_err(|_| Error::usage("Invalid config.toml"))
+    // Read through the same no-follow, re-verified path as credentials; a plain open would
+    // be a check-then-use race against a same-user attacker swapping in a symlink.
+    let raw = read_private(&path)?;
+    let config: Config = toml::from_str(&raw).map_err(|_| Error::usage("Invalid config.toml"))?;
+    // A config is attacker-writable in the threat model above, so its auth URLs must pass
+    // the same HTTPS-or-loopback validation as a URL given on the command line.
+    for account in config.accounts.values() {
+        crate::auth::base_url(&account.auth_url)?;
+    }
+    Ok(config)
 }
 
 /// Create or verify an owner-only directory that is not a symlink.
@@ -476,6 +484,22 @@ pub fn check_private(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Credentials and config are small documents; a larger file is not one.
+const MAX_PRIVATE_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Read at most `limit` bytes into zeroized memory, refusing anything larger.
+fn read_bounded(mut reader: impl std::io::Read, limit: u64) -> Result<Zeroizing<String>> {
+    let mut raw = Zeroizing::new(String::new());
+    reader
+        .by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > limit {
+        return Err(Error::usage("Private file exceeds 1 MiB"));
+    }
+    Ok(raw)
+}
+
 /// Read a private file into zeroized memory, rechecking the opened file's ownership and mode.
 pub fn read_private(path: &Path) -> Result<Zeroizing<String>> {
     check_private(path)?;
@@ -486,7 +510,7 @@ pub fn read_private(path: &Path) -> Result<Zeroizing<String>> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = options.open(path)?;
+    let file = options.open(path)?;
     let meta = file.metadata()?;
     check_owner(&meta)?;
     #[cfg(unix)]
@@ -496,9 +520,7 @@ pub fn read_private(path: &Path) -> Result<Zeroizing<String>> {
             return Err(Error::usage("Credential file is not private"));
         }
     }
-    let mut raw = Zeroizing::new(String::new());
-    file.read_to_string(&mut raw)?;
-    Ok(raw)
+    read_bounded(file, MAX_PRIVATE_FILE_BYTES)
 }
 
 fn check_owner(meta: &fs::Metadata) -> Result<()> {
@@ -563,11 +585,7 @@ pub enum InputSource {
 /// A credential from stdin or a private file, trimmed and never empty.
 pub fn read_secret(source: &InputSource) -> Result<Secret> {
     let raw = match source {
-        InputSource::Stdin => {
-            let mut raw = Zeroizing::new(String::new());
-            std::io::stdin().read_to_string(&mut raw)?;
-            raw
-        }
+        InputSource::Stdin => read_bounded(std::io::stdin(), MAX_PRIVATE_FILE_BYTES)?,
         InputSource::File(path) => read_private(path)?,
     };
     let value = raw.trim();
@@ -594,6 +612,35 @@ mod tests {
         let path = dir.path().join("secret");
         new_private(&path).unwrap();
         assert!(new_private(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_reads_refuse_oversized_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big");
+        fs::write(&path, vec![b'x'; (MAX_PRIVATE_FILE_BYTES + 1) as usize]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = read_private(&path).unwrap_err();
+        assert_eq!(error.message, "Private file exceeds 1 MiB");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configs_with_insecure_auth_urls_are_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        fs::write(
+            &path,
+            "[accounts.evil]\nstore = \"file\"\nkind = \"api_key\"\nauth_url = \"http://attacker.example\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_config(dir.path()).is_err());
     }
 
     #[test]
