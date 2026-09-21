@@ -4,7 +4,24 @@
 
 ## Install
 
-Download the archive for your platform from the [releases page](https://github.com/voltagecloud/voltage-cli/releases). Each release ships macOS (Apple Silicon and Intel), Linux (x86-64 and ARM64), and Windows (x86-64) archives with shell completions, a `SHA256SUMS` file, and a Homebrew formula (`voltage.rb`). Extract the archive and put `voltage` (or `voltage.exe`) on your `PATH`.
+Download the archive for your platform from the [releases page](https://github.com/voltagecloud/voltage-cli/releases). Each release ships macOS (Apple Silicon and Intel), Linux (x86-64 and ARM64), and Windows (x86-64) archives with shell completions, a signed `SHA256SUMS` file, and a Homebrew formula (`voltage.rb`). Extract the archive and put `voltage` (or `voltage.exe`) on your `PATH`.
+
+### Verify a download
+
+Every archive carries a SLSA build-provenance attestation, and `SHA256SUMS` is signed with Sigstore (keyless; no keys to trust out of band). Before installing, verify both with the [GitHub CLI](https://cli.github.com) and [cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+
+```sh
+# The archive was built by this repository's release workflow from its version tag.
+gh attestation verify voltage-*.tar.gz --repo voltagecloud/voltage-cli
+
+# The checksums were signed by that same workflow run.
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp 'https://github.com/voltagecloud/voltage-cli/.github/workflows/release.yml' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# The archive matches the signed checksums.
+sha256sum --check SHA256SUMS --ignore-missing
+```
 
 To build from source, install [Rust](https://rustup.rs) and run:
 

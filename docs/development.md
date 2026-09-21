@@ -60,9 +60,10 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The workflow verifies the tag, reruns the gate on every platform, builds the five archives
-(`scripts/package.sh`), writes `SHA256SUMS` and the Homebrew formula
-(`scripts/release-manifest.py`), and opens a draft GitHub release. Publish the draft only
-after the staging acceptance below is recorded.
+(`scripts/package.sh`), attests each archive's SLSA build provenance (`actions/attest`),
+writes `SHA256SUMS` and the Homebrew formula (`scripts/release-manifest.py`), signs the
+checksums with Sigstore keyless signing (`SHA256SUMS.sigstore.json`), and opens a draft
+GitHub release. Publish the draft only after the staging acceptance below is recorded.
 
 ## Contracts
 
