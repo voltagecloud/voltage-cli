@@ -608,11 +608,22 @@ fn path(operation: &Operation, resource_id: Option<Uuid>, scope: &Scope) -> Resu
             }
         }
         .ok_or_else(|| {
-            Error::usage(format!(
-                "Missing {} for {}",
-                parameter.name,
-                operation.command.join(" ")
-            ))
+            let command = operation.command.join(" ");
+            match parameter.scope() {
+                Some(ScopeParameter::Organization) => {
+                    Error::usage(format!("--org is required for {command}"))
+                        .with_hint("Pass --org UUID or select a profile with --profile NAME.")
+                }
+                Some(ScopeParameter::Wallet) => {
+                    Error::usage(format!("--wallet is required for {command}"))
+                }
+                Some(ScopeParameter::Webhook) => {
+                    Error::usage(format!("--webhook is required for {command}"))
+                }
+                Some(ScopeParameter::Environment | ScopeParameter::Environments) | None => {
+                    Error::usage(format!("Missing {} for {command}", parameter.name))
+                }
+            }
         })?;
         path = path.replace(&format!("{{{}}}", parameter.name), &value.to_string());
     }

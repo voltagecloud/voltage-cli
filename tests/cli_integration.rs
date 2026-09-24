@@ -47,6 +47,92 @@ const TOKEN_EXCHANGE_GRANT: &str = "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3At
 const ACCESS_TOKEN_TYPE: &str = "urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token";
 
 // ---------------------------------------------------------------------------------------
+// Help, parse errors, and pipelines
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn typo_errors_are_human_by_default_and_json_when_requested() {
+    let human = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .arg("paymnts")
+        .assert()
+        .code(2);
+    assert!(human.get_output().stdout.is_empty());
+    let human_error = stderr(&human);
+    assert!(human_error.starts_with("error:"));
+    assert!(human_error.contains("similar subcommand exists: 'payments'"));
+
+    let machine = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .args(["--json", "paymnts"])
+        .assert()
+        .code(2);
+    assert!(machine.get_output().stdout.is_empty());
+    let report: Value = serde_json::from_slice(&machine.get_output().stderr).unwrap();
+    assert_eq!(report["error"]["exit_code"], 2);
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("similar subcommand exists: 'payments'")
+    );
+}
+
+#[test]
+fn help_and_version_stay_on_stdout_when_json_is_present() {
+    for flag in ["--help", "--version"] {
+        let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+            .args(["--json", flag])
+            .assert()
+            .success();
+        assert!(!result.get_output().stdout.is_empty());
+        assert!(result.get_output().stderr.is_empty());
+    }
+}
+
+#[test]
+fn human_runtime_errors_have_a_prefix_and_safe_hint() {
+    let dir = private_tempdir();
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .arg("--config-dir")
+        .arg(dir.path())
+        .args(["--output", "table", "wallets", "list"])
+        .assert()
+        .code(2);
+    let error = stderr(&result);
+    assert!(
+        error.starts_with("error: --org is required for wallets list\n"),
+        "{error}"
+    );
+    assert!(error.contains("hint: Pass --org UUID or select a profile"));
+    assert!(!error.contains("api_key"));
+}
+
+#[cfg(unix)]
+#[test]
+fn completion_output_treats_an_early_closing_pipe_as_success() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as Process, Stdio};
+
+    let mut child = Process::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .args(["completions", "bash"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut first_line = String::new();
+    stdout.read_line(&mut first_line).unwrap();
+    assert!(!first_line.is_empty());
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------------------
 
@@ -166,6 +252,78 @@ fn in_order(responses: Vec<ResponseTemplate>) -> impl Fn(&Request) -> ResponseTe
             .min(responses.len() - 1);
         responses[index].clone()
     }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn result_output_treats_an_early_closing_pipe_as_success_without_resubmitting() {
+    use std::process::{Command as Process, Stdio};
+
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("POST", payments_path()),
+        ok(json!({
+            "id": RESOURCE,
+            "status": "receiving",
+            "padding": "x".repeat(1024 * 1024)
+        })),
+    )
+    .await;
+    let mut command = Process::new(assert_cmd::cargo::cargo_bin!("voltage"));
+    for name in [
+        "VOLTAGE_ORGANIZATION_ID",
+        "VOLTAGE_ENVIRONMENT_ID",
+        "VOLTAGE_WALLET_ID",
+        "VOLTAGE_CHECKOUT_TOKEN",
+        "VOLTAGE_STREAM_TOKEN",
+    ] {
+        command.env_remove(name);
+    }
+    let mut child = command
+        .env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .arg("--config-dir")
+        .arg(dir.path())
+        .args([
+            "--api-url",
+            &server.uri(),
+            "--json",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wallet",
+            WALLET,
+            "payments",
+            "receive",
+            "--currency",
+            "btc",
+            "--kind",
+            "bolt11",
+            "--amount",
+            "1",
+            "--unit",
+            "sats",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Broken pipe"));
+    server.verify().await;
 }
 
 fn settings_at(dir: &Path) -> Settings {
