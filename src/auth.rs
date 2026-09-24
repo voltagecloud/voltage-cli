@@ -12,13 +12,11 @@ use crate::{
         read_secret,
     },
     secret::Secret,
+    terminal::Terminal,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::{
-    io::IsTerminal,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 const CLIENT_ID: &str = "voltage-cli";
@@ -164,7 +162,11 @@ async fn bounded_body(mut response: reqwest::Response, limit: usize) -> Result<Z
     Ok(body)
 }
 
-async fn auth_request(request: reqwest::RequestBuilder) -> Result<AuthResponse> {
+async fn auth_request(
+    request: reqwest::RequestBuilder,
+    terminal: Terminal,
+) -> Result<AuthResponse> {
+    let _progress = terminal.progress("Waiting for auth service...");
     let response = request.send().await.map_err(|_| {
         Error::transport(
             "Authentication request failed; no token request was automatically retried",
@@ -366,30 +368,32 @@ pub async fn login(
         ));
     }
     let client = client(AUTH_TIMEOUT)?;
+    let terminal = Terminal::new(global.quiet);
     let response = auth_request(
         client
             .post(format!("{url}/oauth/device_authorization"))
             .form(&[("client_id", CLIENT_ID)]),
+        terminal,
     )
     .await?;
     response.require_success()?;
     let device: DeviceAuthorization = response.json("Invalid device authorization response")?;
     let verification = device.verification_url()?;
-    eprintln!(
+    terminal.important(format!(
         "Open {verification}\nConfirm this code: {}",
         device.user_code
-    );
+    ));
     if !flags.no_browser && webbrowser::open(verification).is_err() {
-        eprintln!("Could not open a browser; open the URL above manually.");
+        terminal.important("Could not open a browser; open the URL above manually.");
     }
-    let token = poll_device_grant(&client, &url, &device).await?;
+    let token = poll_device_grant(&client, &url, &device, terminal).await?;
     let login = token.into_login(None, None)?;
     let session = Secret::new(login.refresh_token.expose().to_owned());
     let saved = save_login(settings, login, flags, global, &client, &url).await;
     if saved.is_err() {
         // A local storage/discovery failure must not silently orphan a remote session.
-        if revoke(&client, &url, &session).await.is_err() {
-            eprintln!(
+        if revoke(&client, &url, &session, global.quiet).await.is_err() {
+            terminal.important(
                 "Could not revoke the new CLI session after login failed. Use account global signout to invalidate its refresh session."
             );
         }
@@ -402,6 +406,7 @@ async fn poll_device_grant(
     client: &reqwest::Client,
     url: &str,
     device: &DeviceAuthorization,
+    terminal: Terminal,
 ) -> Result<TokenResponse> {
     let expires = device.expires_in.min(MAX_LOGIN_WAIT);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(expires);
@@ -413,14 +418,20 @@ async fn poll_device_grant(
         if tokio::time::Instant::now() + Duration::from_secs(interval) >= deadline {
             return Err(Error::timeout("Login expired; run voltage login again"));
         }
-        tokio::time::sleep(Duration::from_secs(interval)).await;
+        {
+            let _progress = terminal.progress("Waiting for device approval...");
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
         let response = tokio::time::timeout_at(
             deadline,
-            auth_request(client.post(format!("{url}/oauth/token")).form(&[
-                ("client_id", CLIENT_ID),
-                ("grant_type", DEVICE_CODE_GRANT),
-                ("device_code", device.device_code.expose()),
-            ])),
+            auth_request(
+                client.post(format!("{url}/oauth/token")).form(&[
+                    ("client_id", CLIENT_ID),
+                    ("grant_type", DEVICE_CODE_GRANT),
+                    ("device_code", device.device_code.expose()),
+                ]),
+                terminal,
+            ),
         )
         .await
         .map_err(|_| Error::timeout("Login expired"))??;
@@ -456,6 +467,7 @@ async fn save_login(
             client
                 .get(format!("{url}/users/current"))
                 .bearer_auth(login.access_token.expose()),
+            Terminal::new(global.quiet),
         )
         .await?;
         response.require_success()?;
@@ -468,7 +480,7 @@ async fn save_login(
             .or_else(|| login.email.clone())
             .or_else(|| login.user_id.clone())
             .ok_or_else(|| Error::auth("User response has no account identity"))?;
-        let _lock = settings.lock().await?;
+        let _lock = settings.lock(global.quiet).await?;
         settings.reload()?;
         if settings.config.accounts.contains_key(&name) {
             return Err(Error::usage(format!(
@@ -504,12 +516,20 @@ async fn save_login(
 }
 
 /// Revoke a session whose refresh token the CLI holds.
-async fn revoke(client: &reqwest::Client, url: &str, refresh_token: &Secret) -> Result<()> {
-    auth_request(client.post(format!("{url}/oauth/revoke")).form(&[
-        ("client_id", CLIENT_ID),
-        ("token_type_hint", "refresh_token"),
-        ("token", refresh_token.expose()),
-    ]))
+async fn revoke(
+    client: &reqwest::Client,
+    url: &str,
+    refresh_token: &Secret,
+    quiet: bool,
+) -> Result<()> {
+    auth_request(
+        client.post(format!("{url}/oauth/revoke")).form(&[
+            ("client_id", CLIENT_ID),
+            ("token_type_hint", "refresh_token"),
+            ("token", refresh_token.expose()),
+        ]),
+        Terminal::new(quiet),
+    )
     .await?
     .require_success()
 }
@@ -551,14 +571,14 @@ pub async fn resolve(
                     "Saved credentials cannot be refreshed at a different auth URL",
                 ));
             }
-            let _lock = settings.lock().await?;
+            let _lock = settings.lock(flags.quiet).await?;
             let Credential::Login(login) = settings.read_credential(&name)? else {
                 return Err(Error::auth("Invalid saved credential"));
             };
             if login.expires_at > now() + REFRESH_MARGIN {
                 return Ok(Credential::Login(login));
             }
-            let refreshed = Credential::Login(refresh(&url, login).await?);
+            let refreshed = Credential::Login(refresh(&url, login, flags.quiet).await?);
             settings.write_credential(&name, account.store, &refreshed)?;
             Ok(refreshed)
         }
@@ -567,7 +587,7 @@ pub async fn resolve(
 
 /// Rotate an expiring login; the refresh token is single use, so the result is saved
 /// before any caller sees it.
-async fn refresh(url: &str, login: Login) -> Result<Login> {
+async fn refresh(url: &str, login: Login, quiet: bool) -> Result<Login> {
     let response = auth_request(
         client(AUTH_TIMEOUT)?
             .post(format!("{url}/oauth/token"))
@@ -576,6 +596,7 @@ async fn refresh(url: &str, login: Login) -> Result<Login> {
                 ("grant_type", "refresh_token"),
                 ("refresh_token", login.refresh_token.expose()),
             ]),
+        Terminal::new(quiet),
     )
     .await?;
     response.require_success()?;
@@ -606,6 +627,7 @@ pub async fn resolve_organization(
                 ("subject_token_type", ACCESS_TOKEN_TYPE),
                 ("audience", &organization.to_string()),
             ]),
+        Terminal::new(flags.quiet),
     )
     .await?;
     response.require_success()?;
@@ -620,8 +642,13 @@ pub async fn resolve_organization(
     Ok(ApiCredential::OrganizationToken(token.access_token))
 }
 
-pub async fn logout(settings: &mut Settings, scope: &Scope, local: bool) -> Result<LogoutOutcome> {
-    let _lock = settings.lock().await?;
+pub async fn logout(
+    settings: &mut Settings,
+    scope: &Scope,
+    local: bool,
+    quiet: bool,
+) -> Result<LogoutOutcome> {
+    let _lock = settings.lock(quiet).await?;
     settings.reload()?;
     let name = settings.account_name(scope)?;
     let account = settings.account(&name)?;
@@ -632,7 +659,7 @@ pub async fn logout(settings: &mut Settings, scope: &Scope, local: bool) -> Resu
             ));
         };
         let url = base_url(&account.auth_url)?;
-        revoke(&client(AUTH_TIMEOUT)?, &url, &login.refresh_token).await?;
+        revoke(&client(AUTH_TIMEOUT)?, &url, &login.refresh_token, quiet).await?;
     }
     settings.delete_credential(&name)?;
     settings.config.accounts.remove(&name);
@@ -663,9 +690,9 @@ pub async fn import_key(
     let key = if flags.stdin {
         read_secret(&InputSource::Stdin)?
     } else {
-        if !std::io::stdin().is_terminal() {
+        if !Terminal::new(global.quiet).can_prompt(global.no_input) {
             return Err(Error::usage(
-                "Use --stdin to import an API key noninteractively",
+                "Use --stdin to import an API key when input is disabled or noninteractive (--yes does not supply a key)",
             ));
         }
         Secret::new(
@@ -676,7 +703,7 @@ pub async fn import_key(
     if key.expose().trim().is_empty() {
         return Err(Error::usage("API key cannot be empty"));
     }
-    let _lock = settings.lock().await?;
+    let _lock = settings.lock(global.quiet).await?;
     settings.reload()?;
     if settings.config.accounts.contains_key(&name) {
         return Err(Error::usage("Credential already exists"));
@@ -730,6 +757,7 @@ pub async fn discover(
         client(AUTH_TIMEOUT)?
             .get(format!("{url}{path}"))
             .bearer_auth(token.expose()),
+        Terminal::new(flags.quiet),
     )
     .await?;
     response.require_success()?;

@@ -17,15 +17,13 @@ use crate::{
     payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
     registry::{AuthScheme, Method, Operation, OperationId},
     secret::Secret,
+    startup::SubmissionState,
+    terminal::Terminal,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{
-    collections::BTreeSet,
-    io::{IsTerminal, Write},
-    time::Duration,
-};
+use std::{collections::BTreeSet, io::Write, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -112,6 +110,7 @@ struct Api {
     base: String,
     authorization: Authorization,
     origin: Option<Origin>,
+    terminal: Terminal,
 }
 
 impl Api {
@@ -125,6 +124,7 @@ impl Api {
             base: auth::base_url(global.api_url.as_deref().unwrap_or(API_URL))?,
             authorization,
             origin: invocation.origin.clone(),
+            terminal: Terminal::new(global.quiet),
         })
     }
 
@@ -173,6 +173,11 @@ impl Api {
         body: Option<&Value>,
     ) -> Result<Response> {
         let read_only = method.is_read_only();
+        let _progress = self.terminal.progress(if read_only {
+            "Waiting for API response..."
+        } else {
+            "Submitting request..."
+        });
         let response = self
             .request(method.into(), path, query, body)
             .send()
@@ -233,11 +238,13 @@ impl Api {
 
     /// Follow a checkout event stream, writing one envelope per event until it closes.
     async fn stream(&self, request: &Request, out: &mut Output) -> Result<()> {
-        let response = self
-            .request(reqwest::Method::GET, &request.path, &request.query, None)
-            .send()
-            .await
-            .map_err(|_| Error::transport("Could not open checkout event stream"))?;
+        let response = {
+            let _progress = self.terminal.progress("Opening checkout event stream...");
+            self.request(reqwest::Method::GET, &request.path, &request.query, None)
+                .send()
+                .await
+                .map_err(|_| Error::transport("Could not open checkout event stream"))?
+        };
         let status = response.status().as_u16();
         if !response.status().is_success() {
             return Err(Error::new(
@@ -256,7 +263,12 @@ impl Api {
         let mut stream = response.bytes_stream();
         let mut pending = Vec::new();
         let mut assembler = EventAssembler::default();
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = {
+                let _progress = self.terminal.progress("Waiting for checkout event...");
+                stream.next().await
+            };
+            let Some(chunk) = chunk else { break };
             let chunk = chunk.map_err(|_| Error::transport("Checkout stream disconnected"))?;
             pending.extend_from_slice(&chunk);
             if pending.len() > MAX_EVENT_BYTES {
@@ -431,6 +443,7 @@ pub async fn execute(
     settings: &Settings,
     scope: &Scope,
     out: &mut Output,
+    submission: &SubmissionState,
 ) -> Result<()> {
     let operation = invocation.operation;
     let mut request = Request::build(invocation, scope)?;
@@ -440,11 +453,19 @@ pub async fn execute(
             "This operation returns a one-time secret; supply --output-file PATH or --show-secrets before executing",
         ));
     }
+    // Decline a noninteractive confirmation before refreshing credentials or making
+    // a wallet preflight request. The summary is still mandatory even in quiet mode.
+    if request.is_consequential(operation)
+        && !global.yes
+        && !Terminal::new(global.quiet).can_prompt(global.no_input)
+    {
+        return confirm(operation, scope, &request, global);
+    }
     let authorization = Authorization::resolve(invocation, global, settings, scope).await?;
     let api = Api::new(global, invocation, authorization)?;
     let deadline = Instant::now() + global.timeout;
     if request.pagination_mode() == PaginationMode::Offset && operation.has_parameter("cursor") {
-        eprintln!(
+        api.terminal.important(
             "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor."
         );
     }
@@ -455,7 +476,7 @@ pub async fn execute(
     let Submission {
         mut response,
         reconciled,
-    } = submit(&api, invocation, &request, scope).await?;
+    } = submit(&api, invocation, &request, scope, submission).await?;
     check_response(invocation, &response, scope)?;
     if let Some(until) = wait_target(invocation) {
         return wait_for_payment(
@@ -494,7 +515,7 @@ async fn guard_submission(
         verify_wallet_environment(api, scope, invocation.resource_id).await?;
     }
     if request.is_consequential(operation) {
-        confirm(operation, scope, request, global.yes)?;
+        confirm(operation, scope, request, global)?;
     }
     if operation.method != Method::Get
         && let (Some(body), Some(id)) = (&request.body, request.body_id)
@@ -582,7 +603,13 @@ struct ConfirmationSummary<'a> {
 }
 
 /// Show the resolved scope and request on stderr, then require `--yes` or a terminal answer.
-fn confirm(operation: &Operation, scope: &Scope, request: &Request, yes: bool) -> Result<()> {
+fn confirm(
+    operation: &Operation,
+    scope: &Scope,
+    request: &Request,
+    global: &GlobalFlags,
+) -> Result<()> {
+    let terminal = Terminal::new(global.quiet);
     let mut summary = serde_json::to_value(ConfirmationSummary {
         action: operation.command.join(" "),
         organization: scope.org,
@@ -591,18 +618,18 @@ fn confirm(operation: &Operation, scope: &Scope, request: &Request, yes: bool) -
         request: request.body.as_ref(),
     })?;
     redact(&mut summary, &[]);
-    eprintln!("{}", serde_json::to_string_pretty(&summary)?);
+    terminal.important(serde_json::to_string_pretty(&summary)?);
     if operation.id == OperationId::CreatePayment {
-        eprintln!(
+        terminal.important(
             "Network/provider fee limits exclude additional processing fees. The wallet determines the network."
         );
     }
-    if yes {
+    if global.yes {
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
+    if !terminal.can_prompt(global.no_input) {
         return Err(Error::usage(
-            "This operation requires --yes in noninteractive use",
+            "This operation requires --yes when input is disabled or noninteractive",
         ));
     }
     eprint!("Proceed? [y/N] ");
@@ -669,7 +696,10 @@ fn journal(
     let mut file = new_private(&path)?;
     file.write_all(&serde_json::to_vec(&record)?)?;
     file.sync_all()?;
-    eprintln!("Resource ID: {id}. Recovery record: {}", path.display());
+    Terminal::new(false).important(format!(
+        "Resource ID: {id}. Recovery record: {}",
+        path.display()
+    ));
     Ok(())
 }
 
@@ -686,8 +716,14 @@ async fn submit(
     invocation: &ApiInvocation,
     request: &Request,
     scope: &Scope,
+    submission: &SubmissionState,
 ) -> Result<Submission> {
     let operation = invocation.operation;
+    if operation.id.submits_payment()
+        && let Some(id) = request.resource_id
+    {
+        submission.payment_started(id, scope.org, &scope.envs);
+    }
     let result = api
         .send(
             operation.method,
@@ -754,9 +790,9 @@ async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Optio
     if PaymentView::from_body(&found.body).id != Some(id) {
         return None;
     }
-    eprintln!(
+    api.terminal.important(format!(
         "Payment {id} is visible after the interrupted submission; reconciled by reading its original ID."
-    );
+    ));
     Some(found)
 }
 
@@ -785,7 +821,8 @@ async fn wait_for_payment(
     );
     let target = until.as_str();
     if invocation.operation.method != Method::Get {
-        eprintln!("Payment {id} accepted; waiting for {target}.");
+        api.terminal
+            .important(format!("Payment {id} accepted; waiting for {target}."));
     }
     let mut backoff = Backoff::new(
         match until {
@@ -804,10 +841,10 @@ async fn wait_for_payment(
             && (Some(status) != last_status.as_ref()
                 || last_notice.elapsed() >= STATUS_NOTICE_INTERVAL)
         {
-            eprintln!(
+            api.terminal.notice(format!(
                 "Payment {id} status: {}; waiting for {target}.",
                 status.as_str()
-            );
+            ));
             last_status = Some(status.clone());
             last_notice = Instant::now();
         }
@@ -815,10 +852,11 @@ async fn wait_for_payment(
             && !invoice_presented
             && let Some(invoice) = view.invoice()
         {
-            present_invoice(invoice, invocation)?;
+            present_invoice(invoice, invocation, api.terminal)?;
             invoice_presented = true;
             if until == WaitTarget::Completed {
-                eprintln!("Invoice is ready; continuing to poll for settlement.");
+                api.terminal
+                    .notice("Invoice is ready; continuing to poll for settlement.");
             }
         }
         match view.progress(until) {
@@ -834,6 +872,7 @@ async fn wait_for_payment(
                             Error::usage("The ready payment does not contain a BOLT11 invoice")
                         })?,
                         invocation,
+                        api.terminal,
                     )?;
                 }
                 return out.write(
@@ -866,12 +905,12 @@ async fn wait_for_payment(
 }
 
 /// Copy and render a ready BOLT11 invoice as requested; both go to stderr.
-fn present_invoice(invoice: &str, invocation: &ApiInvocation) -> Result<()> {
+fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal) -> Result<()> {
     if invocation.copy {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(invoice)) {
-            Ok(()) => eprintln!("Invoice copied to the clipboard."),
-            Err(_) => eprintln!(
-                "Warning: the invoice is ready, but it could not be copied to the clipboard."
+            Ok(()) => terminal.notice("Invoice copied to the clipboard."),
+            Err(_) => terminal.important(
+                "Warning: the invoice is ready, but it could not be copied to the clipboard.",
             ),
         }
     }
@@ -892,7 +931,7 @@ fn present_invoice(invoice: &str, invocation: &ApiInvocation) -> Result<()> {
             .map(|line| format!("  {line}  "))
             .collect::<Vec<_>>()
             .join("\n");
-        eprintln!("\nScan to pay:\n\n{image}\n");
+        terminal.important(format!("\nScan to pay:\n\n{image}\n"));
     }
     Ok(())
 }
@@ -906,6 +945,9 @@ async fn await_session_projection(
 ) -> Result<Response> {
     let mut backoff = Backoff::new(SESSION_POLL_START, POLL_CEILING);
     while response.status == 202 {
+        let _progress = api
+            .terminal
+            .progress("Waiting for checkout session projection...");
         let pause = response.retry_after.unwrap_or_else(|| backoff.pause());
         if Instant::now() + pause >= deadline {
             return Err(Error::timeout("Checkout session projection is not ready"));
@@ -1098,6 +1140,7 @@ mod tests {
             base: "https://api.example.test/v1".into(),
             authorization,
             origin: None,
+            terminal: Terminal::new(false),
         }
     }
 

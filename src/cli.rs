@@ -62,9 +62,15 @@ pub struct GlobalFlags {
     /// Explicitly allow secrets in result output
     #[arg(long, global = true, help_heading = "Output")]
     pub show_secrets: bool,
-    /// Approve consequential actions without prompting
+    /// Approve consequential actions without prompting (never supplies a credential)
     #[arg(short = 'y', long, global = true, help_heading = "Safety")]
     pub yes: bool,
+    /// Never prompt for approval or a secret; supply --yes or --stdin as needed
+    #[arg(long, global = true, help_heading = "Safety")]
+    pub no_input: bool,
+    /// Hide optional progress and notices, not errors, results, or recovery IDs
+    #[arg(short = 'q', long, global = true, help_heading = "Output")]
+    pub quiet: bool,
     /// HTTP or wait deadline in seconds
     #[arg(long, global = true, value_name = "SECONDS", default_value = "60", value_parser = parse_timeout, help_heading = "Request")]
     pub timeout: Duration,

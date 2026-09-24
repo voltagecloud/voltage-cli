@@ -1261,6 +1261,299 @@ async fn logout_retains_credentials_on_revocation_failure_and_local_is_explicit(
 // Payments: submission, confirmation, waits, and reconciliation
 // ---------------------------------------------------------------------------------------
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn progress_is_terminal_only_and_cleared_on_completion() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::{Command as Process, Stdio};
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ok(json!({"items":[]})).set_delay(Duration::from_millis(400)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let api_url = server.uri();
+    let args = [
+        "--config-dir",
+        dir.path().to_str().unwrap(),
+        "--api-url",
+        &api_url,
+        "--json",
+        "wallets",
+        "list",
+        "--org",
+        ORG,
+    ];
+    let redirected = Process::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(redirected.status.success());
+    assert!(redirected.stderr.is_empty());
+
+    let mut master = 0;
+    let mut slave = 0;
+    // SAFETY: openpty initializes both descriptors on success; File takes ownership below.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) }; // owns the PTY master
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let child = Process::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut terminal = Vec::new();
+        // Linux PTYs return EIO rather than EOF when the slave closes.
+        let _ = master.read_to_end(&mut terminal);
+        terminal
+    });
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let terminal = reader.await.unwrap();
+    let terminal = String::from_utf8_lossy(&terminal);
+    assert!(
+        terminal.contains("Waiting for API response..."),
+        "{terminal}"
+    );
+    assert!(terminal.contains("\r\u{1b}[2K"), "{terminal}");
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_input_requires_explicit_approval_and_secret_source() {
+    let (server, dir) = fixture().await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let rejected = cli(dir.path(), &server)
+        .args([
+            "--no-input",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .code(2);
+    assert!(stderr(&rejected).contains("requires --yes"));
+    let missing_secret = cli(dir.path(), &server)
+        .args([
+            "--no-input",
+            "--yes",
+            "auth",
+            "import-key",
+            "--account",
+            "other",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+        ])
+        .assert()
+        .code(2);
+    assert!(stderr(&missing_secret).contains("--stdin"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!dir.path().join("requests").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quiet_keeps_results_errors_and_payment_recovery_id() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let result = cli(dir.path(), &server)
+        .args([
+            "-q",
+            "--yes",
+            "--no-input",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["resource_id"], RESOURCE);
+    assert!(stderr(&result).contains("Recovery record:"));
+    assert!(!stderr(&result).contains("\u{1b}["));
+    let error = cli(dir.path(), &server)
+        .args([
+            "--quiet",
+            "--no-input",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .code(2);
+    assert!(stderr(&error).contains("requires --yes"));
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_a_read_does_not_claim_a_payment_was_submitted() {
+    use std::process::{Command as Process, Stdio};
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)),
+        ok(json!({"items":[]})).set_delay(Duration::from_secs(10)),
+    )
+    .await;
+    let child = Process::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .args([
+            "--config-dir",
+            dir.path().to_str().unwrap(),
+            "--api-url",
+            &server.uri(),
+            "--json",
+            "wallets",
+            "list",
+            "--org",
+            ORG,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // SAFETY: the PID belongs to the live child spawned above.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    let report: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("before a payment submission")
+    );
+    assert!(report["error"]["detail"].is_null());
+    assert!(!dir.path().join("requests").exists());
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_payment_submission_reports_original_id_without_retry() {
+    use std::process::{Command as Process, Stdio};
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("POST", payments_path()),
+        accepted().set_delay(Duration::from_secs(10)),
+    )
+    .await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let data = dir.path().join("request.json");
+    std::fs::write(&data, body.to_string()).unwrap();
+    let child = Process::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .args([
+            "--config-dir",
+            dir.path().to_str().unwrap(),
+            "--api-url",
+            &server.uri(),
+            "--json",
+            "--yes",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            &format!("@{}", data.display()),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // SAFETY: the PID belongs to the live child spawned above.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    assert!(output.stdout.is_empty());
+    let report: Value = serde_json::from_str(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["error"]["detail"]["resource_id"], RESOURCE);
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not cancelled")
+    );
+    assert!(
+        dir.path()
+            .join(format!("requests/{RESOURCE}.json"))
+            .exists()
+    );
+    server.verify().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn raw_send_without_yes_never_submits() {
     let (server, dir) = fixture().await;

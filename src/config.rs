@@ -388,7 +388,7 @@ impl Settings {
     }
 
     /// Exclusive process lock for credential and configuration writes.
-    pub async fn lock(&self) -> Result<File> {
+    pub async fn lock(&self, quiet: bool) -> Result<File> {
         private_dir(&self.dir)?;
         let path = self.dir.join(LOCK_FILE);
         if path.exists() {
@@ -405,10 +405,15 @@ impl Settings {
         let file = options.open(path)?;
         check_owner(&file.metadata()?)?;
         let deadline = tokio::time::Instant::now() + LOCK_TIMEOUT;
+        let mut progress = None;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(file),
                 Err(TryLockError::WouldBlock) => {
+                    progress.get_or_insert_with(|| {
+                        crate::terminal::Terminal::new(quiet)
+                            .progress("Waiting for credential lock...")
+                    });
                     if tokio::time::Instant::now() >= deadline {
                         return Err(Error::transport("Timed out waiting for credential lock"));
                     }
