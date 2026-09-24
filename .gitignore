@@ -1,5 +1,6 @@
 /target/
 /.work/
+/docs/plans/
 .DS_Store
 __pycache__/
 *.py[cod]
