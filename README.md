@@ -213,6 +213,8 @@ voltage checkout events watch --token-file - < ./stream.token
 
 Report security issues as described in [SECURITY.md](SECURITY.md). Build, test, and release instructions are in [the development guide](docs/development.md); code conventions are in [the style guide](docs/quality.md).
 
+Agent work plans live in `docs/plans/<work-item>/` as Markdown files. This directory is gitignored on purpose: plans are local, disposable handoff notes for chunks of work, not reviewed project documentation or a source of truth. Keep durable decisions and user-facing behavior in tracked docs, code, and tests; create a subfolder per work item and revise or remove it as work progresses.
+
 ## License
 
 MIT; see [LICENSE](LICENSE).
