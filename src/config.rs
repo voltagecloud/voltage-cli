@@ -4,7 +4,7 @@
 //! to the operating system store; file storage is an explicit choice with the same
 //! ownership and permission checks on every read.
 
-use crate::{Error, Result, secret::Secret};
+use crate::{Error, Result, secret::Secret, terminal::Terminal};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -388,7 +388,7 @@ impl Settings {
     }
 
     /// Exclusive process lock for credential and configuration writes.
-    pub async fn lock(&self) -> Result<File> {
+    pub async fn lock(&self, terminal: Terminal) -> Result<File> {
         private_dir(&self.dir)?;
         let path = self.dir.join(LOCK_FILE);
         if path.exists() {
@@ -405,10 +405,13 @@ impl Settings {
         let file = options.open(path)?;
         check_owner(&file.metadata()?)?;
         let deadline = tokio::time::Instant::now() + LOCK_TIMEOUT;
+        let mut progress = None;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(file),
                 Err(TryLockError::WouldBlock) => {
+                    progress
+                        .get_or_insert_with(|| terminal.progress("Waiting for credential lock..."));
                     if tokio::time::Instant::now() >= deadline {
                         return Err(Error::transport("Timed out waiting for credential lock"));
                     }

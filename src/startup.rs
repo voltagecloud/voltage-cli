@@ -1,7 +1,8 @@
 //! Process composition: parse the command line, run one command, report, and exit.
 
 use crate::{
-    Error, Result, api,
+    Error, Result,
+    api::{self, SubmissionState},
     auth::{self, Discovery},
     cli::{
         self, AuthCommand, Command, GlobalFlags, Invocation, LocalCommand, ParseFailure,
@@ -10,6 +11,7 @@ use crate::{
     config::{self, Profile, Scope, Settings},
     output::{Envelope, Output, OutputFormat, report_error, write_stdout},
     price::{PRICE_URL, PriceService},
+    terminal::Terminal,
 };
 use serde::Serialize;
 use std::process::ExitCode;
@@ -23,11 +25,19 @@ pub async fn run() -> ExitCode {
         Err(failure) => return fail_parse(failure, json_errors),
     };
     let format = invocation.global.output_format();
+    let submission = SubmissionState::default();
     let result = tokio::select! {
-        result = execute(invocation) => result,
-        _ = tokio::signal::ctrl_c() => Err(Error::interrupted(
-            "Interrupted; any submitted payment continues independently. Use its original ID to check status.",
-        )),
+        result = execute(invocation, &submission) => result,
+        _ = tokio::signal::ctrl_c() => {
+            // The next interrupt must not wait for synchronous cleanup or stderr I/O. The
+            // listener is detached on purpose: runtime shutdown after the report ends it.
+            tokio::spawn(async {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    std::process::exit(130);
+                }
+            });
+            Err(submission.interrupted())
+        },
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -67,7 +77,7 @@ fn process_exit(code: i32) -> ExitCode {
         .unwrap_or(ExitCode::FAILURE)
 }
 
-async fn execute(invocation: Invocation) -> Result<()> {
+async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result<()> {
     let Invocation { global, command } = invocation;
     if let Command::Local(LocalCommand::Completions { shell }) = command {
         // The generator panics on a write error, so render to memory and use the normal
@@ -76,6 +86,7 @@ async fn execute(invocation: Invocation) -> Result<()> {
         clap_complete::generate(shell, &mut cli::command(), BINARY_NAME, &mut script);
         return write_stdout(&script);
     }
+    let terminal = global.terminal();
     let mut out = Output::new(
         global.output_format(),
         global.show_secrets,
@@ -87,6 +98,7 @@ async fn execute(invocation: Invocation) -> Result<()> {
             global.price_url.as_deref().unwrap_or(PRICE_URL),
             global.timeout,
         )?;
+        let progress = terminal.progress("Waiting for price service...");
         let envelope = match command {
             Command::Local(LocalCommand::Price(flags)) => {
                 Envelope::local(service.report(flags.at.as_deref()).await?)?
@@ -98,12 +110,15 @@ async fn execute(invocation: Invocation) -> Result<()> {
             )?,
             _ => unreachable!("matched above"),
         };
+        drop(progress);
         return out.write(envelope, &[]);
     }
     let mut settings = Settings::open(config::directory(global.config_dir.clone())?)?;
     let scope = settings.scope(global.scope_selection())?;
     match command {
-        Command::Api(api) => api::execute(&api, &global, &settings, &scope, &mut out).await,
+        Command::Api(api) => {
+            api::execute(&api, &global, &settings, &scope, &mut out, submission).await
+        }
         Command::Local(local) => {
             let envelope = local_command(local, &global, &mut settings, &scope).await?;
             out.write(envelope, &[])
@@ -120,7 +135,7 @@ async fn local_command(
     match command {
         LocalCommand::Login(flags) => Envelope::local(auth::login(settings, &flags, global).await?),
         LocalCommand::Logout(flags) => {
-            Envelope::local(auth::logout(settings, scope, flags.local).await?)
+            Envelope::local(auth::logout(settings, scope, flags.local, global.terminal()).await?)
         }
         LocalCommand::Auth {
             command: AuthCommand::Status,
@@ -134,7 +149,9 @@ async fn local_command(
         LocalCommand::Environments { .. } => {
             Envelope::local(auth::discover(settings, scope, global, Discovery::Environments).await?)
         }
-        LocalCommand::Profiles { command } => profiles(command, settings, scope).await,
+        LocalCommand::Profiles { command } => {
+            profiles(command, settings, scope, global.terminal()).await
+        }
         LocalCommand::Completions { .. } | LocalCommand::Price(_) | LocalCommand::Convert(_) => {
             Err(Error::usage("This command needs no configuration"))
         }
@@ -159,8 +176,9 @@ async fn profiles(
     command: ProfileCommand,
     settings: &mut Settings,
     scope: &Scope,
+    terminal: Terminal,
 ) -> Result<Envelope> {
-    let _lock = settings.lock().await?;
+    let _lock = settings.lock(terminal).await?;
     settings.reload()?;
     let unknown = || Error::usage("Unknown profile");
     match command {
