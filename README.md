@@ -98,7 +98,7 @@ Only endpoints that filter by environment receive `--env`. Organization-wide com
 
 ## Commands and help
 
-Commands mirror the API contract; see [the command reference](docs/commands.md) for the full list with routes. Every command and group has `--help`:
+Commands mirror the API contract; see [the command reference](docs/commands.md) for the full list with routes. Every command and group has descriptive `--help`; body-building commands also show required flag combinations and examples:
 
 ```sh
 voltage --help
@@ -182,7 +182,7 @@ On a terminal, results are readable tables; when piped, they are JSON. `--json` 
 {"http_status":202,"data":null,"resource_id":"PAYMENT_ID","outcome":"accepted"}
 ```
 
-API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr.
+API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr. Human errors start with `error:` and may include a safe `hint:`; `--json` makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
 
 Known secret fields and the credentials the CLI presented are redacted from normal output and from error details. Operations that return a one-time secret (webhook creation and key rotation, checkout sessions, stream tokens) refuse to run unless you pass `--output-file PATH`, which writes the complete response to a new owner-only file, or `--show-secrets`. Treat your own metadata as potentially sensitive; redaction cannot recognise it.
 

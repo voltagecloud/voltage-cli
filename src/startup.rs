@@ -3,20 +3,24 @@
 use crate::{
     Error, Result, api,
     auth::{self, Discovery},
-    cli::{self, AuthCommand, Command, GlobalFlags, Invocation, LocalCommand, ProfileCommand},
+    cli::{
+        self, AuthCommand, Command, GlobalFlags, Invocation, LocalCommand, ParseFailure,
+        ProfileCommand,
+    },
     config::{self, Profile, Scope, Settings},
-    output::{Envelope, Output, OutputFormat, report_error},
+    output::{Envelope, Output, OutputFormat, report_error, write_stdout},
     price::{PRICE_URL, PriceService},
 };
 use serde::Serialize;
-use std::{io::Write, process::ExitCode};
+use std::process::ExitCode;
 
 const BINARY_NAME: &str = "voltage";
 
 pub async fn run() -> ExitCode {
+    let json_errors = cli::json_errors_requested(std::env::args_os());
     let invocation = match Invocation::from_env() {
         Ok(invocation) => invocation,
-        Err(error) => return fail(error, OutputFormat::select(false, None)),
+        Err(failure) => return fail_parse(failure, json_errors),
     };
     let format = invocation.global.output_format();
     let result = tokio::select! {
@@ -27,13 +31,38 @@ pub async fn run() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is_stdout_closed() => ExitCode::SUCCESS,
         Err(error) => fail(error, format),
+    }
+}
+
+fn fail_parse(failure: ParseFailure, json_errors: bool) -> ExitCode {
+    match failure {
+        ParseFailure::Validation(error) => fail(error, OutputFormat::select(json_errors, None)),
+        ParseFailure::Clap(error) if error.use_stderr() && json_errors => {
+            fail(Error::usage(error.to_string()), OutputFormat::Json)
+        }
+        ParseFailure::Clap(error) => {
+            let writes_stdout = !error.use_stderr();
+            let exit_code = error.exit_code();
+            match error.print() {
+                Ok(()) => process_exit(exit_code),
+                Err(io) if writes_stdout && io.kind() == std::io::ErrorKind::BrokenPipe => {
+                    ExitCode::SUCCESS
+                }
+                Err(io) => fail(io.into(), OutputFormat::select(false, None)),
+            }
+        }
     }
 }
 
 fn fail(error: Error, format: OutputFormat) -> ExitCode {
     report_error(&error, format);
-    u8::try_from(error.kind.exit_code())
+    process_exit(error.kind.exit_code())
+}
+
+fn process_exit(code: i32) -> ExitCode {
+    u8::try_from(code)
         .map(ExitCode::from)
         .unwrap_or(ExitCode::FAILURE)
 }
@@ -41,12 +70,11 @@ fn fail(error: Error, format: OutputFormat) -> ExitCode {
 async fn execute(invocation: Invocation) -> Result<()> {
     let Invocation { global, command } = invocation;
     if let Command::Local(LocalCommand::Completions { shell }) = command {
-        // The generator panics on a write error, so render to memory and write like any
-        // other output; a closed pipe is then an ordinary transport failure.
+        // The generator panics on a write error, so render to memory and use the normal
+        // stdout error policy when writing the completed script.
         let mut script = Vec::new();
         clap_complete::generate(shell, &mut cli::command(), BINARY_NAME, &mut script);
-        std::io::stdout().write_all(&script)?;
-        return Ok(());
+        return write_stdout(&script);
     }
     let mut out = Output::new(
         global.output_format(),

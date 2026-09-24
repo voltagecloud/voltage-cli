@@ -20,7 +20,7 @@ use clap::{
     error::ErrorKind,
 };
 use clap_complete::Shell;
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, ffi::OsStr, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 /// Friendly payment commands beside `create_payment`'s generated command.
@@ -33,52 +33,72 @@ const PAYMENT_ALIASES: [(&str, PaymentDirection); 2] = [
 #[derive(Debug, Args)]
 pub struct GlobalFlags {
     /// Use this named profile as a complete configuration
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Scope")]
     pub profile: Option<String>,
     /// Select a saved credential
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Scope")]
     pub account: Option<String>,
     /// Organization UUID
-    #[arg(long, global = true, value_name = "UUID")]
+    #[arg(long, global = true, value_name = "UUID", help_heading = "Scope")]
     pub org: Option<Uuid>,
     /// Environment UUID (repeat for supported list filters)
-    #[arg(long, global = true, value_name = "UUID", action = ArgAction::Append)]
+    #[arg(long, global = true, value_name = "UUID", action = ArgAction::Append, help_heading = "Scope")]
     pub env: Vec<Uuid>,
     /// Wallet UUID or wallet filter
-    #[arg(long, global = true, value_name = "UUID")]
+    #[arg(long, global = true, value_name = "UUID", help_heading = "Scope")]
     pub wallet: Option<Uuid>,
     /// Parent webhook UUID
-    #[arg(long, global = true, value_name = "UUID")]
+    #[arg(long, global = true, value_name = "UUID", help_heading = "Scope")]
     pub webhook: Option<Uuid>,
     /// Write a stable JSON result envelope
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Output")]
     pub json: bool,
     /// Output format
-    #[arg(long, global = true, value_enum)]
+    #[arg(long, global = true, value_enum, help_heading = "Output")]
     pub output: Option<OutputFormat>,
     /// Save the complete response to a new owner-only file
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH", help_heading = "Output")]
     pub output_file: Option<PathBuf>,
     /// Explicitly allow secrets in result output
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Output")]
     pub show_secrets: bool,
     /// Approve consequential actions without prompting
-    #[arg(short = 'y', long, global = true)]
+    #[arg(short = 'y', long, global = true, help_heading = "Safety")]
     pub yes: bool,
     /// HTTP or wait deadline in seconds
-    #[arg(long, global = true, value_name = "SECONDS", default_value = "60", value_parser = parse_timeout)]
+    #[arg(long, global = true, value_name = "SECONDS", default_value = "60", value_parser = parse_timeout, help_heading = "Request")]
     pub timeout: Duration,
     /// Configuration directory (default: ~/.config/voltage)
-    #[arg(long, global = true, value_name = "DIR")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "DIR",
+        help_heading = "Configuration"
+    )]
     pub config_dir: Option<PathBuf>,
     /// Explicit API base URL; never persisted
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "URL",
+        help_heading = "Configuration"
+    )]
     pub api_url: Option<String>,
     /// Explicit auth base URL; never persisted
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "URL",
+        help_heading = "Configuration"
+    )]
     pub auth_url: Option<String>,
     /// Explicit price service base URL; never persisted
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "URL",
+        help_heading = "Configuration"
+    )]
     pub price_url: Option<String>,
 }
 
@@ -283,63 +303,65 @@ fn parse_query_override(value: &str) -> std::result::Result<QueryOverride, Strin
 /// Positional resource identifier for operations with a target.
 #[derive(Debug, Args)]
 struct TargetFlags {
+    #[arg(help_heading = "Arguments")]
     resource_id: Uuid,
 }
 
 #[derive(Debug, Args)]
 struct QueryFlags {
     /// Additional documented query parameter, NAME=VALUE; repeatable
-    #[arg(long, value_name = "NAME=VALUE", action = ArgAction::Append, value_parser = parse_query_override)]
+    #[arg(long, value_name = "NAME=VALUE", action = ArgAction::Append, value_parser = parse_query_override, help_heading = "Query")]
     query: Vec<QueryOverride>,
 }
 
 #[derive(Debug, Args)]
 struct PaginationFlags {
     /// Fetch all pages; NDJSON streams page envelopes
-    #[arg(long)]
+    #[arg(long, help_heading = "Query")]
     all: bool,
 }
 
 #[derive(Debug, Args)]
 struct CheckoutFlags {
     /// Read the checkout credential from a file or - for stdin
-    #[arg(long, value_name = "PATH|-", value_parser = parse_token_source)]
+    #[arg(long, value_name = "PATH|-", value_parser = parse_token_source, help_heading = "Authentication")]
     token_file: Option<InputSource>,
 }
 
 #[derive(Debug, Args)]
 struct OriginFlags {
     /// Exact checkout browser origin
-    #[arg(long, value_parser = parse_origin)]
+    #[arg(long, value_parser = parse_origin, help_heading = "Authentication")]
     origin: Option<Origin>,
 }
 
 #[derive(Debug, Args)]
 struct WaitFlags {
     /// Wait for invoice readiness or payment completion
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help_heading = "Waiting and presentation")]
     wait: Option<WaitTarget>,
 }
 
 #[derive(Debug, Args)]
 struct InvoiceFlags {
     /// Render a ready BOLT11 invoice as a compact terminal QR code; implies --wait ready
-    #[arg(long)]
+    #[arg(long, help_heading = "Waiting and presentation")]
     qr: bool,
     /// Copy a ready BOLT11 invoice to the clipboard; implies --wait ready
-    #[arg(long)]
+    #[arg(long, help_heading = "Waiting and presentation")]
     copy: bool,
 }
 
 #[derive(Debug, Args)]
 struct DataFlags {
     /// Complete JSON object from @file or - for stdin
-    #[arg(long, value_name = "@FILE|-", value_parser = parse_data_source)]
+    #[arg(long, value_name = "@FILE|-", value_parser = parse_data_source, help_heading = "Request body")]
     data: Option<InputSource>,
 }
 
 /// Friendly flags for `wallets create`.
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Wallet")]
 #[group(id = "body-flags", multiple = true, conflicts_with = "data")]
 pub struct WalletFlags {
     /// Optional new resource UUID
@@ -364,6 +386,7 @@ pub struct WalletFlags {
 
 /// Friendly flags for `wallets update`.
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Wallet")]
 #[group(id = "body-flags", multiple = true, conflicts_with = "data")]
 pub struct UpdateWalletFlags {
     /// New wallet name
@@ -373,6 +396,7 @@ pub struct UpdateWalletFlags {
 
 /// Friendly flags for `payments create`, `payments send`, and `payments receive`.
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Payment")]
 #[group(id = "body-flags", multiple = true, conflicts_with = "data")]
 pub struct PaymentFlags {
     /// Optional payment UUID
@@ -418,6 +442,7 @@ pub struct PaymentFlags {
 
 /// Friendly flags for `quotes create`.
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Quote")]
 #[group(id = "body-flags", multiple = true, conflicts_with = "data")]
 pub struct QuoteFlags {
     /// Optional quote UUID
@@ -442,6 +467,7 @@ pub struct QuoteFlags {
 
 /// Friendly flags for `webhooks create`.
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Webhook")]
 #[group(id = "body-flags", multiple = true, conflicts_with = "data")]
 pub struct WebhookFlags {
     /// Optional webhook UUID
@@ -460,6 +486,7 @@ pub struct WebhookFlags {
 
 /// Friendly flags for `webhooks update`.
 #[derive(Debug, Args)]
+#[command(next_help_heading = "Webhook")]
 #[group(id = "body-flags", multiple = true, conflicts_with = "data")]
 pub struct UpdateWebhookFlags {
     /// Complete replacement event selection such as receive.completed; repeatable
@@ -532,9 +559,11 @@ pub struct Invocation {
 }
 
 impl Invocation {
-    /// Parse the process arguments, exiting with clap's usage error on invalid input.
-    pub fn from_env() -> Result<Self> {
-        Self::from_matches(&command().get_matches())
+    /// Parse process arguments without letting clap terminate the process. Startup decides
+    /// whether parse failures need clap's human rendering or the JSON error envelope.
+    pub fn from_env() -> std::result::Result<Self, ParseFailure> {
+        let matches = command().try_get_matches().map_err(ParseFailure::Clap)?;
+        Self::from_matches(&matches).map_err(ParseFailure::Validation)
     }
 
     #[cfg(test)]
@@ -563,6 +592,26 @@ impl Invocation {
         };
         Ok(Self { global, command })
     }
+}
+
+/// A command line can fail in clap itself or in validation of its typed matches.
+#[derive(Debug)]
+pub enum ParseFailure {
+    Clap(clap::Error),
+    Validation(Error),
+}
+
+/// `--json` affects parse-error rendering only when ordinary parsing cannot produce globals.
+/// Stop at `--` so a positional value with that spelling is not treated as an option.
+pub fn json_errors_requested<I, T>(args: I) -> bool
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<OsStr>,
+{
+    args.into_iter()
+        .skip(1)
+        .take_while(|arg| arg.as_ref() != OsStr::new("--"))
+        .any(|arg| arg.as_ref() == OsStr::new("--json"))
 }
 
 fn parse<T: FromArgMatches>(matches: &ArgMatches) -> Result<T> {
@@ -717,7 +766,8 @@ fn add_children(mut parent: ClapCommand, prefix: &[String]) -> ClapCommand {
                     .subcommand_required(true)
                     .arg_required_else_help(true),
                 &path,
-            ),
+            )
+            .about(group_about(&path)),
         };
         parent = parent.subcommand(cmd);
     }
@@ -736,18 +786,35 @@ fn add_children(mut parent: ClapCommand, prefix: &[String]) -> ClapCommand {
 
 /// The command for one operation: its positional target, documented filters, and options.
 fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapCommand {
+    let command_name = cmd.get_name().to_owned();
+    let mut notes = Vec::new();
+    if operation.body {
+        notes.push(
+            "Request body:\n  Use either friendly flags or --data @FILE/--data - for a complete JSON object; they cannot be combined."
+                .to_owned(),
+        );
+    }
+    if let Some(requirements) = friendly_requirements(operation.id, &command_name) {
+        notes.push(format!("Friendly flags:\n  {requirements}"));
+    }
+    if let Some(examples) = endpoint_examples(operation.id, &command_name) {
+        notes.push(format!("Examples:\n{examples}"));
+    }
     if !operation.is_environment_scoped() {
-        cmd = cmd.after_help(if operation.targets_wallet() {
-            "Wallets have organization scope. --env validates the wallet on reads and mutations; it does not change this endpoint's scope."
+        notes.push(if operation.targets_wallet() {
+            "Scope:\n  Wallets have organization scope. --env validates the wallet on reads and mutations; it does not change this endpoint's scope.".to_owned()
         } else {
-            "This endpoint has no environment filter. An environment in a profile does not narrow this operation."
+            "Scope:\n  This endpoint has no environment filter. An environment in a profile does not narrow this operation.".to_owned()
         });
     }
     if let Some(feature) = operation.id.gated_feature() {
-        cmd = cmd.after_help(format!(
-            "Voltage must enable the {} feature for the organization; otherwise the API rejects the request with feature_flag_disabled.",
+        notes.push(format!(
+            "Feature requirement:\n  Voltage must enable the {} feature for the organization; otherwise the API rejects the request with feature_flag_disabled.",
             feature.as_str()
         ));
+    }
+    if !notes.is_empty() {
+        cmd = cmd.after_help(notes.join("\n\n"));
     }
     if let Some(target) = operation.target {
         cmd = TargetFlags::augment_args(cmd)
@@ -789,6 +856,66 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     }
     // Derived option groups apply their own doc comments as `about`, so the text goes last.
     cmd.about(about)
+}
+
+/// Human descriptions for generated groups. Endpoint descriptions still come from the
+/// contract, while this small vocabulary explains how related endpoints fit together.
+fn group_about(path: &[String]) -> &'static str {
+    let words: Vec<_> = path.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["assets"] => "List assets supported by an organization",
+        ["bills"] => "Inspect billing statements and summaries",
+        ["checkout"] => "Manage hosted checkout sessions, settings, and event streams",
+        ["checkout", "events"] => "Watch hosted checkout events",
+        ["checkout", "sessions"] => "Create and inspect hosted checkout sessions",
+        ["checkout", "settings"] => "Inspect and update hosted checkout settings",
+        ["checkout", "streams"] => "Create credentials for checkout event streams",
+        ["credit-lines"] => "Inspect and manage lines of credit",
+        ["payments"] => "Create, inspect, and summarize payments",
+        ["quotes"] => "Create and inspect currency conversion quotes",
+        ["treasury"] => "Move funds between treasury accounts",
+        ["treasury", "movements"] => "Create treasury movements",
+        ["wallets"] => "Create, inspect, and manage wallets",
+        ["wallets", "ledger"] => "Inspect wallet ledger entries",
+        ["wallets", "payments"] => "Summarize payments for a wallet",
+        ["wallets", "policies"] => "Inspect and update wallet policies",
+        ["webhooks"] => "Create, inspect, and manage webhooks",
+        ["webhooks", "deliveries"] => "Inspect and retry webhook deliveries",
+        ["webhooks", "keys"] => "Rotate webhook signing keys",
+        _ => "Browse related Voltage API operations",
+    }
+}
+
+/// Required friendly-flag combinations that clap cannot express as simple required options.
+fn friendly_requirements(id: OperationId, command_name: &str) -> Option<&'static str> {
+    match (id, command_name) {
+        (OperationId::CreatePayment, "send") => Some(
+            "Pass --wallet and --currency, plus exactly one of --invoice or --address. Pair --amount with --unit and --max-fee with --fee-unit; on-chain sends require amount and unit.",
+        ),
+        (OperationId::CreatePayment, "receive") => Some(
+            "Pass --wallet, --currency, and --kind. If an amount is set, pass both --amount and --unit.",
+        ),
+        (OperationId::CreateWallet, "create") => Some(
+            "Select one environment with --env or --profile, then pass --name, --credit-line, --network, and --limit.",
+        ),
+        _ => None,
+    }
+}
+
+/// Focused examples for the commands where friendly-body combinations are least obvious.
+fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str> {
+    match (id, command_name) {
+        (OperationId::CreatePayment, "send") => Some(
+            "  voltage payments send --profile prod --wallet WALLET_ID --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --yes\n  voltage payments send --profile prod --wallet WALLET_ID --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --yes",
+        ),
+        (OperationId::CreatePayment, "receive") => Some(
+            "  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready",
+        ),
+        (OperationId::CreateWallet, "create") => Some(
+            "  voltage wallets create --profile prod --name treasury --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000",
+        ),
+        _ => None,
+    }
 }
 
 /// The generated flag for one documented filter, typed by the contract's schema.
@@ -866,6 +993,14 @@ mod tests {
             cmd.get_about().map(ToString::to_string)
         };
         assert_eq!(
+            about(&["payments"]).as_deref(),
+            Some("Create, inspect, and summarize payments")
+        );
+        assert_eq!(
+            about(&["checkout", "sessions"]).as_deref(),
+            Some("Create and inspect hosted checkout sessions")
+        );
+        assert_eq!(
             about(&["payments", "receive"]).as_deref(),
             Some("Create a receive payment using friendly flags")
         );
@@ -881,6 +1016,47 @@ mod tests {
             about(&["auth", "import-key"]).as_deref(),
             Some("Save an API key from hidden input or stdin")
         );
+    }
+
+    #[test]
+    fn representative_leaf_help_groups_options_and_explains_body_choices() {
+        let help = command()
+            .try_get_matches_from(["voltage", "payments", "send", "--help"])
+            .unwrap_err()
+            .to_string();
+        for heading in [
+            "Payment:",
+            "Scope:",
+            "Output:",
+            "Safety:",
+            "Request body:",
+            "Examples:",
+        ] {
+            assert!(help.contains(heading), "missing {heading} in:\n{help}");
+        }
+        assert!(help.contains("exactly one of --invoice or --address"));
+        assert!(help.contains("they cannot be combined"));
+        assert!(help.contains("voltage payments send"));
+
+        let help = command()
+            .try_get_matches_from(["voltage", "wallets", "create", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("Select one environment with --env or --profile"));
+        assert!(help.contains("voltage wallets create"));
+    }
+
+    #[test]
+    fn json_is_only_detected_as_an_option_before_the_argument_terminator() {
+        assert!(json_errors_requested(["voltage", "--json", "paymnts"]));
+        assert!(json_errors_requested(["voltage", "paymnts", "--json"]));
+        assert!(!json_errors_requested(["voltage", "paymnts"]));
+        assert!(!json_errors_requested(["voltage", "--", "--json"]));
+        assert!(!json_errors_requested([
+            "voltage",
+            "--query=label=--json",
+            "payments"
+        ]));
     }
 
     #[test]

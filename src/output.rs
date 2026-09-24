@@ -185,7 +185,8 @@ impl Output {
 
     pub fn write(&mut self, mut envelope: Envelope, secrets: &[&str]) -> Result<()> {
         if let Some(file) = &mut self.file {
-            serde_json::to_writer(&mut *file, &envelope)?;
+            let bytes = serde_json::to_vec(&envelope)?;
+            file.write_all(&bytes)?;
             file.write_all(b"\n")?;
             file.sync_all()?;
             return Ok(());
@@ -193,17 +194,31 @@ impl Output {
         if !self.show_secrets {
             redact(&mut envelope.data, secrets);
         }
-        let mut stdout = std::io::stdout().lock();
-        match self.format {
-            OutputFormat::Table => human(&mut stdout, &envelope)?,
-            OutputFormat::Json | OutputFormat::Ndjson => {
-                serde_json::to_writer(&mut stdout, &envelope)?;
-                stdout.write_all(b"\n")?;
+        let mut bytes = match self.format {
+            OutputFormat::Table => {
+                let mut buf = Vec::new();
+                human(&mut buf, &envelope)?;
+                buf
             }
+            OutputFormat::Json | OutputFormat::Ndjson => serde_json::to_vec(&envelope)?,
+        };
+        if self.format != OutputFormat::Table {
+            bytes.push(b'\n');
         }
-        stdout.flush()?;
-        Ok(())
+        write_stdout(&bytes)
     }
+}
+
+/// Write rendered output; a closed stdout ends the pipeline successfully.
+pub fn write_stdout(bytes: &[u8]) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(bytes)
+        .and_then(|()| stdout.flush())
+        .map_err(|error| Error {
+            stdout_closed: error.kind() == std::io::ErrorKind::BrokenPipe,
+            ..error.into()
+        })
 }
 
 /// Replace known secret fields and any presented credential text, recursively.
@@ -296,6 +311,8 @@ struct ErrorReport<'a> {
 struct ErrorBody<'a> {
     message: &'a str,
     exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'static str>,
     detail: Option<&'a ErrorDetail>,
 }
 
@@ -305,6 +322,7 @@ pub fn report_error(error: &Error, format: OutputFormat) {
         error: ErrorBody {
             message: &error.message,
             exit_code: error.kind.exit_code(),
+            hint: error.hint,
             detail: error.detail.as_ref(),
         },
     };
@@ -314,10 +332,14 @@ pub fn report_error(error: &Error, format: OutputFormat) {
     if format.is_machine_readable() {
         eprintln!("{body}");
     } else {
-        // The message can interpolate untrusted input; keep control characters off the terminal.
-        eprintln!("{}", scrub(&error.message));
+        // Messages can interpolate untrusted input; keep control characters off the terminal.
+        eprintln!("error: {}", scrub(&error.message));
+        if let Some(hint) = error.hint {
+            // Hints are static today; scrub defensively if they ever become dynamic.
+            eprintln!("hint: {}", scrub(hint));
+        }
         if let Some(detail) = body["error"]["detail"].as_object() {
-            eprintln!("{}", json!(detail));
+            eprintln!("details: {}", json!(detail));
         }
     }
 }

@@ -166,16 +166,20 @@ pub struct Scope {
 
 impl Scope {
     pub fn require_org(&self) -> Result<Uuid> {
-        self.org.ok_or_else(|| Error::usage("--org is required"))
+        self.org.ok_or_else(|| {
+            Error::usage("--org is required")
+                .with_hint("Pass --org UUID or select a profile with --profile NAME.")
+        })
     }
 
     /// Operations bound to one environment refuse an ambiguous list.
     pub fn single_env(&self) -> Result<Uuid> {
         match self.envs.as_slice() {
             [env] => Ok(*env),
-            _ => Err(Error::usage(
-                "Exactly one --env is required for this operation",
-            )),
+            _ => Err(
+                Error::usage("Exactly one --env is required for this operation")
+                    .with_hint("Pass one --env UUID or select a profile with --profile NAME."),
+            ),
         }
     }
 }
@@ -300,11 +304,11 @@ impl Settings {
         }
         let mut names = self.config.accounts.keys();
         match (names.next(), names.next()) {
-            (None, _) => Err(Error::auth("Run voltage login or provide VOLTAGE_API_KEY")),
+            (None, _) => Err(Error::auth("No credential is available")
+                .with_hint("Run voltage login, select --account, or provide VOLTAGE_API_KEY.")),
             (Some(name), None) => Ok(name.clone()),
-            (Some(_), Some(_)) => Err(Error::usage(
-                "Multiple credentials are saved; select --account or --profile",
-            )),
+            (Some(_), Some(_)) => Err(Error::usage("Multiple credentials are saved")
+                .with_hint("Select one with --account NAME or --profile NAME.")),
         }
     }
 

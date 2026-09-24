@@ -107,7 +107,9 @@ impl ErrorDetail {
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
+    pub hint: Option<&'static str>,
     pub detail: Option<ErrorDetail>,
+    pub(crate) stdout_closed: bool,
 }
 
 impl Error {
@@ -115,7 +117,9 @@ impl Error {
         Self {
             kind,
             message: message.into(),
+            hint: None,
             detail: None,
+            stdout_closed: false,
         }
     }
 
@@ -143,6 +147,11 @@ impl Error {
         Self::new(ErrorKind::Interrupted, message)
     }
 
+    pub fn with_hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(hint);
+        self
+    }
+
     pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
         self.detail = Some(detail);
         self
@@ -158,6 +167,12 @@ impl Error {
 
     pub fn is_transport(&self) -> bool {
         self.kind == ErrorKind::Transport
+    }
+
+    /// Only a closed stdout is successful pipeline termination. A broken file, stdin, or
+    /// stderr remains a transport failure.
+    pub fn is_stdout_closed(&self) -> bool {
+        self.stdout_closed
     }
 
     pub fn redacted(mut self, secrets: &[&str]) -> Self {
@@ -203,6 +218,13 @@ mod tests {
         assert_eq!(ErrorKind::Interrupted.exit_code(), 130);
         assert_eq!(ErrorKind::for_http_status(403), ErrorKind::Auth);
         assert_eq!(ErrorKind::for_http_status(500), ErrorKind::Api);
+    }
+
+    #[test]
+    fn io_errors_alone_do_not_indicate_closed_stdout() {
+        let closed: Error = std::io::Error::from(std::io::ErrorKind::BrokenPipe).into();
+        assert!(!closed.is_stdout_closed());
+        assert_eq!(closed.kind, ErrorKind::Transport);
     }
 
     #[test]
