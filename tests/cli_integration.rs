@@ -89,6 +89,23 @@ fn help_and_version_stay_on_stdout_when_json_is_present() {
 }
 
 #[test]
+fn version_leads_with_the_cargo_version_and_marks_the_build_separately() {
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .arg("--version")
+        .assert()
+        .success();
+    let version = stdout(&result);
+    let line = version.trim_end();
+    let prefix = format!("voltage {}", env!("CARGO_PKG_VERSION"));
+    // Release tooling and the Homebrew test read the first token; git detail may follow.
+    let build = line.strip_prefix(&prefix).unwrap();
+    assert!(
+        build.is_empty() || (build.starts_with(" (") && build.ends_with(')')),
+        "{line}"
+    );
+}
+
+#[test]
 fn human_runtime_errors_have_a_prefix_and_safe_hint() {
     let dir = private_tempdir();
     let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))

@@ -4,9 +4,16 @@
 //! deserialize into the closed enums in `src/registry.rs`. The build fails on a snapshot
 //! operation without a mapping, a mapping without an operation, or a mapping whose target is
 //! not a placeholder in the operation's path, so the two files cannot drift apart silently.
+//!
+//! It also stamps `voltage --version` with the git build it came from.
 
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, env, fs, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const SNAPSHOT: &str = "api/openapi.json";
 const MAPPING: &str = "api/commands.json";
@@ -127,7 +134,72 @@ fn operation_record(
     })
 }
 
+/// The Cargo version, then the git build it came from. A clean build of its own `vX.Y.Z`
+/// tag shows the commit and date, as `rustc --version` does. Any other build shows
+/// `git describe`, such as `v0.1.0-14-g0e6078b-dirty`, or a bare commit when no tag is
+/// reachable, so it cannot be mistaken for the release. Without a git checkout the version
+/// stands alone and the build still succeeds.
+fn version() -> String {
+    let package = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    // A non-empty prefix means this package is a subdirectory of some other repository.
+    if git(&["rev-parse", "--show-prefix"]).is_some_and(|prefix| !prefix.is_empty()) {
+        return package;
+    }
+    watch_git_state();
+    let describe = [
+        "describe", "--tags", "--match", "v[0-9]*", "--dirty", "--always",
+    ];
+    let Some(build) = git(&describe) else {
+        return package;
+    };
+    let build = if build == format!("v{package}") {
+        git(&["log", "-1", "--format=%h %cs"]).unwrap_or(build)
+    } else {
+        build
+    };
+    format!("{package} ({build})")
+}
+
+/// Trimmed stdout of a successful, non-empty git command. Optional locks are off so that
+/// describing the tree never rewrites the index.
+fn git(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("--no-optional-locks")
+        .args(args)
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    output.status.success().then(|| text.trim().to_owned())
+}
+
+/// Cargo reruns a build script only when a watched path changes, so a commit, checkout,
+/// or tag that touches no source file must be watched explicitly. Source edits refresh
+/// `-dirty`, which otherwise reflects the tree when this script last ran. A missing path
+/// would rerun the script on every build, so only existing paths are watched.
+fn watch_git_state() {
+    let mut paths = vec![
+        PathBuf::from("src"),
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("Cargo.lock"),
+    ];
+    if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
+        paths.push(Path::new(&dir).join("HEAD"));
+    }
+    if let Some(common) = git(&["rev-parse", "--git-common-dir"]) {
+        let common = PathBuf::from(common);
+        paths.push(common.join("packed-refs"));
+        paths.push(common.join("refs/tags"));
+        if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            paths.push(common.join(branch));
+        }
+    }
+    for path in paths.into_iter().filter(|path| path.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
 fn main() {
+    println!("cargo:rustc-env=VOLTAGE_VERSION={}", version());
     println!("cargo:rerun-if-changed={SNAPSHOT}");
     println!("cargo:rerun-if-changed={MAPPING}");
     let spec = read_json(SNAPSHOT);
