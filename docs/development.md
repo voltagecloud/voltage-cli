@@ -18,6 +18,35 @@ cargo build --locked
 Project-local tool installs belong under the gitignored `.work/` directory, for example
 `cargo install --root .work/tools ...`, so the global `~/.cargo/bin` stays untouched.
 
+## Nix development shell (optional)
+
+Install Nix with flakes enabled and run `nix develop` from the repository root. The
+committed `flake.lock` pins nixpkgs and rust-overlay; the shell reads the exact Rust
+version and components from `rust-toolchain.toml` and includes Python 3 and
+`cargo-machete`. Once inside, run the [verification gate](#verification-gate) normally.
+No OpenSSL or D-Bus development packages are required. Real Linux native keychain use
+still needs a running, unlocked Secret Service.
+
+For automatic activation, install direnv and enable its shell hook (for example,
+`eval "$(direnv hook zsh)"` in `.zshrc`, or use `bash` in `.bashrc`). Optionally install
+nix-direnv for cached activation, then run `direnv allow` in the repository root. Leave
+the directory to unload the shell. `.envrc` only activates the flake: it does not load
+`.env`, credentials, or staging endpoints.
+
+After editing the shell, run `nix develop` again (or `direnv reload` if using direnv).
+To update the pinned sources deliberately, run `nix flake update`, review the
+`flake.lock` diff, rerun the full gate in `nix develop`, and commit the lock file.
+When changing Rust versions or components, update `rust-toolchain.toml` as well and
+verify `rustc --version` in the shell. Supported shell targets are aarch64/x86_64
+macOS and Linux; all four shell derivations evaluate, but only aarch64 macOS was built
+and tested with Nix. The other Nix shells remain unverified at runtime (CI builds those
+platforms using rustup). Native Windows Nix is not
+supported. This is a development environment, not a release artifact or a Nix package.
+
+Nix and direnv are not required: `rustup toolchain install` installs the pinned
+Rust toolchain, and `cargo install cargo-machete --version 0.9.2 --locked` supplies
+the extra verification tool for the existing rustup workflow.
+
 ## Verification gate
 
 Run before every push. CI runs the same commands.
