@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+#[cfg(unix)]
 use tokio::sync::Notify;
 use voltage_cli::{
     config::{
@@ -1308,6 +1309,7 @@ fn interrupt(child: &std::process::Child) {
 
 /// Answer with `response` and announce each arrival, so a test acts only once the request
 /// is in flight.
+#[cfg(unix)]
 fn announced(response: ResponseTemplate) -> (impl Respond, Arc<Notify>) {
     let arrived = Arc::new(Notify::new());
     let announce = Arc::clone(&arrived);
@@ -1355,6 +1357,7 @@ async fn interrupt_in_flight(
 }
 
 /// The JSON error report: the last line of stderr, after any recovery notice.
+#[cfg(unix)]
 fn error_report(stderr: &[u8]) -> Value {
     serde_json::from_str(String::from_utf8_lossy(stderr).lines().last().unwrap()).unwrap()
 }
