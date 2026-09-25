@@ -17,13 +17,12 @@ use crate::{
     payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
     registry::{AuthScheme, Method, Operation, OperationId},
     secret::Secret,
-    startup::SubmissionState,
     terminal::Terminal,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, io::Write, time::Duration};
+use std::{collections::BTreeSet, io::Write, sync::OnceLock, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -124,7 +123,7 @@ impl Api {
             base: auth::base_url(global.api_url.as_deref().unwrap_or(API_URL))?,
             authorization,
             origin: invocation.origin.clone(),
-            terminal: Terminal::new(global.quiet),
+            terminal: global.terminal(),
         })
     }
 
@@ -455,11 +454,8 @@ pub async fn execute(
     }
     // Decline a noninteractive confirmation before refreshing credentials or making
     // a wallet preflight request. The summary is still mandatory even in quiet mode.
-    if request.is_consequential(operation)
-        && !global.yes
-        && !Terminal::new(global.quiet).can_prompt(global.no_input)
-    {
-        return confirm(operation, scope, &request, global);
+    if request.is_consequential(operation) && !global.yes && !global.terminal().can_prompt() {
+        return confirm(operation, scope, &request, global).await;
     }
     let authorization = Authorization::resolve(invocation, global, settings, scope).await?;
     let api = Api::new(global, invocation, authorization)?;
@@ -515,12 +511,12 @@ async fn guard_submission(
         verify_wallet_environment(api, scope, invocation.resource_id).await?;
     }
     if request.is_consequential(operation) {
-        confirm(operation, scope, request, global)?;
+        confirm(operation, scope, request, global).await?;
     }
     if operation.method != Method::Get
         && let (Some(body), Some(id)) = (&request.body, request.body_id)
     {
-        journal(settings, operation, scope, body, id)?;
+        journal(settings, operation, scope, body, id, api.terminal)?;
     }
     Ok(())
 }
@@ -603,13 +599,13 @@ struct ConfirmationSummary<'a> {
 }
 
 /// Show the resolved scope and request on stderr, then require `--yes` or a terminal answer.
-fn confirm(
+async fn confirm(
     operation: &Operation,
     scope: &Scope,
     request: &Request,
     global: &GlobalFlags,
 ) -> Result<()> {
-    let terminal = Terminal::new(global.quiet);
+    let terminal = global.terminal();
     let mut summary = serde_json::to_value(ConfirmationSummary {
         action: operation.command.join(" "),
         organization: scope.org,
@@ -627,16 +623,12 @@ fn confirm(
     if global.yes {
         return Ok(());
     }
-    if !terminal.can_prompt(global.no_input) {
+    if !terminal.can_prompt() {
         return Err(Error::usage(
             "This operation requires --yes when input is disabled or noninteractive",
         ));
     }
-    eprint!("Proceed? [y/N] ");
-    std::io::stderr().flush()?;
-    let mut reply = String::new();
-    std::io::stdin().read_line(&mut reply)?;
-    if !matches!(reply.trim(), "y" | "Y" | "yes") {
+    if !terminal.confirm("Proceed?").await? {
         return Err(Error::usage("Operation cancelled before submission"));
     }
     Ok(())
@@ -670,6 +662,7 @@ fn journal(
     scope: &Scope,
     body: &Value,
     id: Uuid,
+    terminal: Terminal,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     private_dir(&settings.dir)?;
@@ -696,11 +689,56 @@ fn journal(
     let mut file = new_private(&path)?;
     file.write_all(&serde_json::to_vec(&record)?)?;
     file.sync_all()?;
-    Terminal::new(false).important(format!(
+    terminal.important(format!(
         "Resource ID: {id}. Recovery record: {}",
         path.display()
     ));
     Ok(())
+}
+
+/// The write this command may have sent, for reporting an interruption. It is recorded
+/// immediately before the request leaves the process, never during validation, confirmation,
+/// or wallet preflight: once sending starts, a cancelled future cannot tell whether the
+/// service received the request.
+#[derive(Default)]
+pub struct SubmissionState(OnceLock<SubmittedWrite>);
+
+struct SubmittedWrite {
+    operation: OperationId,
+    resource_id: Option<Uuid>,
+    organization_id: Option<Uuid>,
+    environment_ids: Vec<Uuid>,
+}
+
+impl SubmissionState {
+    /// A command sends at most one mutation, so the first record is the only one.
+    fn record(&self, operation: OperationId, resource_id: Option<Uuid>, scope: &Scope) {
+        let _ = self.0.set(SubmittedWrite {
+            operation,
+            resource_id,
+            organization_id: scope.org,
+            environment_ids: scope.envs.clone(),
+        });
+    }
+
+    /// The error for Ctrl-C. It claims a write may continue only when one may have been sent,
+    /// and never claims that the write was cancelled.
+    pub fn interrupted(&self) -> Error {
+        let Some(write) = self.0.get() else {
+            return Error::interrupted("Interrupted before any change was submitted");
+        };
+        let message = match write.resource_id {
+            Some(id) if write.operation.submits_payment() => format!(
+                "Interrupted after payment {id} may have been submitted; query its original ID before resubmitting. The payment was not cancelled."
+            ),
+            _ => "Interrupted after the request may have been submitted; check its result before retrying. The request was not cancelled.".to_owned(),
+        };
+        Error::interrupted(message).with_detail(ErrorDetail::uncertain_submission(
+            write.resource_id,
+            write.organization_id,
+            write.environment_ids.clone(),
+        ))
+    }
 }
 
 struct Submission {
@@ -719,10 +757,8 @@ async fn submit(
     submission: &SubmissionState,
 ) -> Result<Submission> {
     let operation = invocation.operation;
-    if operation.id.submits_payment()
-        && let Some(id) = request.resource_id
-    {
-        submission.payment_started(id, scope.org, &scope.envs);
+    if operation.method != Method::Get {
+        submission.record(operation.id, request.resource_id, scope);
     }
     let result = api
         .send(
@@ -945,14 +981,16 @@ async fn await_session_projection(
 ) -> Result<Response> {
     let mut backoff = Backoff::new(SESSION_POLL_START, POLL_CEILING);
     while response.status == 202 {
-        let _progress = api
-            .terminal
-            .progress("Waiting for checkout session projection...");
         let pause = response.retry_after.unwrap_or_else(|| backoff.pause());
         if Instant::now() + pause >= deadline {
             return Err(Error::timeout("Checkout session projection is not ready"));
         }
-        tokio::time::sleep(pause).await;
+        {
+            let _progress = api
+                .terminal
+                .progress("Waiting for checkout session projection...");
+            tokio::time::sleep(pause).await;
+        }
         response = tokio::time::timeout_at(
             deadline,
             api.send(Method::Get, &request.path, &request.query, None),
@@ -1140,7 +1178,7 @@ mod tests {
             base: "https://api.example.test/v1".into(),
             authorization,
             origin: None,
-            terminal: Terminal::new(false),
+            terminal: Terminal::new(false, false),
         }
     }
 
@@ -1323,6 +1361,46 @@ mod tests {
     }
 
     #[test]
+    fn interruption_claims_a_possible_submission_only_after_a_write_starts() {
+        let submission = SubmissionState::default();
+        let before = submission.interrupted();
+        assert_eq!(before.kind, ErrorKind::Interrupted);
+        assert_eq!(
+            before.message,
+            "Interrupted before any change was submitted"
+        );
+        assert!(before.detail.is_none());
+
+        let id = Uuid::nil();
+        submission.record(OperationId::CreatePayment, Some(id), &scope());
+        // Only the first write is the command's submission.
+        submission.record(OperationId::DeleteWallet, None, &scope());
+        let after = submission.interrupted();
+        assert!(
+            after
+                .message
+                .contains(&format!("payment {id} may have been submitted"))
+        );
+        assert!(after.message.contains("was not cancelled"));
+        let detail = serde_json::to_value(after.detail.unwrap()).unwrap();
+        assert_eq!(detail["resource_id"], json!(id));
+        assert_eq!(detail["organization_id"], json!(ORG));
+        assert_eq!(detail["outcome"], "unknown");
+    }
+
+    #[test]
+    fn interruption_after_another_write_is_uncertain_without_naming_a_payment() {
+        let submission = SubmissionState::default();
+        submission.record(OperationId::DeleteWallet, None, &scope());
+        let error = submission.interrupted();
+        assert!(!error.message.contains("payment"));
+        assert!(error.message.contains("may have been submitted"));
+        let detail = serde_json::to_value(error.detail.unwrap()).unwrap();
+        assert!(detail["resource_id"].is_null());
+        assert_eq!(detail["outcome"], "unknown");
+    }
+
+    #[test]
     fn journal_rejects_the_same_id_for_a_different_request() {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -1337,16 +1415,18 @@ mod tests {
         let create_payment = operation(OperationId::CreatePayment);
         let id = Uuid::nil();
         let body = json!({"id": id, "wallet_id": WALLET});
-        journal(&settings, create_payment, &scope(), &body, id).unwrap();
-        journal(&settings, create_payment, &scope(), &body, id).unwrap();
+        let terminal = Terminal::new(false, false);
+        journal(&settings, create_payment, &scope(), &body, id, terminal).unwrap();
+        journal(&settings, create_payment, &scope(), &body, id, terminal).unwrap();
         let changed = json!({"id": id, "wallet_id": ORG});
-        let error = journal(&settings, create_payment, &scope(), &changed, id).unwrap_err();
+        let error =
+            journal(&settings, create_payment, &scope(), &changed, id, terminal).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Usage);
         let other_scope = Scope {
             envs: Vec::new(),
             ..scope()
         };
-        assert!(journal(&settings, create_payment, &other_scope, &body, id).is_err());
+        assert!(journal(&settings, create_payment, &other_scope, &body, id, terminal).is_err());
         let record: JournalRecord = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join(JOURNAL_DIR).join(format!("{id}.json")))
                 .unwrap(),

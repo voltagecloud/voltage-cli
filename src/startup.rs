@@ -1,8 +1,8 @@
 //! Process composition: parse the command line, run one command, report, and exit.
 
-use crate::error::ErrorDetail;
 use crate::{
-    Error, Result, api,
+    Error, Result,
+    api::{self, SubmissionState},
     auth::{self, Discovery},
     cli::{
         self, AuthCommand, Command, GlobalFlags, Invocation, LocalCommand, ParseFailure,
@@ -14,42 +14,7 @@ use crate::{
     terminal::Terminal,
 };
 use serde::Serialize;
-use std::{
-    process::ExitCode,
-    sync::{Arc, Mutex},
-};
-use uuid::Uuid;
-
-/// Set only at the point where a write can leave the process, never during validation or
-/// wallet preflight. A cancelled future cannot tell whether the remote service received it.
-struct PaymentSubmission {
-    id: Uuid,
-    org: Option<Uuid>,
-    envs: Vec<Uuid>,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct SubmissionState(Arc<Mutex<Option<PaymentSubmission>>>);
-
-impl SubmissionState {
-    pub fn payment_started(&self, id: Uuid, org: Option<Uuid>, envs: &[Uuid]) {
-        *self.0.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(PaymentSubmission {
-            id,
-            org,
-            envs: envs.to_vec(),
-        });
-    }
-
-    fn interrupted(&self) -> Error {
-        let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
-        match state.take() {
-            Some(PaymentSubmission { id, org, envs }) => Error::interrupted(format!(
-                "Interrupted after payment {id} may have been submitted; query its original ID before resubmitting. The payment was not cancelled."
-            )).with_detail(ErrorDetail::uncertain_submission(Some(id), org, envs)),
-            None => Error::interrupted("Interrupted before a payment submission; no payment was sent by this command"),
-        }
-    }
-}
+use std::process::ExitCode;
 
 const BINARY_NAME: &str = "voltage";
 
@@ -64,7 +29,8 @@ pub async fn run() -> ExitCode {
     let result = tokio::select! {
         result = execute(invocation, &submission) => result,
         _ = tokio::signal::ctrl_c() => {
-            // The next interrupt must not wait for synchronous cleanup or stderr I/O.
+            // The next interrupt must not wait for synchronous cleanup or stderr I/O. The
+            // listener is detached on purpose: runtime shutdown after the report ends it.
             tokio::spawn(async {
                 if tokio::signal::ctrl_c().await.is_ok() {
                     std::process::exit(130);
@@ -120,7 +86,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         clap_complete::generate(shell, &mut cli::command(), BINARY_NAME, &mut script);
         return write_stdout(&script);
     }
-    let terminal = Terminal::new(global.quiet);
+    let terminal = global.terminal();
     let mut out = Output::new(
         global.output_format(),
         global.show_secrets,
@@ -132,7 +98,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             global.price_url.as_deref().unwrap_or(PRICE_URL),
             global.timeout,
         )?;
-        let _progress = terminal.progress("Waiting for price service...");
+        let progress = terminal.progress("Waiting for price service...");
         let envelope = match command {
             Command::Local(LocalCommand::Price(flags)) => {
                 Envelope::local(service.report(flags.at.as_deref()).await?)?
@@ -144,7 +110,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             )?,
             _ => unreachable!("matched above"),
         };
-        drop(_progress);
+        drop(progress);
         return out.write(envelope, &[]);
     }
     let mut settings = Settings::open(config::directory(global.config_dir.clone())?)?;
@@ -169,7 +135,7 @@ async fn local_command(
     match command {
         LocalCommand::Login(flags) => Envelope::local(auth::login(settings, &flags, global).await?),
         LocalCommand::Logout(flags) => {
-            Envelope::local(auth::logout(settings, scope, flags.local, global.quiet).await?)
+            Envelope::local(auth::logout(settings, scope, flags.local, global.terminal()).await?)
         }
         LocalCommand::Auth {
             command: AuthCommand::Status,
@@ -184,7 +150,7 @@ async fn local_command(
             Envelope::local(auth::discover(settings, scope, global, Discovery::Environments).await?)
         }
         LocalCommand::Profiles { command } => {
-            profiles(command, settings, scope, global.quiet).await
+            profiles(command, settings, scope, global.terminal()).await
         }
         LocalCommand::Completions { .. } | LocalCommand::Price(_) | LocalCommand::Convert(_) => {
             Err(Error::usage("This command needs no configuration"))
@@ -210,9 +176,9 @@ async fn profiles(
     command: ProfileCommand,
     settings: &mut Settings,
     scope: &Scope,
-    quiet: bool,
+    terminal: Terminal,
 ) -> Result<Envelope> {
-    let _lock = settings.lock(quiet).await?;
+    let _lock = settings.lock(terminal).await?;
     settings.reload()?;
     let unknown = || Error::usage("Unknown profile");
     match command {

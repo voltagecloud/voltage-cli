@@ -13,6 +13,7 @@ use crate::{
     payment::{AmountUnit, Currency, Network, PaymentDirection, ReceiveKind, WaitTarget},
     price::ConversionRequest,
     registry::{OPERATIONS, Operation, OperationId, Parameter, operation},
+    terminal::Terminal,
 };
 use clap::{
     Arg, ArgAction, ArgMatches, Args, Command as ClapCommand, FromArgMatches, Subcommand,
@@ -111,6 +112,10 @@ pub struct GlobalFlags {
 impl GlobalFlags {
     pub fn output_format(&self) -> OutputFormat {
         OutputFormat::select(self.json, self.output)
+    }
+
+    pub fn terminal(&self) -> Terminal {
+        Terminal::new(self.quiet, self.no_input)
     }
 
     pub fn scope_selection(&self) -> ScopeSelection {

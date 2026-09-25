@@ -368,7 +368,7 @@ pub async fn login(
         ));
     }
     let client = client(AUTH_TIMEOUT)?;
-    let terminal = Terminal::new(global.quiet);
+    let terminal = global.terminal();
     let response = auth_request(
         client
             .post(format!("{url}/oauth/device_authorization"))
@@ -392,7 +392,7 @@ pub async fn login(
     let saved = save_login(settings, login, flags, global, &client, &url).await;
     if saved.is_err() {
         // A local storage/discovery failure must not silently orphan a remote session.
-        if revoke(&client, &url, &session, global.quiet).await.is_err() {
+        if revoke(&client, &url, &session, terminal).await.is_err() {
             terminal.important(
                 "Could not revoke the new CLI session after login failed. Use account global signout to invalidate its refresh session."
             );
@@ -467,7 +467,7 @@ async fn save_login(
             client
                 .get(format!("{url}/users/current"))
                 .bearer_auth(login.access_token.expose()),
-            Terminal::new(global.quiet),
+            global.terminal(),
         )
         .await?;
         response.require_success()?;
@@ -480,7 +480,7 @@ async fn save_login(
             .or_else(|| login.email.clone())
             .or_else(|| login.user_id.clone())
             .ok_or_else(|| Error::auth("User response has no account identity"))?;
-        let _lock = settings.lock(global.quiet).await?;
+        let _lock = settings.lock(global.terminal()).await?;
         settings.reload()?;
         if settings.config.accounts.contains_key(&name) {
             return Err(Error::usage(format!(
@@ -520,7 +520,7 @@ async fn revoke(
     client: &reqwest::Client,
     url: &str,
     refresh_token: &Secret,
-    quiet: bool,
+    terminal: Terminal,
 ) -> Result<()> {
     auth_request(
         client.post(format!("{url}/oauth/revoke")).form(&[
@@ -528,7 +528,7 @@ async fn revoke(
             ("token_type_hint", "refresh_token"),
             ("token", refresh_token.expose()),
         ]),
-        Terminal::new(quiet),
+        terminal,
     )
     .await?
     .require_success()
@@ -571,14 +571,14 @@ pub async fn resolve(
                     "Saved credentials cannot be refreshed at a different auth URL",
                 ));
             }
-            let _lock = settings.lock(flags.quiet).await?;
+            let _lock = settings.lock(flags.terminal()).await?;
             let Credential::Login(login) = settings.read_credential(&name)? else {
                 return Err(Error::auth("Invalid saved credential"));
             };
             if login.expires_at > now() + REFRESH_MARGIN {
                 return Ok(Credential::Login(login));
             }
-            let refreshed = Credential::Login(refresh(&url, login, flags.quiet).await?);
+            let refreshed = Credential::Login(refresh(&url, login, flags.terminal()).await?);
             settings.write_credential(&name, account.store, &refreshed)?;
             Ok(refreshed)
         }
@@ -587,7 +587,7 @@ pub async fn resolve(
 
 /// Rotate an expiring login; the refresh token is single use, so the result is saved
 /// before any caller sees it.
-async fn refresh(url: &str, login: Login, quiet: bool) -> Result<Login> {
+async fn refresh(url: &str, login: Login, terminal: Terminal) -> Result<Login> {
     let response = auth_request(
         client(AUTH_TIMEOUT)?
             .post(format!("{url}/oauth/token"))
@@ -596,7 +596,7 @@ async fn refresh(url: &str, login: Login, quiet: bool) -> Result<Login> {
                 ("grant_type", "refresh_token"),
                 ("refresh_token", login.refresh_token.expose()),
             ]),
-        Terminal::new(quiet),
+        terminal,
     )
     .await?;
     response.require_success()?;
@@ -627,7 +627,7 @@ pub async fn resolve_organization(
                 ("subject_token_type", ACCESS_TOKEN_TYPE),
                 ("audience", &organization.to_string()),
             ]),
-        Terminal::new(flags.quiet),
+        flags.terminal(),
     )
     .await?;
     response.require_success()?;
@@ -646,9 +646,9 @@ pub async fn logout(
     settings: &mut Settings,
     scope: &Scope,
     local: bool,
-    quiet: bool,
+    terminal: Terminal,
 ) -> Result<LogoutOutcome> {
-    let _lock = settings.lock(quiet).await?;
+    let _lock = settings.lock(terminal).await?;
     settings.reload()?;
     let name = settings.account_name(scope)?;
     let account = settings.account(&name)?;
@@ -659,7 +659,7 @@ pub async fn logout(
             ));
         };
         let url = base_url(&account.auth_url)?;
-        revoke(&client(AUTH_TIMEOUT)?, &url, &login.refresh_token, quiet).await?;
+        revoke(&client(AUTH_TIMEOUT)?, &url, &login.refresh_token, terminal).await?;
     }
     settings.delete_credential(&name)?;
     settings.config.accounts.remove(&name);
@@ -690,20 +690,18 @@ pub async fn import_key(
     let key = if flags.stdin {
         read_secret(&InputSource::Stdin)?
     } else {
-        if !Terminal::new(global.quiet).can_prompt(global.no_input) {
+        let terminal = global.terminal();
+        if !terminal.can_prompt() {
             return Err(Error::usage(
                 "Use --stdin to import an API key when input is disabled or noninteractive (--yes does not supply a key)",
             ));
         }
-        Secret::new(
-            rpassword::prompt_password("Environment API key: ")
-                .map_err(|error| Error::transport(error.to_string()))?,
-        )
+        terminal.read_hidden("Environment API key: ").await?
     };
     if key.expose().trim().is_empty() {
         return Err(Error::usage("API key cannot be empty"));
     }
-    let _lock = settings.lock(global.quiet).await?;
+    let _lock = settings.lock(global.terminal()).await?;
     settings.reload()?;
     if settings.config.accounts.contains_key(&name) {
         return Err(Error::usage("Credential already exists"));
@@ -757,7 +755,7 @@ pub async fn discover(
         client(AUTH_TIMEOUT)?
             .get(format!("{url}{path}"))
             .bearer_auth(token.expose()),
-        Terminal::new(flags.quiet),
+        flags.terminal(),
     )
     .await?;
     response.require_success()?;
