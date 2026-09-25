@@ -23,7 +23,11 @@ Project-local tool installs belong under the gitignored `.work/` directory, for 
 Install Nix with flakes enabled and run `nix develop` from the repository root. The
 committed `flake.lock` pins nixpkgs and rust-overlay; the shell reads the exact Rust
 version and components from `rust-toolchain.toml` and includes Python 3 and
-`cargo-machete`. Once inside, run the [verification gate](#verification-gate) normally.
+`cargo-machete`. On entry from the repository root it runs `cargo build --locked` and
+adds the checkout's `target/debug` to `PATH`, so `voltage --help` uses the development
+binary. Cargo's incremental build does not recompile unchanged sources. If the build
+fails, the shell remains available but does not add the binary to `PATH`. Once inside,
+run the [verification gate](#verification-gate) normally.
 No OpenSSL or D-Bus development packages are required. Real Linux native keychain use
 still needs a running, unlocked Secret Service.
 
@@ -33,7 +37,10 @@ nix-direnv for cached activation, then run `direnv allow` in the repository root
 the directory to unload the shell. `.envrc` only activates the flake: it does not load
 `.env`, credentials, or staging endpoints.
 
-After editing the shell, run `nix develop` again (or `direnv reload` if using direnv).
+After editing Rust code in an already-open shell, run `cargo build --locked` to
+update the same `voltage` binary on `PATH` (or use `cargo run --locked -- ...` to
+build and run in one command). Direnv does not watch Rust source changes. After
+editing the shell, run `nix develop` again (or `direnv reload` if using direnv).
 To update the pinned sources deliberately, run `nix flake update`, review the
 `flake.lock` diff, rerun the full gate in `nix develop`, and commit the lock file.
 When changing Rust versions or components, update `rust-toolchain.toml` as well and
