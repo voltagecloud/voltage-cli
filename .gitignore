@@ -1,5 +1,6 @@
 /target/
 /.work/
+/.direnv/
 /docs/plans/
 .DS_Store
 __pycache__/
