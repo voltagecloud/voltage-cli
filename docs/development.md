@@ -15,6 +15,15 @@ cargo build --locked
 ./target/debug/voltage --help
 ```
 
+`voltage --version` names the build after the Cargo version. A clean build of its own
+release tag shows the commit and date, such as `voltage 0.1.0 (a627981 2026-09-24)`.
+Any other build shows `git describe`, such as `voltage 0.1.0 (v0.1.0-14-g0e6078b-dirty)`:
+14 commits after the tag, with uncommitted changes. When no release tag is reachable it
+shows only the commit. Compare it with `git rev-parse --short HEAD` to catch a stale
+binary. `-dirty` reflects the tree when `build.rs` last ran, which is after a commit,
+checkout, tag, or change under `src/`, `Cargo.toml`, or `Cargo.lock`. A build outside a
+git checkout shows the Cargo version alone.
+
 Project-local tool installs belong under the gitignored `.work/` directory, for example
 `cargo install --root .work/tools ...`, so the global `~/.cargo/bin` stays untouched.
 

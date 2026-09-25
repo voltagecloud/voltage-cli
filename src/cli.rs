@@ -733,7 +733,7 @@ fn takes_origin(operation: &Operation) -> bool {
 /// The complete command tree, for parsing, help, and completions.
 pub fn command() -> ClapCommand {
     let root = ClapCommand::new("voltage")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(env!("VOLTAGE_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true);
     let root = GlobalFlags::augment_args(root);
