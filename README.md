@@ -170,9 +170,9 @@ voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120
 
 For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--copy` puts it on the clipboard as soon as it is ready. Either flag implies `--wait ready`; with `--wait completed` the invoice is shown first and polling continues to settlement.
 
-Sends, treasury movements, deletes, webhook key rotation, and disabling a credit line ask for confirmation after printing the resolved scope and request to stderr. Non-interactive use needs `--yes`.
+Sends, treasury movements, deletes, webhook key rotation, and disabling a credit line ask for confirmation after printing the resolved scope and request to stderr. Non-interactive use needs `--yes`. `--no-input` forbids prompts even on a terminal: use `--yes --no-input` to approve a consequential action, and supply credentials via environment, private file, or `--stdin` (for `auth import-key`). `--yes` never supplies a secret.
 
-Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if the payment is visible, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130 and never cancels a submitted payment.
+Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if the payment is visible, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130, including at a confirmation prompt: before a write is sent it reports that nothing was submitted; once a write may have been sent it reports the outcome as unknown, with the original ID and reconciliation instructions for a payment. It never cancels a submitted request.
 
 ## Output
 
@@ -182,7 +182,7 @@ On a terminal, results are readable tables; when piped, they are JSON. `--json` 
 {"http_status":202,"data":null,"resource_id":"PAYMENT_ID","outcome":"accepted"}
 ```
 
-API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr. Human errors start with `error:` and may include a safe `hint:`; `--json` makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
+API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr. Interactive stderr shows immediate, cancellable status for network requests and waits; redirected stderr gets no spinner/control codes. `-q, --quiet` suppresses optional status and notices, never requested results, errors, confirmation details, warnings, or recovery IDs. Human errors start with `error:` and may include a safe `hint:`; `--json` makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
 
 Known secret fields and the credentials the CLI presented are redacted from normal output and from error details. Operations that return a one-time secret (webhook creation and key rotation, checkout sessions, stream tokens) refuse to run unless you pass `--output-file PATH`, which writes the complete response to a new owner-only file, or `--show-secrets`. Treat your own metadata as potentially sensitive; redaction cannot recognise it.
 
