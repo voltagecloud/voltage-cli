@@ -126,6 +126,13 @@ cat payment.json | voltage payments create --profile prod --data - --yes
 
 Common operations also offer friendly flags (`wallets create`, `wallets update`, `payments receive`, `payments send`, `quotes create`, `webhooks create`, `webhooks update`); `--help` lists them. Friendly flags and `--data` are mutually exclusive, and a payload whose IDs conflict with the selected scope is rejected.
 
+Backend v6.14.0 adds `payments list --check-only true` for checks and
+`--check-only false` to exclude them. Omit it for the combined list. `--all`
+retains the selected filter on every cursor request; manual cursor requests must
+repeat it. Send response JSON includes `check_only`; receive responses omit it.
+The flag identifies current check/send classification, not settlement, and older
+failed checks may be unmarked.
+
 Documented query filters are flags named after the parameter. Parameters with a fixed set of values accept only those values, case-insensitively, and are sent in the contract's spelling. `--query NAME=VALUE` sets any documented parameter and can be repeated:
 
 ```sh
@@ -172,7 +179,16 @@ For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--cop
 
 Sends, treasury movements, deletes, webhook key rotation, and disabling a credit line ask for confirmation after printing the resolved scope and request to stderr. Non-interactive use needs `--yes`.
 
-Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if the payment is visible, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130 and never cancels a submitted payment.
+Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if a matching payment projection establishes acceptance, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130 and never cancels a submitted payment.
+
+An approved check made with `payments check --data @send.json` can be promoted
+with `payments create --data @send.json --yes` in the same scope. Keep the same
+ID and identical body. The CLI requires a server read showing an approved send
+with `check_only=true` before transitioning the journal. It remembers the
+promotion across restarts: a stale check or missing classification after a dropped
+connection remains uncertain; an explicit ordinary-send projection can establish
+acceptance. Never remove the journal to bypass a rejected promotion. Normal
+validation, funding and settlement still apply.
 
 ## Output
 

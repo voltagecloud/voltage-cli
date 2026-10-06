@@ -10,7 +10,9 @@ use crate::{
     auth::{self, ApiCredential},
     backoff::{Backoff, POLL_CEILING},
     cli::{ApiInvocation, GlobalFlags, Origin},
-    config::{API_URL, Scope, Settings, new_private, private_dir, read_private, read_secret},
+    config::{
+        API_URL, Scope, Settings, atomic_write, new_private, private_dir, read_private, read_secret,
+    },
     error::{ErrorDetail, ErrorKind},
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output, redact},
@@ -448,14 +450,15 @@ pub async fn execute(
             "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor."
         );
     }
-    guard_submission(&api, invocation, &request, settings, scope, global).await?;
+    let promoted_check =
+        guard_submission(&api, invocation, &request, settings, scope, global).await?;
     if operation.auth == AuthScheme::CheckoutStream {
         return api.stream(&request, out).await;
     }
     let Submission {
         mut response,
         reconciled,
-    } = submit(&api, invocation, &request, scope).await?;
+    } = submit(&api, invocation, &request, scope, promoted_check).await?;
     check_response(invocation, &response, scope)?;
     if let Some(until) = wait_target(invocation) {
         return wait_for_payment(
@@ -488,7 +491,7 @@ async fn guard_submission(
     settings: &Settings,
     scope: &Scope,
     global: &GlobalFlags,
-) -> Result<()> {
+) -> Result<bool> {
     let operation = invocation.operation;
     if operation.targets_wallet() && operation.method != Method::Get && !scope.envs.is_empty() {
         verify_wallet_environment(api, scope, invocation.resource_id).await?;
@@ -499,9 +502,11 @@ async fn guard_submission(
     if operation.method != Method::Get
         && let (Some(body), Some(id)) = (&request.body, request.body_id)
     {
-        journal(settings, operation, scope, body, id)?;
+        let promotion =
+            authorize_check_promotion(api, settings, operation, scope, body, id).await?;
+        return journal(settings, operation, scope, body, id, promotion);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// `--qr` and `--copy` imply `--wait ready` when no explicit wait was given.
@@ -624,16 +629,80 @@ struct JournalRecord {
     environment_ids: Vec<Uuid>,
     request_sha256: String,
     created_at: u64,
+    /// A stale check projection cannot prove that its promotion was submitted.
+    #[serde(default)]
+    promoted_check: bool,
 }
 
 impl JournalRecord {
+    fn new(operation: &Operation, scope: &Scope, body: &Value, id: Uuid) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        Ok(Self {
+            resource_id: id,
+            operation: operation.id,
+            organization_id: scope.org,
+            environment_ids: scope.envs.clone(),
+            request_sha256: hex::encode(Sha256::digest(serde_json::to_vec(body)?)),
+            created_at: auth::now(),
+            promoted_check: false,
+        })
+    }
+
     /// The same ID may be resubmitted only with the same request in the same scope.
     fn describes_same_request(&self, other: &Self) -> bool {
-        self.request_sha256 == other.request_sha256
+        self.resource_id == other.resource_id
+            && self.request_sha256 == other.request_sha256
             && self.organization_id == other.organization_id
             && self.environment_ids == other.environment_ids
             && self.operation == other.operation
     }
+}
+
+/// Promotion requires the original payload/scope and an approved send check from the API.
+/// A local journal alone is never proof that a check can be sent.
+async fn authorize_check_promotion(
+    api: &Api,
+    settings: &Settings,
+    operation: &Operation,
+    scope: &Scope,
+    body: &Value,
+    id: Uuid,
+) -> Result<bool> {
+    if operation.id != OperationId::CreatePayment {
+        return Ok(false);
+    }
+    let path = settings.dir.join(JOURNAL_DIR).join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut previous: JournalRecord = serde_json::from_str(&read_private(&path)?)?;
+    if previous.operation != OperationId::CheckPayment {
+        return Ok(false);
+    }
+    previous.operation = OperationId::CreatePayment;
+    let candidate = JournalRecord::new(operation, scope, body, id)?;
+    if !previous.describes_same_request(&candidate) {
+        return Err(Error::usage(
+            "A check can only be promoted with its original request and scope",
+        ));
+    }
+    let path = format!(
+        "/organizations/{}/environments/{}/payments/{id}",
+        scope.require_org()?,
+        scope.single_env()?
+    );
+    let response = api.read(&path).await?;
+    let payment = PaymentView::from_body(&response.body);
+    if payment.id != Some(id)
+        || payment.direction != Some(PaymentDirection::Send)
+        || response.body.get("status").and_then(Value::as_str) != Some("approved")
+        || response.body.get("check_only").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(Error::usage(
+            "Promotion requires an approved send with check_only=true; reconcile this ID before proceeding",
+        ));
+    }
+    Ok(true)
 }
 
 /// Record an ID-bearing mutation before submission so an ambiguous outcome can be reconciled.
@@ -643,34 +712,34 @@ fn journal(
     scope: &Scope,
     body: &Value,
     id: Uuid,
-) -> Result<()> {
-    use sha2::{Digest, Sha256};
+    promotion: bool,
+) -> Result<bool> {
     private_dir(&settings.dir)?;
     let dir = settings.dir.join(JOURNAL_DIR);
     private_dir(&dir)?;
-    let record = JournalRecord {
-        resource_id: id,
-        operation: operation.id,
-        organization_id: scope.org,
-        environment_ids: scope.envs.clone(),
-        request_sha256: hex::encode(Sha256::digest(serde_json::to_vec(body)?)),
-        created_at: auth::now(),
-    };
+    let mut record = JournalRecord::new(operation, scope, body, id)?;
     let path = dir.join(format!("{id}.json"));
     if path.exists() {
-        let previous: JournalRecord = serde_json::from_str(&read_private(&path)?)?;
+        let mut previous: JournalRecord = serde_json::from_str(&read_private(&path)?)?;
+        if promotion && previous.operation == OperationId::CheckPayment {
+            previous.operation = OperationId::CreatePayment;
+        }
         if !previous.describes_same_request(&record) {
             return Err(Error::usage(
                 "This resource ID was previously used for a different request; reconcile it before proceeding",
             ));
         }
-        return Ok(());
+        if promotion {
+            record.promoted_check = true;
+            atomic_write(&path, &serde_json::to_vec(&record)?)?;
+        }
+        return Ok(promotion || previous.promoted_check);
     }
     let mut file = new_private(&path)?;
     file.write_all(&serde_json::to_vec(&record)?)?;
     file.sync_all()?;
     eprintln!("Resource ID: {id}. Recovery record: {}", path.display());
-    Ok(())
+    Ok(false)
 }
 
 struct Submission {
@@ -686,6 +755,7 @@ async fn submit(
     invocation: &ApiInvocation,
     request: &Request,
     scope: &Scope,
+    promoted_check: bool,
 ) -> Result<Submission> {
     let operation = invocation.operation;
     let result = api
@@ -718,7 +788,7 @@ async fn submit(
             })
         }
         Err(error) if error.is_transport() && operation.id.submits_payment() => {
-            match reconcile_payment(api, request, scope).await {
+            match reconcile_payment(api, request, scope, operation.id, promoted_check).await {
                 Some(response) => Ok(Submission {
                     response,
                     reconciled: true,
@@ -742,7 +812,13 @@ async fn submit(
 
 /// A read can establish acceptance without sending the mutation again. A missing
 /// projection remains uncertain and keeps the original recovery record.
-async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Option<Response> {
+async fn reconcile_payment(
+    api: &Api,
+    request: &Request,
+    scope: &Scope,
+    operation: OperationId,
+    promoted_check: bool,
+) -> Option<Response> {
     let id = request.resource_id?;
     let org = scope.org?;
     let env = scope.single_env().ok()?;
@@ -751,7 +827,13 @@ async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Optio
         .await
         .ok()?
         .ok()?;
-    if PaymentView::from_body(&found.body).id != Some(id) {
+    if PaymentView::from_body(&found.body).id != Some(id)
+        || (operation == OperationId::CreatePayment
+            && found.body.get("check_only").and_then(Value::as_bool) == Some(true))
+        || (promoted_check
+            && (found.body.get("check_only").and_then(Value::as_bool) != Some(false)
+                || PaymentView::from_body(&found.body).direction != Some(PaymentDirection::Send)))
+    {
         return None;
     }
     eprintln!(
@@ -1294,16 +1376,16 @@ mod tests {
         let create_payment = operation(OperationId::CreatePayment);
         let id = Uuid::nil();
         let body = json!({"id": id, "wallet_id": WALLET});
-        journal(&settings, create_payment, &scope(), &body, id).unwrap();
-        journal(&settings, create_payment, &scope(), &body, id).unwrap();
+        journal(&settings, create_payment, &scope(), &body, id, false).unwrap();
+        journal(&settings, create_payment, &scope(), &body, id, false).unwrap();
         let changed = json!({"id": id, "wallet_id": ORG});
-        let error = journal(&settings, create_payment, &scope(), &changed, id).unwrap_err();
+        let error = journal(&settings, create_payment, &scope(), &changed, id, false).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Usage);
         let other_scope = Scope {
             envs: Vec::new(),
             ..scope()
         };
-        assert!(journal(&settings, create_payment, &other_scope, &body, id).is_err());
+        assert!(journal(&settings, create_payment, &other_scope, &body, id, false).is_err());
         let record: JournalRecord = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join(JOURNAL_DIR).join(format!("{id}.json")))
                 .unwrap(),

@@ -13,3 +13,12 @@
 To update the API contract, fetch the endpoint into `openapi.json`, review its diff, update the command registry and any new authentication/pagination behavior, regenerate the command reference with `python3 scripts/check-coverage.py --write`, and run the full Rust checks. Never silently rename existing commands as part of generation.
 
 To update the auth contract, fetch the public document into `auth-openapi.json`, review its diff, and run `cargo test --locked`; adjust `auth.rs` and its contract test together when a field or endpoint changes. The price contract refreshes the same way from `coinprice-openapi.json` and `price.rs`.
+
+`payment-check-parameter.json` is a reviewed supplement from backend v6.14.0
+(commit `42cd0c1ff4a282dc4a47421eb26818e515e7dcaa`): its public snapshot
+currently omits `get_payments`' optional boolean `check_only` query parameter.
+The file cites the tagged route; generation adds it to the in-memory contract,
+leaving the downloaded snapshot unmodified. The build refuses duplicate
+`check_only` parameters: remove this supplement and generation step once a
+refreshed public snapshot contains it. Response JSON already preserves added
+fields without schema-specific changes.

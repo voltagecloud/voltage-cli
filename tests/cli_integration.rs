@@ -1305,6 +1305,196 @@ async fn raw_send_without_yes_never_submits() {
     assert!(!dir.path().join("requests").exists());
 }
 
+/// Both endpoints accept the same payment body; the operation is deliberately separate.
+fn check_body() -> Value {
+    json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}})
+}
+
+fn check_args() -> [&'static str; 9] {
+    [
+        "payments", "check", "--org", ORG, "--env", ENV, "--data", "-", "--yes",
+    ]
+}
+
+fn promote_args() -> [&'static str; 9] {
+    [
+        "payments", "create", "--org", ORG, "--env", ENV, "--data", "-", "--yes",
+    ]
+}
+
+async fn submit_check(server: &MockServer, dir: &Path) {
+    respond_once(
+        server,
+        route(
+            "POST",
+            format!("/organizations/{ORG}/environments/{ENV}/payments/check"),
+        ),
+        accepted(),
+    )
+    .await;
+    cli(dir, server)
+        .args(check_args())
+        .write_stdin(check_body().to_string())
+        .assert()
+        .success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn same_id_check_promotion_requires_confirmation_and_preserves_the_original_body() {
+    let (server, dir) = fixture().await;
+    submit_check(&server, dir.path()).await;
+    let saved = std::fs::read(dir.path().join(format!("requests/{RESOURCE}.json"))).unwrap();
+    let denied = cli(dir.path(), &server)
+        .args(&promote_args()[..8])
+        .write_stdin(check_body().to_string())
+        .assert()
+        .code(2);
+    assert!(stderr(&denied).contains("requires --yes"));
+    assert_eq!(
+        std::fs::read(dir.path().join(format!("requests/{RESOURCE}.json"))).unwrap(),
+        saved
+    );
+    respond_once(
+        &server,
+        route("GET", payment_path()),
+        ok(json!({"id":RESOURCE,"status":"approved","direction":"send","check_only":true})),
+    )
+    .await;
+    respond_once(
+        &server,
+        route(
+            "POST",
+            format!("/organizations/{ORG}/environments/{ENV}/payments"),
+        )
+        .and(body_json(check_body())),
+        accepted(),
+    )
+    .await;
+    cli(dir.path(), &server)
+        .args(promote_args())
+        .write_stdin(check_body().to_string())
+        .assert()
+        .success();
+    let record: Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join(format!("requests/{RESOURCE}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["operation"], "create_payment");
+    assert_eq!(record["promoted_check"], true);
+    assert!(record.get("wallet_id").is_none());
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn promotion_rejects_changed_payload_scope_and_unproven_check_state() {
+    for projection in [
+        json!({"id":RESOURCE,"status":"approved","direction":"send","check_only":false}),
+        json!({"id":RESOURCE,"status":"approved","direction":"send"}),
+        json!({"id":RESOURCE,"status":"submitted","direction":"send","check_only":true}),
+        json!({"id":RESOURCE,"status":"approved","direction":"receive","check_only":true}),
+        json!({"id":WALLET,"status":"approved","direction":"send","check_only":true}),
+    ] {
+        let (server, dir) = fixture().await;
+        submit_check(&server, dir.path()).await;
+        let saved = std::fs::read(dir.path().join(format!("requests/{RESOURCE}.json"))).unwrap();
+        let mut changed = check_body();
+        changed["wallet_id"] = json!(RESOURCE);
+        cli(dir.path(), &server)
+            .args(promote_args())
+            .write_stdin(changed.to_string())
+            .assert()
+            .code(2);
+        let mut different_scope = promote_args();
+        different_scope[5] = WALLET;
+        cli(dir.path(), &server)
+            .args(different_scope)
+            .write_stdin(check_body().to_string())
+            .assert()
+            .code(2);
+        respond_once(&server, route("GET", payment_path()), ok(projection)).await;
+        cli(dir.path(), &server)
+            .args(promote_args())
+            .write_stdin(check_body().to_string())
+            .assert()
+            .code(2);
+        assert_eq!(
+            std::fs::read(dir.path().join(format!("requests/{RESOURCE}.json"))).unwrap(),
+            saved
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupted_promotions_cannot_reconcile_the_original_check_even_after_restart() {
+    for check_only in [Some(true), None, Some(false)] {
+        let (server, dir) = fixture().await;
+        submit_check(&server, dir.path()).await;
+        let approved =
+            json!({"id":RESOURCE,"status":"approved","direction":"send","check_only":true});
+        let mut after = json!({"id":RESOURCE,"status":"approved","direction":"send"});
+        if let Some(value) = check_only {
+            after["check_only"] = json!(value);
+        }
+        Mock::given(method("GET"))
+            .and(path(payment_path()))
+            .respond_with(in_order(vec![ok(approved), ok(after.clone()), ok(after)]))
+            .expect(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/organizations/{ORG}/environments/{ENV}/payments"
+            )))
+            .respond_with(accepted().set_delay(Duration::from_secs(3)))
+            .expect(2)
+            .mount(&server)
+            .await;
+        for _ in 0..2 {
+            let result = cli(dir.path(), &server)
+                .args(promote_args())
+                .args(["--timeout", "1"])
+                .write_stdin(check_body().to_string())
+                .assert();
+            if check_only == Some(false) {
+                result.success();
+            } else {
+                let result = result.code(4);
+                assert!(stderr(&result).contains("a write may have been submitted"));
+                assert!(!stderr(&result).contains("reconciled by reading"));
+            }
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupted_create_cannot_reconcile_a_check_created_outside_the_local_journal() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        Mock::given(method("POST")),
+        accepted().set_delay(Duration::from_secs(3)),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", payment_path()),
+        ok(json!({"id":RESOURCE,"status":"approved","direction":"send","check_only":true})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args(promote_args())
+        .args(["--timeout", "1"])
+        .write_stdin(check_body().to_string())
+        .assert()
+        .code(4);
+    assert!(stderr(&result).contains("a write may have been submitted"));
+    assert!(!stderr(&result).contains("reconciled by reading"));
+    server.verify().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn payment_timeout_preserves_id_and_does_not_retry() {
     let (server, dir) = fixture().await;
@@ -1535,17 +1725,18 @@ async fn cursor_pagination_is_the_default_and_carries_filters_across_pages() {
             .and(query_param("pagination", "cursor"))
             .and(query_param("statuses[]", "completed"))
             .and(query_param("limit", "1"))
+            .and(query_param("check_only", "false"))
     };
     respond_once(
         &server,
         filtered().and(query_param_is_missing("cursor")),
-        ok(json!({"items":[{"id":RESOURCE}],"offset":0,"limit":1,"next_cursor":"page-two","has_more":true})),
+        ok(json!({"items":[{"id":RESOURCE,"check_only":false}],"offset":0,"limit":1,"next_cursor":"page-two","has_more":true})),
     )
     .await;
     respond_once(
         &server,
         filtered().and(query_param("cursor", "page-two")),
-        ok(json!({"items":[{"id":WALLET}],"offset":0,"limit":1,"next_cursor":null,"has_more":false})),
+        ok(json!({"items":[{"id":WALLET,"check_only":false}],"offset":0,"limit":1,"next_cursor":null,"has_more":false})),
     )
     .await;
     let result = cli(dir.path(), &server)
@@ -1561,13 +1752,67 @@ async fn cursor_pagination_is_the_default_and_carries_filters_across_pages() {
             "--limit",
             "1",
             "--all",
+            "--check-only",
+            "false",
         ])
         .assert()
         .success();
     let pages = json_stdout(&result)["data"]["pages"].clone();
     assert_eq!(pages.as_array().unwrap().len(), 2);
     assert_eq!(pages[1]["data"]["items"][0]["id"], WALLET);
+    assert_eq!(pages[0]["data"]["items"][0]["check_only"], false);
+    assert_eq!(pages[1]["data"]["items"][0]["check_only"], false);
     assert!(!stderr(&result).contains("deprecated"));
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn payment_check_filter_accepts_booleans_and_omission_but_rejects_other_values() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", payments_path()).and(query_param("check_only", "true")),
+        ok(json!({"items":[{"id":RESOURCE,"check_only":true}]})),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", payments_path()).and(query_param_is_missing("check_only")),
+        ok(json!({"items":[{"id":RESOURCE,"check_only":false}]})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--check-only",
+            "true",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["data"]["items"][0]["check_only"], true);
+    cli(dir.path(), &server)
+        .args(["payments", "list", "--org", ORG, "--env", ENV])
+        .assert()
+        .success();
+    cli(dir.path(), &server)
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--check-only",
+            "yes",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     server.verify().await;
 }
 

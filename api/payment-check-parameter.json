@@ -1,0 +1,12 @@
+{
+  "source": "https://github.com/voltagecloud/backend/blob/42cd0c1ff4a282dc4a47421eb26818e515e7dcaa/crates/api/src/domain/payments/routes.rs#L2696",
+  "parameter": {
+    "name": "check_only",
+    "in": "query",
+    "required": false,
+    "description": "Return only policy-check-only sends (true) or exclude them (false). Omit for the combined list.",
+    "schema": {
+      "type": "boolean"
+    }
+  }
+}

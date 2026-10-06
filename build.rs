@@ -17,6 +17,7 @@ use std::{
 
 const SNAPSHOT: &str = "api/openapi.json";
 const MAPPING: &str = "api/commands.json";
+const PAYMENT_CHECK_PARAMETER: &str = "api/payment-check-parameter.json";
 const METHODS: [&str; 7] = ["get", "post", "put", "patch", "delete", "head", "options"];
 
 fn read_json(path: &str) -> Value {
@@ -202,7 +203,23 @@ fn main() {
     println!("cargo:rustc-env=VOLTAGE_VERSION={}", version());
     println!("cargo:rerun-if-changed={SNAPSHOT}");
     println!("cargo:rerun-if-changed={MAPPING}");
-    let spec = read_json(SNAPSHOT);
+    println!("cargo:rerun-if-changed={PAYMENT_CHECK_PARAMETER}");
+    let mut spec = read_json(SNAPSHOT);
+    // The public snapshot omits this v6.14.0 parameter. Preserve its source bytes;
+    // remove the tagged-source supplement when the published contract catches up.
+    let payments = &mut spec["paths"]["/organizations/{organization_id}/environments/{environment_id}/payments"]
+        ["get"];
+    assert_eq!(payments["operationId"], "get_payments");
+    let parameters = payments["parameters"]
+        .as_array_mut()
+        .expect("payment parameters");
+    assert!(
+        !parameters
+            .iter()
+            .any(|parameter| parameter["name"] == "check_only"),
+        "Published contract now includes check_only; remove its tagged-source supplement"
+    );
+    parameters.push(read_json(PAYMENT_CHECK_PARAMETER)["parameter"].clone());
     let commands = read_json(MAPPING);
     let mut operations = Vec::new();
     let mut seen = BTreeSet::new();
