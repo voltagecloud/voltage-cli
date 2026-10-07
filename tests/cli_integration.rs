@@ -16,6 +16,8 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+#[cfg(unix)]
+use tokio::sync::Notify;
 use voltage_cli::{
     config::{
         self, Account, AccountKind, Config, Credential, CredentialStore, Login, Profile, Settings,
@@ -24,7 +26,7 @@ use voltage_cli::{
     secret::Secret,
 };
 use wiremock::{
-    Mock, MockBuilder, MockServer, Request, ResponseTemplate,
+    Mock, MockBuilder, MockServer, Request, Respond, ResponseTemplate,
     matchers::{
         body_json, body_string_contains, header, method, path, query_param, query_param_is_missing,
     },
@@ -174,7 +176,12 @@ fn cli(dir: &Path, server: &MockServer) -> Command {
 }
 
 fn cli_at(dir: &Path, api_url: &str) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
+    Command::from_std(process_at(dir, api_url))
+}
+
+/// `cli_at` as a plain process, for tests that attach a terminal or deliver a signal.
+fn process_at(dir: &Path, api_url: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
     for name in [
         "VOLTAGE_ORGANIZATION_ID",
         "VOLTAGE_ENVIRONMENT_ID",
@@ -246,7 +253,7 @@ fn accepted() -> ResponseTemplate {
 async fn respond(
     server: &MockServer,
     request: MockBuilder,
-    response: ResponseTemplate,
+    response: impl Respond + 'static,
     times: u64,
 ) {
     request
@@ -256,7 +263,7 @@ async fn respond(
         .await;
 }
 
-async fn respond_once(server: &MockServer, request: MockBuilder, response: ResponseTemplate) {
+async fn respond_once(server: &MockServer, request: MockBuilder, response: impl Respond + 'static) {
     respond(server, request, response, 1).await;
 }
 
@@ -1152,6 +1159,38 @@ async fn concurrent_processes_refresh_once_and_save_the_rotated_token() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_login_does_not_wait_for_the_credential_lock() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (server, dir) = fixture().await;
+    seeded_login(dir.path(), &server, false);
+    organization_exchange(&server, LOGIN_ACCESS, ORG, "org-access", 1).await;
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)).and(header("authorization", "Bearer org-access")),
+        ok(json!([])),
+    )
+    .await;
+    // Another process holds the lock, as it would during a slow refresh.
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.path().join("credentials.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let mut command = cli(dir.path(), &server);
+    command
+        .args(["wallets", "list", "--account", LOGIN_NAME, "--org", ORG])
+        .timeout(Duration::from_secs(10));
+    tokio::task::spawn_blocking(move || command.assert().success())
+        .await
+        .unwrap();
+    drop(held);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn organization_exchange_uses_the_saved_auth_origin_and_keeps_discovery_on_login() {
     let auth = MockServer::start().await;
@@ -1277,6 +1316,710 @@ async fn logout_retains_credentials_on_revocation_failure_and_local_is_explicit(
 // ---------------------------------------------------------------------------------------
 // Payments: submission, confirmation, waits, and reconciliation
 // ---------------------------------------------------------------------------------------
+
+/// A pseudo-terminal pair: the controller end reads what the child writes, and the terminal
+/// end is handed to the child as stdin or stderr.
+#[cfg(unix)]
+fn open_pty() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+    let mut controller = 0;
+    let mut terminal = 0;
+    // SAFETY: openpty only writes the two descriptors on success; the name, termios, and
+    // window-size pointers are optional and may be null.
+    let opened = unsafe {
+        libc::openpty(
+            &mut controller,
+            &mut terminal,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(opened, 0, "{}", std::io::Error::last_os_error());
+    // openpty has no close-on-exec option. Without it, a child that another test spawns
+    // concurrently inherits both ends and keeps the controller's drain open after this test's
+    // child exits. The descriptor a child receives as stdio is a dup2 copy, which does not
+    // keep the flag. Only a spawn between openpty and these calls can still inherit them.
+    for descriptor in [controller, terminal] {
+        // SAFETY: the descriptor was just opened, and F_SETFD only changes its flags.
+        let set = unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just opened, nothing else owns them, and each is wrapped
+    // exactly once, so each `File` closes its descriptor once.
+    unsafe {
+        (
+            std::fs::File::from_raw_fd(controller),
+            std::fs::File::from_raw_fd(terminal),
+        )
+    }
+}
+
+/// Deliver SIGINT, as Ctrl-C does on a terminal.
+#[cfg(unix)]
+fn interrupt(child: &std::process::Child) {
+    let status = std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// Answer with `response` and announce each arrival, so a test acts only once the request
+/// is in flight.
+#[cfg(unix)]
+fn announced(response: ResponseTemplate) -> (impl Respond, Arc<Notify>) {
+    let arrived = Arc::new(Notify::new());
+    let announce = Arc::clone(&arrived);
+    let responder = move |_: &Request| {
+        announce.notify_one();
+        response.clone()
+    };
+    (responder, arrived)
+}
+
+/// Start the binary with `args`, interrupt it once its request reaches the server, and
+/// return its output after it exits with 130.
+#[cfg(unix)]
+async fn interrupt_in_flight(
+    dir: &Path,
+    server: &MockServer,
+    arrived: &Notify,
+    args: &[&str],
+) -> std::process::Output {
+    use std::process::Stdio;
+    let child = process_at(dir, &server.uri())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Generous: a device login waits out its first poll interval before any request.
+    tokio::time::timeout(Duration::from_secs(15), arrived.notified())
+        .await
+        .unwrap();
+    interrupt(&child);
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+/// The JSON error report: the last line of stderr, after any recovery notice.
+#[cfg(unix)]
+fn error_report(stderr: &[u8]) -> Value {
+    serde_json::from_str(String::from_utf8_lossy(stderr).lines().last().unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn progress_is_terminal_only_and_cleared_on_completion() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ok(json!({"items":[]})).set_delay(Duration::from_millis(400)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let args = ["wallets", "list", "--org", ORG];
+    let redirected = process_at(dir.path(), &server.uri())
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(redirected.status.success());
+    assert!(redirected.stderr.is_empty());
+
+    let (mut controller, terminal) = open_pty();
+    let child = process_at(dir.path(), &server.uri())
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::from(terminal))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut shown = Vec::new();
+        // Linux PTYs return EIO rather than EOF when the terminal end closes.
+        let _ = controller.read_to_end(&mut shown);
+        shown
+    });
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let shown = reader.await.unwrap();
+    let shown = String::from_utf8_lossy(&shown);
+    assert!(shown.contains("Waiting for API response..."), "{shown}");
+    assert!(shown.ends_with("\r\u{1b}[2K"), "{shown}");
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_input_requires_explicit_approval_and_secret_source() {
+    let (server, dir) = fixture().await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let rejected = cli(dir.path(), &server)
+        .args([
+            "--no-input",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .code(2);
+    assert!(stderr(&rejected).contains("requires --yes"));
+    let missing_secret = cli(dir.path(), &server)
+        .args([
+            "--no-input",
+            "--yes",
+            "auth",
+            "import-key",
+            "--account",
+            "other",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+        ])
+        .assert()
+        .code(2);
+    assert!(stderr(&missing_secret).contains("--stdin"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!dir.path().join("requests").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quiet_keeps_results_errors_and_payment_recovery_id() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let result = cli(dir.path(), &server)
+        .args([
+            "-q",
+            "--yes",
+            "--no-input",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["resource_id"], RESOURCE);
+    assert!(stderr(&result).contains("Recovery record:"));
+    assert!(!stderr(&result).contains("\u{1b}["));
+    let error = cli(dir.path(), &server)
+        .args([
+            "--quiet",
+            "--no-input",
+            "payments",
+            "create",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--data",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .code(2);
+    assert!(stderr(&error).contains("requires --yes"));
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_at_the_confirmation_prompt_exits_130_without_submitting() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let data = dir.path().join("request.json");
+    std::fs::write(&data, body.to_string()).unwrap();
+    let (mut controller, terminal) = open_pty();
+    let child = process_at(dir.path(), &server.uri())
+        .args(["payments", "create", "--org", ORG, "--env", ENV, "--data"])
+        .arg(format!("@{}", data.display()))
+        .stdin(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The controller stays open until the child exits so its stderr writes never fail.
+    let controller = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let mut shown = Vec::new();
+            let mut chunk = [0; 4096];
+            while !String::from_utf8_lossy(&shown).contains("Proceed? [y/N]") {
+                let read = controller.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "{}", String::from_utf8_lossy(&shown));
+                shown.extend_from_slice(&chunk[..read]);
+            }
+            controller
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    interrupt(&child);
+    let pid = child.id().to_string();
+    let exited = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await;
+    let Ok(output) = exited else {
+        // Unblock the waiter so the runtime can shut down, then fail.
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap();
+        panic!("Ctrl-C at the confirmation prompt did not end the process");
+    };
+    let output = output.unwrap();
+    drop(controller);
+    assert_eq!(output.status.code(), Some(130));
+    assert!(output.stdout.is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!dir.path().join("requests").exists());
+}
+
+/// Local modes of a pseudo-terminal, as the child sees them through `/dev/tty`.
+#[cfg(unix)]
+fn local_modes(pty: &std::fs::File) -> libc::tcflag_t {
+    use std::os::fd::AsRawFd;
+    let mut modes = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: the descriptor is open, and tcgetattr fully initializes `modes` on success.
+    assert_eq!(
+        unsafe { libc::tcgetattr(pty.as_raw_fd(), modes.as_mut_ptr()) },
+        0
+    );
+    // SAFETY: tcgetattr returned 0 above.
+    unsafe { modes.assume_init() }.c_lflag
+}
+
+/// How a test delivers Ctrl-C to a child on a pseudo-terminal.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum CtrlC {
+    /// SIGINT from outside, as the terminal sends it to the foreground process.
+    Signal,
+    /// The character a person types, which a prompt with terminal signals off reads itself.
+    Typed,
+}
+
+/// Interrupt `auth import-key` once its hidden prompt has turned off echo. Returns the exit
+/// code, whether echo is on afterward, and everything the child wrote to the terminal.
+#[cfg(unix)]
+async fn interrupt_the_hidden_key_prompt(ctrl_c: CtrlC) -> (Option<i32>, bool, String) {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    let (mut controller, terminal) = open_pty();
+    // The terminal end is revoked when the session leader exits; the controller end keeps
+    // reporting the shared attributes.
+    let observer = controller.try_clone().unwrap();
+    let mut command = process_at(dir.path(), &server.uri());
+    command
+        .args([
+            "auth",
+            "import-key",
+            "--account",
+            "k",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+        ])
+        .stdin(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .stdout(Stdio::piped());
+    // SAFETY: setsid and ioctl are async-signal-safe, and the closure allocates nothing.
+    // The new session takes the PTY on stdin as its controlling terminal, so `/dev/tty`
+    // names it.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    // A session leader's exit waits for its terminal output to drain, so the controller is
+    // read until the child closes the terminal, not only until the prompt appears.
+    let (prompted, prompt) = tokio::sync::oneshot::channel();
+    let drain = tokio::task::spawn_blocking(move || {
+        let mut prompted = Some(prompted);
+        let mut shown = Vec::new();
+        let mut chunk = [0; 4096];
+        while let Ok(read @ 1..) = controller.read(&mut chunk) {
+            shown.extend_from_slice(&chunk[..read]);
+            if String::from_utf8_lossy(&shown).contains("Environment API key:") {
+                prompted.take().map(|prompted| prompted.send(()));
+            }
+        }
+        String::from_utf8_lossy(&shown).into_owned()
+    });
+    tokio::time::timeout(Duration::from_secs(10), prompt)
+        .await
+        .unwrap()
+        .unwrap();
+    // The prompt is written before echo is turned off; interrupt only once the read is
+    // hidden, or the test would pass without restoring anything.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while local_modes(&observer) & libc::ECHO != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    match ctrl_c {
+        CtrlC::Signal => interrupt(&child),
+        CtrlC::Typed => (&observer).write_all(b"\x03").unwrap(),
+    }
+    let pid = child.id().to_string();
+    let exited = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await;
+    let Ok(output) = exited else {
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap();
+        panic!("Ctrl-C at the hidden key prompt did not end the process");
+    };
+    let code = output.unwrap().status.code();
+    let echo = local_modes(&observer) & libc::ECHO != 0;
+    // The controller reports end of input once the last terminal descriptor closes.
+    drop(command);
+    let shown = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    (code, echo, shown)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_at_the_hidden_key_prompt_restores_terminal_echo() {
+    let (code, echo, shown) = interrupt_the_hidden_key_prompt(CtrlC::Signal).await;
+    assert_eq!(code, Some(130), "{shown}");
+    assert!(echo);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn typed_ctrl_c_at_the_hidden_key_prompt_reports_an_interruption() {
+    let (code, echo, shown) = interrupt_the_hidden_key_prompt(CtrlC::Typed).await;
+    assert_eq!(code, Some(130), "{shown}");
+    assert!(shown.contains("Interrupted before any resource change was submitted"));
+    assert!(echo);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_a_refresh_says_the_login_may_need_renewal() {
+    let (server, dir) = fixture().await;
+    seeded_login(dir.path(), &server, true);
+    let (responder, arrived) = announced(
+        ok(json!({
+            "access_token":"new-access","refresh_token":"new-refresh",
+            "token_type":"Bearer","expires_in":600
+        }))
+        .set_delay(Duration::from_secs(10)),
+    );
+    respond_once(
+        &server,
+        route("POST", "/oauth/token").and(body_string_contains("grant_type=refresh_token")),
+        responder,
+    )
+    .await;
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &["wallets", "list", "--account", LOGIN_NAME, "--org", ORG],
+    )
+    .await;
+    let report = error_report(&output.stderr);
+    assert_eq!(
+        report["error"]["message"],
+        format!("Interrupted while refreshing the saved login for {LOGIN_NAME}")
+    );
+    assert!(
+        report["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("voltage login")
+    );
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_a_logout_revoke_points_to_a_local_logout() {
+    let (server, dir) = fixture().await;
+    let settings = seeded_login(dir.path(), &server, false);
+    let (responder, arrived) = announced(ok(json!({})).set_delay(Duration::from_secs(10)));
+    respond_once(&server, route("POST", "/oauth/revoke"), responder).await;
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &["logout", "--account", LOGIN_NAME],
+    )
+    .await;
+    let report = error_report(&output.stderr);
+    assert_eq!(
+        report["error"]["message"],
+        format!("Interrupted while logging out {LOGIN_NAME}; its session may already be revoked")
+    );
+    assert!(
+        report["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--local")
+    );
+    // The saved login is still there for the local logout the hint suggests.
+    assert!(settings.read_credential(LOGIN_NAME).is_ok());
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_before_a_new_login_is_saved_says_a_session_may_exist() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/device_authorization"),
+        ok(json!({
+            "device_code":"device-secret","user_code":"ABCD-EFGH",
+            "verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/token"),
+        ok(json!({
+            "access_token":"login-access","refresh_token":"login-refresh",
+            "token_type":"Bearer","expires_in":600
+        })),
+    )
+    .await;
+    // The session exists once tokens are issued; saving it waits on the identity lookup.
+    let (responder, arrived) = announced(
+        ok(json!({"id":RESOURCE,"email":LOGIN_EMAIL})).set_delay(Duration::from_secs(10)),
+    );
+    respond_once(&server, route("GET", "/users/current"), responder).await;
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &[
+            "login",
+            "--auth-url",
+            &server.uri(),
+            "--no-browser",
+            "--account",
+            LOGIN_NAME,
+            "--credential-store",
+            "file",
+        ],
+    )
+    .await;
+    let report = error_report(&output.stderr);
+    assert_eq!(
+        report["error"]["message"],
+        "Interrupted after sign-in may have created a session that was not saved"
+    );
+    assert!(
+        report["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("voltage login")
+    );
+    assert!(
+        !settings_at(dir.path())
+            .config
+            .accounts
+            .contains_key(LOGIN_NAME)
+    );
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_a_read_does_not_claim_a_change_was_submitted() {
+    let (server, dir) = fixture().await;
+    let (responder, arrived) =
+        announced(ok(json!({"items":[]})).set_delay(Duration::from_secs(10)));
+    respond_once(&server, route("GET", wallets_path(ORG)), responder).await;
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &["wallets", "list", "--org", ORG],
+    )
+    .await;
+    let report = error_report(&output.stderr);
+    assert_eq!(
+        report["error"]["message"],
+        "Interrupted before any resource change was submitted"
+    );
+    assert!(report["error"]["detail"].is_null());
+    assert!(!dir.path().join("requests").exists());
+    server.verify().await;
+}
+
+/// A `--data` read that is still waiting for input must not keep Ctrl-C from ending the
+/// command. A FIFO blocks like an idle stdin, and opening its write end waits for the CLI to
+/// open the read end, so the test knows the read has started.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_while_a_request_body_is_still_being_read() {
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    let fifo = dir.path().join("body.json");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let child = process_at(dir.path(), &server.uri())
+        .args(["payments", "create", "--data"])
+        .arg(format!("@{}", fifo.display()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Held open and never written, so the CLI's read blocks until the process ends.
+    let _writer = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new().write(true).open(fifo).unwrap()
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    interrupt(&child);
+    let pid = child.id().to_string();
+    let Ok(output) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    else {
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap();
+        panic!("Ctrl-C during a blocked --data read did not end the process");
+    };
+    let output = output.unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        error_report(&output.stderr)["error"]["message"],
+        "Interrupted before any resource change was submitted"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_payment_submission_reports_original_id_without_retry() {
+    let (server, dir) = fixture().await;
+    let (responder, arrived) = announced(accepted().set_delay(Duration::from_secs(10)));
+    respond_once(&server, route("POST", payments_path()), responder).await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
+    let data = dir.path().join("request.json");
+    std::fs::write(&data, body.to_string()).unwrap();
+    let data = format!("@{}", data.display());
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &[
+            "--yes", "payments", "create", "--org", ORG, "--env", ENV, "--data", &data,
+        ],
+    )
+    .await;
+    assert!(output.stdout.is_empty());
+    let report = error_report(&output.stderr);
+    assert_eq!(report["error"]["detail"]["resource_id"], RESOURCE);
+    assert_eq!(report["error"]["detail"]["outcome"], "unknown");
+    let message = report["error"]["message"].as_str().unwrap();
+    assert!(message.contains(&format!("payment {RESOURCE} may have been submitted")));
+    assert!(message.contains("was not cancelled"));
+    assert!(
+        dir.path()
+            .join(format!("requests/{RESOURCE}.json"))
+            .exists()
+    );
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_during_another_write_reports_an_uncertain_submission() {
+    let (server, dir) = fixture().await;
+    let (responder, arrived) =
+        announced(ResponseTemplate::new(204).set_delay(Duration::from_secs(10)));
+    respond_once(
+        &server,
+        route("DELETE", format!("{}/{WALLET}", wallets_path(ORG))),
+        responder,
+    )
+    .await;
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &["--yes", "wallets", "delete", WALLET, "--org", ORG],
+    )
+    .await;
+    let report = error_report(&output.stderr);
+    let message = report["error"]["message"].as_str().unwrap();
+    assert!(message.contains("may have been submitted"), "{message}");
+    assert!(!message.contains("payment"), "{message}");
+    assert_eq!(report["error"]["detail"]["organization_id"], ORG);
+    assert_eq!(report["error"]["detail"]["outcome"], "unknown");
+    server.verify().await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn raw_send_without_yes_never_submits() {

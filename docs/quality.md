@@ -201,6 +201,10 @@ an existing simpler pattern cannot satisfy it.
 - `check_owner` in `config.rs` calls `libc::geteuid` in an `unsafe` block
   because std has no safe effective-UID accessor; the block is one call with a
   `SAFETY:` comment.
+- `TerminalModes` in `terminal.rs` calls `libc::tcgetattr` and `libc::tcsetattr`
+  in `unsafe` blocks because std cannot save or restore terminal attributes. It
+  restores echo when Ctrl-C cancels a hidden prompt whose read cannot return;
+  each block is one call with a `SAFETY:` comment.
 - `config`, `registry`, and `secret` are public modules. The integration
   suite seeds saved credentials through the real persistence boundary and
   walks the operation contract to exercise every route; no other item is

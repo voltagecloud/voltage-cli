@@ -17,13 +17,15 @@ use crate::{
     payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
     registry::{AuthScheme, Method, Operation, OperationId},
     secret::Secret,
+    terminal::Terminal,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
-    io::{IsTerminal, Write},
+    io::Write,
+    sync::{Mutex, OnceLock, PoisonError},
     time::Duration,
 };
 use tokio::time::Instant;
@@ -62,27 +64,18 @@ impl Authorization {
         global: &GlobalFlags,
         settings: &Settings,
         scope: &Scope,
+        submission: &SubmissionState,
     ) -> Result<Self> {
         let scheme = invocation.operation.auth;
-        let checkout_token = |variable: &str| -> Result<Secret> {
-            if let Some(source) = &invocation.token_file {
-                return read_secret(source);
-            }
-            std::env::var(variable)
-                .ok()
-                .map(Secret::new)
-                .filter(|secret| !secret.expose().trim().is_empty())
-                .ok_or_else(|| Error::auth(format!("Supply --token-file or {variable}")))
-        };
         Ok(match scheme {
-            AuthScheme::Account => {
-                Self::Account(auth::resolve_organization(settings, scope, global).await?)
-            }
+            AuthScheme::Account => Self::Account(
+                auth::resolve_organization(settings, scope, global, submission).await?,
+            ),
             AuthScheme::CheckoutSession => {
-                Self::CheckoutSession(checkout_token("VOLTAGE_CHECKOUT_TOKEN")?)
+                Self::CheckoutSession(checkout_token(invocation, "VOLTAGE_CHECKOUT_TOKEN").await?)
             }
             AuthScheme::CheckoutStream => {
-                Self::CheckoutStream(checkout_token("VOLTAGE_STREAM_TOKEN")?)
+                Self::CheckoutStream(checkout_token(invocation, "VOLTAGE_STREAM_TOKEN").await?)
             }
             AuthScheme::None => Self::None,
         })
@@ -100,6 +93,18 @@ impl Authorization {
     }
 }
 
+/// A checkout credential from `--token-file`, else from `variable`.
+async fn checkout_token(invocation: &ApiInvocation, variable: &str) -> Result<Secret> {
+    if let Some(source) = &invocation.token_file {
+        return read_secret(source).await;
+    }
+    std::env::var(variable)
+        .ok()
+        .map(Secret::new)
+        .filter(|secret| !secret.expose().trim().is_empty())
+        .ok_or_else(|| Error::auth(format!("Supply --token-file or {variable}")))
+}
+
 struct Response {
     status: u16,
     body: Value,
@@ -112,6 +117,7 @@ struct Api {
     base: String,
     authorization: Authorization,
     origin: Option<Origin>,
+    terminal: Terminal,
 }
 
 impl Api {
@@ -125,6 +131,7 @@ impl Api {
             base: auth::base_url(global.api_url.as_deref().unwrap_or(API_URL))?,
             authorization,
             origin: invocation.origin.clone(),
+            terminal: global.terminal(),
         })
     }
 
@@ -173,6 +180,11 @@ impl Api {
         body: Option<&Value>,
     ) -> Result<Response> {
         let read_only = method.is_read_only();
+        let _progress = self.terminal.progress(if read_only {
+            "Waiting for API response..."
+        } else {
+            "Submitting request..."
+        });
         let response = self
             .request(method.into(), path, query, body)
             .send()
@@ -234,8 +246,12 @@ impl Api {
     /// Follow a checkout event stream, writing one envelope per event until it closes.
     async fn stream(&self, request: &Request, out: &mut Output) -> Result<()> {
         let response = self
-            .request(reqwest::Method::GET, &request.path, &request.query, None)
-            .send()
+            .terminal
+            .during(
+                "Opening checkout event stream...",
+                self.request(reqwest::Method::GET, &request.path, &request.query, None)
+                    .send(),
+            )
             .await
             .map_err(|_| Error::transport("Could not open checkout event stream"))?;
         let status = response.status().as_u16();
@@ -256,7 +272,12 @@ impl Api {
         let mut stream = response.bytes_stream();
         let mut pending = Vec::new();
         let mut assembler = EventAssembler::default();
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = self
+                .terminal
+                .during("Waiting for checkout event...", stream.next())
+                .await;
+            let Some(chunk) = chunk else { break };
             let chunk = chunk.map_err(|_| Error::transport("Checkout stream disconnected"))?;
             pending.extend_from_slice(&chunk);
             if pending.len() > MAX_EVENT_BYTES {
@@ -431,20 +452,27 @@ pub async fn execute(
     settings: &Settings,
     scope: &Scope,
     out: &mut Output,
+    submission: &SubmissionState,
 ) -> Result<()> {
     let operation = invocation.operation;
-    let mut request = Request::build(invocation, scope)?;
+    let mut request = Request::read(invocation, scope).await?;
     check_invoice_flags(invocation, &request)?;
     if operation.id.returns_one_time_secret() && !out.secure_destination() {
         return Err(Error::usage(
             "This operation returns a one-time secret; supply --output-file PATH or --show-secrets before executing",
         ));
     }
-    let authorization = Authorization::resolve(invocation, global, settings, scope).await?;
+    // Decline a noninteractive confirmation before refreshing credentials or making
+    // a wallet preflight request. The summary is still mandatory even in quiet mode.
+    if request.is_consequential(operation) && !global.yes && !global.terminal().can_prompt() {
+        return confirm(operation, scope, &request, global).await;
+    }
+    let authorization =
+        Authorization::resolve(invocation, global, settings, scope, submission).await?;
     let api = Api::new(global, invocation, authorization)?;
     let deadline = Instant::now() + global.timeout;
     if request.pagination_mode() == PaginationMode::Offset && operation.has_parameter("cursor") {
-        eprintln!(
+        api.terminal.important(
             "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor."
         );
     }
@@ -455,7 +483,7 @@ pub async fn execute(
     let Submission {
         mut response,
         reconciled,
-    } = submit(&api, invocation, &request, scope).await?;
+    } = submit(&api, invocation, &request, scope, submission).await?;
     check_response(invocation, &response, scope)?;
     if let Some(until) = wait_target(invocation) {
         return wait_for_payment(
@@ -494,12 +522,12 @@ async fn guard_submission(
         verify_wallet_environment(api, scope, invocation.resource_id).await?;
     }
     if request.is_consequential(operation) {
-        confirm(operation, scope, request, global.yes)?;
+        confirm(operation, scope, request, global).await?;
     }
     if operation.method != Method::Get
         && let (Some(body), Some(id)) = (&request.body, request.body_id)
     {
-        journal(settings, operation, scope, body, id)?;
+        journal(settings, operation, scope, body, id, api.terminal)?;
     }
     Ok(())
 }
@@ -582,7 +610,13 @@ struct ConfirmationSummary<'a> {
 }
 
 /// Show the resolved scope and request on stderr, then require `--yes` or a terminal answer.
-fn confirm(operation: &Operation, scope: &Scope, request: &Request, yes: bool) -> Result<()> {
+async fn confirm(
+    operation: &Operation,
+    scope: &Scope,
+    request: &Request,
+    global: &GlobalFlags,
+) -> Result<()> {
+    let terminal = global.terminal();
     let mut summary = serde_json::to_value(ConfirmationSummary {
         action: operation.command.join(" "),
         organization: scope.org,
@@ -591,25 +625,21 @@ fn confirm(operation: &Operation, scope: &Scope, request: &Request, yes: bool) -
         request: request.body.as_ref(),
     })?;
     redact(&mut summary, &[]);
-    eprintln!("{}", serde_json::to_string_pretty(&summary)?);
+    terminal.important(serde_json::to_string_pretty(&summary)?);
     if operation.id == OperationId::CreatePayment {
-        eprintln!(
+        terminal.important(
             "Network/provider fee limits exclude additional processing fees. The wallet determines the network."
         );
     }
-    if yes {
+    if global.yes {
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
+    if !terminal.can_prompt() {
         return Err(Error::usage(
-            "This operation requires --yes in noninteractive use",
+            "This operation requires --yes when input is disabled or noninteractive",
         ));
     }
-    eprint!("Proceed? [y/N] ");
-    std::io::stderr().flush()?;
-    let mut reply = String::new();
-    std::io::stdin().read_line(&mut reply)?;
-    if !matches!(reply.trim(), "y" | "Y" | "yes") {
+    if !terminal.confirm("Proceed?").await? {
         return Err(Error::usage("Operation cancelled before submission"));
     }
     Ok(())
@@ -643,6 +673,7 @@ fn journal(
     scope: &Scope,
     body: &Value,
     id: Uuid,
+    terminal: Terminal,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     private_dir(&settings.dir)?;
@@ -669,8 +700,100 @@ fn journal(
     let mut file = new_private(&path)?;
     file.write_all(&serde_json::to_vec(&record)?)?;
     file.sync_all()?;
-    eprintln!("Resource ID: {id}. Recovery record: {}", path.display());
+    terminal.important(format!(
+        "Resource ID: {id}. Recovery record: {}",
+        path.display()
+    ));
     Ok(())
+}
+
+/// What this command may have changed, for reporting an interruption. A write is recorded
+/// immediately before the request leaves the process, never during validation, confirmation,
+/// or wallet preflight: once sending starts, a cancelled future cannot tell whether the
+/// service received the request.
+#[derive(Default)]
+pub struct SubmissionState {
+    write: OnceLock<SubmittedWrite>,
+    /// A change to a saved login whose server side may be done but whose local side is not.
+    /// Cleared only once the local side is done, never on drop: Ctrl-C drops the command
+    /// before the interruption is reported.
+    session: Mutex<Option<SessionChange>>,
+}
+
+/// A login change that the server and the saved credentials can disagree about.
+pub(crate) enum SessionChange {
+    /// The single-use refresh token may be spent, but its replacement is not yet saved.
+    Refresh { account: String },
+    /// The server may have issued a session that is not yet saved.
+    Login,
+    /// The server may have revoked the session, but the saved login is not yet removed.
+    Logout { account: String },
+}
+
+struct SubmittedWrite {
+    operation: OperationId,
+    resource_id: Option<Uuid>,
+    organization_id: Option<Uuid>,
+    environment_ids: Vec<Uuid>,
+}
+
+impl SubmissionState {
+    /// A command sends at most one mutation, so the first record is the only one.
+    fn record(&self, operation: OperationId, resource_id: Option<Uuid>, scope: &Scope) {
+        let _ = self.write.set(SubmittedWrite {
+            operation,
+            resource_id,
+            organization_id: scope.org,
+            environment_ids: scope.envs.clone(),
+        });
+    }
+
+    pub(crate) fn session_changing(&self, change: SessionChange) {
+        *self.session.lock().unwrap_or_else(PoisonError::into_inner) = Some(change);
+    }
+
+    pub(crate) fn session_settled(&self) {
+        *self.session.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// The error for Ctrl-C. It claims a write may continue only when one may have been sent,
+    /// and never claims that the write was cancelled. A sent write outranks a session change,
+    /// which always comes first.
+    pub fn interrupted(&self) -> Error {
+        let Some(write) = self.write.get() else {
+            let session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+            return match &*session {
+                Some(SessionChange::Refresh { account }) => Error::interrupted(format!(
+                    "Interrupted while refreshing the saved login for {account}"
+                ))
+                .with_hint(
+                    "If the next command reports an expired session, run voltage login again.",
+                ),
+                Some(SessionChange::Login) => Error::interrupted(
+                    "Interrupted after sign-in may have created a session that was not saved",
+                )
+                .with_hint(
+                    "Run voltage login again; account global signout ends an unsaved session.",
+                ),
+                Some(SessionChange::Logout { account }) => Error::interrupted(format!(
+                    "Interrupted while logging out {account}; its session may already be revoked"
+                ))
+                .with_hint("Rerun the logout with --local to remove the saved login."),
+                None => Error::interrupted("Interrupted before any resource change was submitted"),
+            };
+        };
+        let message = match write.resource_id {
+            Some(id) if write.operation.submits_payment() => format!(
+                "Interrupted after payment {id} may have been submitted; query its original ID before resubmitting. The payment was not cancelled."
+            ),
+            _ => "Interrupted after the request may have been submitted; check its result before retrying. The request was not cancelled.".to_owned(),
+        };
+        Error::interrupted(message).with_detail(ErrorDetail::uncertain_submission(
+            write.resource_id,
+            write.organization_id,
+            write.environment_ids.clone(),
+        ))
+    }
 }
 
 struct Submission {
@@ -686,8 +809,12 @@ async fn submit(
     invocation: &ApiInvocation,
     request: &Request,
     scope: &Scope,
+    submission: &SubmissionState,
 ) -> Result<Submission> {
     let operation = invocation.operation;
+    if operation.method != Method::Get {
+        submission.record(operation.id, request.resource_id, scope);
+    }
     let result = api
         .send(
             operation.method,
@@ -754,9 +881,9 @@ async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Optio
     if PaymentView::from_body(&found.body).id != Some(id) {
         return None;
     }
-    eprintln!(
+    api.terminal.important(format!(
         "Payment {id} is visible after the interrupted submission; reconciled by reading its original ID."
-    );
+    ));
     Some(found)
 }
 
@@ -785,7 +912,8 @@ async fn wait_for_payment(
     );
     let target = until.as_str();
     if invocation.operation.method != Method::Get {
-        eprintln!("Payment {id} accepted; waiting for {target}.");
+        api.terminal
+            .important(format!("Payment {id} accepted; waiting for {target}."));
     }
     let mut backoff = Backoff::new(
         match until {
@@ -804,10 +932,10 @@ async fn wait_for_payment(
             && (Some(status) != last_status.as_ref()
                 || last_notice.elapsed() >= STATUS_NOTICE_INTERVAL)
         {
-            eprintln!(
+            api.terminal.notice(format!(
                 "Payment {id} status: {}; waiting for {target}.",
                 status.as_str()
-            );
+            ));
             last_status = Some(status.clone());
             last_notice = Instant::now();
         }
@@ -815,10 +943,11 @@ async fn wait_for_payment(
             && !invoice_presented
             && let Some(invoice) = view.invoice()
         {
-            present_invoice(invoice, invocation)?;
+            present_invoice(invoice, invocation, api.terminal)?;
             invoice_presented = true;
             if until == WaitTarget::Completed {
-                eprintln!("Invoice is ready; continuing to poll for settlement.");
+                api.terminal
+                    .notice("Invoice is ready; continuing to poll for settlement.");
             }
         }
         match view.progress(until) {
@@ -834,6 +963,7 @@ async fn wait_for_payment(
                             Error::usage("The ready payment does not contain a BOLT11 invoice")
                         })?,
                         invocation,
+                        api.terminal,
                     )?;
                 }
                 return out.write(
@@ -866,12 +996,12 @@ async fn wait_for_payment(
 }
 
 /// Copy and render a ready BOLT11 invoice as requested; both go to stderr.
-fn present_invoice(invoice: &str, invocation: &ApiInvocation) -> Result<()> {
+fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal) -> Result<()> {
     if invocation.copy {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(invoice)) {
-            Ok(()) => eprintln!("Invoice copied to the clipboard."),
-            Err(_) => eprintln!(
-                "Warning: the invoice is ready, but it could not be copied to the clipboard."
+            Ok(()) => terminal.notice("Invoice copied to the clipboard."),
+            Err(_) => terminal.important(
+                "Warning: the invoice is ready, but it could not be copied to the clipboard.",
             ),
         }
     }
@@ -892,7 +1022,7 @@ fn present_invoice(invoice: &str, invocation: &ApiInvocation) -> Result<()> {
             .map(|line| format!("  {line}  "))
             .collect::<Vec<_>>()
             .join("\n");
-        eprintln!("\nScan to pay:\n\n{image}\n");
+        terminal.important(format!("\nScan to pay:\n\n{image}\n"));
     }
     Ok(())
 }
@@ -910,7 +1040,12 @@ async fn await_session_projection(
         if Instant::now() + pause >= deadline {
             return Err(Error::timeout("Checkout session projection is not ready"));
         }
-        tokio::time::sleep(pause).await;
+        api.terminal
+            .during(
+                "Waiting for checkout session projection...",
+                tokio::time::sleep(pause),
+            )
+            .await;
         response = tokio::time::timeout_at(
             deadline,
             api.send(Method::Get, &request.path, &request.query, None),
@@ -1089,7 +1224,7 @@ mod tests {
     }
 
     fn list_request(args: &[&str]) -> Request {
-        Request::build(&invocation(args), &scope()).unwrap()
+        Request::build(&invocation(args), &scope(), None).unwrap()
     }
 
     fn api(authorization: Authorization) -> Api {
@@ -1098,6 +1233,7 @@ mod tests {
             base: "https://api.example.test/v1".into(),
             authorization,
             origin: None,
+            terminal: Terminal::new(false, false),
         }
     }
 
@@ -1280,6 +1416,97 @@ mod tests {
     }
 
     #[test]
+    fn interruption_claims_a_possible_submission_only_after_a_write_starts() {
+        let submission = SubmissionState::default();
+        let before = submission.interrupted();
+        assert_eq!(before.kind, ErrorKind::Interrupted);
+        assert_eq!(
+            before.message,
+            "Interrupted before any resource change was submitted"
+        );
+        assert!(before.detail.is_none());
+
+        let id = Uuid::nil();
+        submission.record(OperationId::CreatePayment, Some(id), &scope());
+        // Only the first write is the command's submission.
+        submission.record(OperationId::DeleteWallet, None, &scope());
+        let after = submission.interrupted();
+        assert!(
+            after
+                .message
+                .contains(&format!("payment {id} may have been submitted"))
+        );
+        assert!(after.message.contains("was not cancelled"));
+        let detail = serde_json::to_value(after.detail.unwrap()).unwrap();
+        assert_eq!(detail["resource_id"], json!(id));
+        assert_eq!(detail["organization_id"], json!(ORG));
+        assert_eq!(detail["outcome"], "unknown");
+    }
+
+    #[test]
+    fn interruption_during_a_session_change_says_how_to_recover_until_it_settles() {
+        let submission = SubmissionState::default();
+        for (change, message, hint) in [
+            (
+                SessionChange::Refresh {
+                    account: "person".into(),
+                },
+                "Interrupted while refreshing the saved login for person",
+                "voltage login",
+            ),
+            (
+                SessionChange::Login,
+                "Interrupted after sign-in may have created a session that was not saved",
+                "voltage login",
+            ),
+            (
+                SessionChange::Logout {
+                    account: "person".into(),
+                },
+                "Interrupted while logging out person; its session may already be revoked",
+                "--local",
+            ),
+        ] {
+            submission.session_changing(change);
+            let during = submission.interrupted();
+            assert_eq!(during.message, message);
+            assert!(during.hint.unwrap().contains(hint));
+            assert!(during.detail.is_none());
+
+            submission.session_settled();
+            let after = submission.interrupted();
+            assert_eq!(
+                after.message,
+                "Interrupted before any resource change was submitted"
+            );
+        }
+
+        // A sent write outranks a session change that has not settled.
+        submission.session_changing(SessionChange::Refresh {
+            account: "person".into(),
+        });
+        submission.record(OperationId::DeleteWallet, None, &scope());
+        assert!(
+            submission
+                .interrupted()
+                .message
+                .contains("may have been submitted")
+        );
+    }
+
+    #[test]
+    fn interruption_after_another_write_is_uncertain_without_naming_a_payment() {
+        let submission = SubmissionState::default();
+        submission.record(OperationId::DeleteWallet, None, &scope());
+        let error = submission.interrupted();
+        assert!(!error.message.contains("payment"));
+        assert!(error.message.contains("may have been submitted"));
+        let detail = serde_json::to_value(error.detail.unwrap()).unwrap();
+        assert!(detail["resource_id"].is_null());
+        assert_eq!(detail["outcome"], "unknown");
+    }
+
+    #[test]
     fn journal_rejects_the_same_id_for_a_different_request() {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -1294,16 +1521,18 @@ mod tests {
         let create_payment = operation(OperationId::CreatePayment);
         let id = Uuid::nil();
         let body = json!({"id": id, "wallet_id": WALLET});
-        journal(&settings, create_payment, &scope(), &body, id).unwrap();
-        journal(&settings, create_payment, &scope(), &body, id).unwrap();
+        let terminal = Terminal::new(false, false);
+        journal(&settings, create_payment, &scope(), &body, id, terminal).unwrap();
+        journal(&settings, create_payment, &scope(), &body, id, terminal).unwrap();
         let changed = json!({"id": id, "wallet_id": ORG});
-        let error = journal(&settings, create_payment, &scope(), &changed, id).unwrap_err();
+        let error =
+            journal(&settings, create_payment, &scope(), &changed, id, terminal).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Usage);
         let other_scope = Scope {
             envs: Vec::new(),
             ..scope()
         };
-        assert!(journal(&settings, create_payment, &other_scope, &body, id).is_err());
+        assert!(journal(&settings, create_payment, &other_scope, &body, id, terminal).is_err());
         let record: JournalRecord = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join(JOURNAL_DIR).join(format!("{id}.json")))
                 .unwrap(),
@@ -1328,7 +1557,7 @@ mod tests {
             "bolt11",
             "--qr",
         ]);
-        let request = Request::build(&receive, &scope()).unwrap();
+        let request = Request::build(&receive, &scope(), None).unwrap();
         assert!(check_invoice_flags(&receive, &request).is_ok());
         let onchain = invocation(&[
             "payments",
@@ -1339,7 +1568,7 @@ mod tests {
             "onchain",
             "--copy",
         ]);
-        let request = Request::build(&onchain, &scope()).unwrap();
+        let request = Request::build(&onchain, &scope(), None).unwrap();
         assert_eq!(
             check_invoice_flags(&onchain, &request).unwrap_err().message,
             "--qr and --copy require a BOLT11 receive (--kind bolt11)"

@@ -16,6 +16,7 @@ mod price;
 pub mod registry;
 pub mod secret;
 mod startup;
+mod terminal;
 
 pub(crate) use error::{Error, Result};
 pub use startup::run;

@@ -13,6 +13,7 @@ use crate::{
     config::{InputSource, Scope},
     payment::{Amount, AmountUnit, Currency, Network, PaymentDirection, ReceiveKind},
     registry::{Method, Operation, OperationId, Parameter, ParameterLocation, ScopeParameter},
+    terminal::read_detached,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -54,9 +55,19 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn build(invocation: &ApiInvocation, scope: &Scope) -> Result<Self> {
+    /// Read a raw `--data` body, then build the request.
+    pub async fn read(invocation: &ApiInvocation, scope: &Scope) -> Result<Self> {
+        let raw = match &invocation.body {
+            Some(BodySource::Raw(source)) => Some(raw_body(source).await?),
+            _ => None,
+        };
+        Self::build(invocation, scope, raw)
+    }
+
+    /// `raw` is the body `--data` supplied, already read; `read` supplies it.
+    pub fn build(invocation: &ApiInvocation, scope: &Scope, raw: Option<Value>) -> Result<Self> {
         let operation = invocation.operation;
-        let body = body(invocation, scope)?;
+        let body = body(invocation, scope, raw)?;
         let body_id = body.as_ref().and_then(|body| RawPayload(body).id());
         Ok(Self {
             path: path(operation, invocation.resource_id, scope)?,
@@ -497,14 +508,20 @@ fn friendly_body(
     })
 }
 
-/// A complete JSON object from stdin or a file, bounded and otherwise untouched.
-fn raw_body(source: &InputSource) -> Result<Value> {
-    let reader: Box<dyn Read> = match source {
-        InputSource::Stdin => Box::new(std::io::stdin()),
-        InputSource::File(path) => Box::new(std::fs::File::open(path)?),
-    };
-    let mut bytes = Vec::new();
-    reader.take(MAX_BODY_BYTES + 1).read_to_end(&mut bytes)?;
+/// A complete JSON object from stdin or a file, bounded and otherwise untouched. Stdin or a
+/// FIFO can block indefinitely, so the read is detached and Ctrl-C still ends the command.
+async fn raw_body(source: &InputSource) -> Result<Value> {
+    let source = source.clone();
+    let bytes = read_detached(move || -> Result<Vec<u8>> {
+        let reader: Box<dyn Read> = match &source {
+            InputSource::Stdin => Box::new(std::io::stdin()),
+            InputSource::File(path) => Box::new(std::fs::File::open(path)?),
+        };
+        let mut bytes = Vec::new();
+        reader.take(MAX_BODY_BYTES + 1).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+    .await??;
     if bytes.len() as u64 > MAX_BODY_BYTES {
         return Err(Error::usage("Request body exceeds 16 MiB"));
     }
@@ -515,17 +532,20 @@ fn raw_body(source: &InputSource) -> Result<Value> {
     Ok(body)
 }
 
-fn body(invocation: &ApiInvocation, scope: &Scope) -> Result<Option<Value>> {
+fn body(invocation: &ApiInvocation, scope: &Scope, raw: Option<Value>) -> Result<Option<Value>> {
     let operation = invocation.operation;
-    let body = match &invocation.body {
-        None if operation.body => {
+    let body = match (&invocation.body, raw) {
+        (None, _) if operation.body => {
             return Err(Error::usage(
                 "This operation requires --data @file or --data -",
             ));
         }
-        None => return Ok(None),
-        Some(BodySource::Raw(source)) => raw_body(source)?,
-        Some(BodySource::Friendly(flags)) => friendly_body(flags, invocation.alias, scope)?,
+        (None, _) => return Ok(None),
+        (Some(BodySource::Raw(_)), Some(raw)) => raw,
+        (Some(BodySource::Raw(_)), None) => {
+            return Err(Error::usage("The --data body was not read"));
+        }
+        (Some(BodySource::Friendly(flags)), _) => friendly_body(flags, invocation.alias, scope)?,
     };
     check_payload(operation, invocation.alias, RawPayload(&body), scope)?;
     Ok(Some(body))
@@ -757,7 +777,7 @@ mod tests {
         let Command::Api(api) = invocation.command else {
             panic!("expected an API command");
         };
-        Request::build(&api, &scope())
+        Request::build(&api, &scope(), None)
     }
 
     #[test]
