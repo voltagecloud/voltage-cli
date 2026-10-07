@@ -4,7 +4,11 @@
 //! to the operating system store; file storage is an explicit choice with the same
 //! ownership and permission checks on every read.
 
-use crate::{Error, Result, secret::Secret};
+use crate::{
+    Error, Result,
+    secret::Secret,
+    terminal::{Terminal, read_detached},
+};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,7 +28,7 @@ const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_DIR: &str = "credentials";
 const LOCK_FILE: &str = "credentials.lock";
 const KEYRING_SERVICE: &str = "voltage-cli";
-const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCK_RETRY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -388,7 +392,7 @@ impl Settings {
     }
 
     /// Exclusive process lock for credential and configuration writes.
-    pub async fn lock(&self) -> Result<File> {
+    pub async fn lock(&self, terminal: Terminal) -> Result<File> {
         private_dir(&self.dir)?;
         let path = self.dir.join(LOCK_FILE);
         if path.exists() {
@@ -405,10 +409,13 @@ impl Settings {
         let file = options.open(path)?;
         check_owner(&file.metadata()?)?;
         let deadline = tokio::time::Instant::now() + LOCK_TIMEOUT;
+        let mut progress = None;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(file),
                 Err(TryLockError::WouldBlock) => {
+                    progress
+                        .get_or_insert_with(|| terminal.progress("Waiting for credential lock..."));
                     if tokio::time::Instant::now() >= deadline {
                         return Err(Error::transport("Timed out waiting for credential lock"));
                     }
@@ -586,12 +593,15 @@ pub enum InputSource {
     File(PathBuf),
 }
 
-/// A credential from stdin or a private file, trimmed and never empty.
-pub fn read_secret(source: &InputSource) -> Result<Secret> {
-    let raw = match source {
-        InputSource::Stdin => read_bounded(std::io::stdin(), MAX_PRIVATE_FILE_BYTES)?,
-        InputSource::File(path) => read_private(path)?,
-    };
+/// A credential from stdin or a private file, trimmed and never empty. Stdin or a FIFO can
+/// block indefinitely, so the read is detached and Ctrl-C still ends the command.
+pub async fn read_secret(source: &InputSource) -> Result<Secret> {
+    let source = source.clone();
+    let raw = read_detached(move || match &source {
+        InputSource::Stdin => read_bounded(std::io::stdin(), MAX_PRIVATE_FILE_BYTES),
+        InputSource::File(path) => read_private(path),
+    })
+    .await??;
     let value = raw.trim();
     if value.is_empty() {
         return Err(Error::usage("Credential is empty"));

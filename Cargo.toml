@@ -18,7 +18,7 @@ clap_complete = "=4.6.11"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 toml = "=1.1.6"
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "form", "query", "stream"] }
 # The TLS provider is ring, installed at startup; aws-lc-rs would need a C toolchain on every platform.
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }

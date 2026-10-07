@@ -6,19 +6,18 @@
 
 use crate::{
     Error, Result,
+    api::{SessionChange, SubmissionState},
     cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
-        AUTH_URL, Account, AccountKind, Credential, InputSource, Login, Scope, Settings,
-        read_secret,
+        AUTH_URL, Account, AccountKind, Credential, InputSource, LOCK_TIMEOUT, Login, Scope,
+        Settings, read_secret,
     },
     secret::Secret,
+    terminal::Terminal,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::{
-    io::IsTerminal,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 const CLIENT_ID: &str = "voltage-cli";
@@ -26,6 +25,8 @@ const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+// A credential lock holder makes at most one auth request, so a waiter must outlast it.
+const _: () = assert!(LOCK_TIMEOUT.as_secs() >= 2 * AUTH_TIMEOUT.as_secs());
 /// Access tokens this close to expiry are refreshed before use.
 const REFRESH_MARGIN: u64 = 30;
 /// Device approval waits are bounded regardless of the server's `expires_in`.
@@ -164,7 +165,11 @@ async fn bounded_body(mut response: reqwest::Response, limit: usize) -> Result<Z
     Ok(body)
 }
 
-async fn auth_request(request: reqwest::RequestBuilder) -> Result<AuthResponse> {
+async fn auth_request(
+    request: reqwest::RequestBuilder,
+    terminal: Terminal,
+) -> Result<AuthResponse> {
+    let _progress = terminal.progress("Waiting for auth service...");
     let response = request.send().await.map_err(|_| {
         Error::transport(
             "Authentication request failed; no token request was automatically retried",
@@ -356,6 +361,7 @@ pub async fn login(
     settings: &mut Settings,
     flags: &LoginFlags,
     global: &GlobalFlags,
+    submission: &SubmissionState,
 ) -> Result<LoginOutcome> {
     let url = base_url(global.auth_url.as_deref().unwrap_or(AUTH_URL))?;
     if let Some(name) = &global.account
@@ -366,34 +372,37 @@ pub async fn login(
         ));
     }
     let client = client(AUTH_TIMEOUT)?;
+    let terminal = global.terminal();
     let response = auth_request(
         client
             .post(format!("{url}/oauth/device_authorization"))
             .form(&[("client_id", CLIENT_ID)]),
+        terminal,
     )
     .await?;
     response.require_success()?;
     let device: DeviceAuthorization = response.json("Invalid device authorization response")?;
     let verification = device.verification_url()?;
-    eprintln!(
+    terminal.important(format!(
         "Open {verification}\nConfirm this code: {}",
         device.user_code
-    );
+    ));
     if !flags.no_browser && webbrowser::open(verification).is_err() {
-        eprintln!("Could not open a browser; open the URL above manually.");
+        terminal.important("Could not open a browser; open the URL above manually.");
     }
-    let token = poll_device_grant(&client, &url, &device).await?;
+    let token = poll_device_grant(&client, &url, &device, terminal, submission).await?;
     let login = token.into_login(None, None)?;
     let session = Secret::new(login.refresh_token.expose().to_owned());
     let saved = save_login(settings, login, flags, global, &client, &url).await;
     if saved.is_err() {
         // A local storage/discovery failure must not silently orphan a remote session.
-        if revoke(&client, &url, &session).await.is_err() {
-            eprintln!(
+        if revoke(&client, &url, &session, terminal).await.is_err() {
+            terminal.important(
                 "Could not revoke the new CLI session after login failed. Use account global signout to invalidate its refresh session."
             );
         }
     }
+    submission.session_settled();
     saved
 }
 
@@ -402,6 +411,8 @@ async fn poll_device_grant(
     client: &reqwest::Client,
     url: &str,
     device: &DeviceAuthorization,
+    terminal: Terminal,
+    submission: &SubmissionState,
 ) -> Result<TokenResponse> {
     let expires = device.expires_in.min(MAX_LOGIN_WAIT);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(expires);
@@ -413,20 +424,32 @@ async fn poll_device_grant(
         if tokio::time::Instant::now() + Duration::from_secs(interval) >= deadline {
             return Err(Error::timeout("Login expired; run voltage login again"));
         }
-        tokio::time::sleep(Duration::from_secs(interval)).await;
+        terminal
+            .during(
+                "Waiting for device approval...",
+                tokio::time::sleep(Duration::from_secs(interval)),
+            )
+            .await;
+        // Any poll can be the one that issues the session, which stays unsaved until login
+        // finishes; between polls, nothing has been issued.
+        submission.session_changing(SessionChange::Login);
         let response = tokio::time::timeout_at(
             deadline,
-            auth_request(client.post(format!("{url}/oauth/token")).form(&[
-                ("client_id", CLIENT_ID),
-                ("grant_type", DEVICE_CODE_GRANT),
-                ("device_code", device.device_code.expose()),
-            ])),
+            auth_request(
+                client.post(format!("{url}/oauth/token")).form(&[
+                    ("client_id", CLIENT_ID),
+                    ("grant_type", DEVICE_CODE_GRANT),
+                    ("device_code", device.device_code.expose()),
+                ]),
+                terminal,
+            ),
         )
         .await
         .map_err(|_| Error::timeout("Login expired"))??;
         if response.is_success() {
             return response.json("Invalid token response");
         }
+        submission.session_settled();
         let error = response
             .json::<DeviceGrantErrorBody>("Invalid authentication response")
             .ok()
@@ -456,6 +479,7 @@ async fn save_login(
             client
                 .get(format!("{url}/users/current"))
                 .bearer_auth(login.access_token.expose()),
+            global.terminal(),
         )
         .await?;
         response.require_success()?;
@@ -468,7 +492,7 @@ async fn save_login(
             .or_else(|| login.email.clone())
             .or_else(|| login.user_id.clone())
             .ok_or_else(|| Error::auth("User response has no account identity"))?;
-        let _lock = settings.lock().await?;
+        let _lock = settings.lock(global.terminal()).await?;
         settings.reload()?;
         if settings.config.accounts.contains_key(&name) {
             return Err(Error::usage(format!(
@@ -504,12 +528,20 @@ async fn save_login(
 }
 
 /// Revoke a session whose refresh token the CLI holds.
-async fn revoke(client: &reqwest::Client, url: &str, refresh_token: &Secret) -> Result<()> {
-    auth_request(client.post(format!("{url}/oauth/revoke")).form(&[
-        ("client_id", CLIENT_ID),
-        ("token_type_hint", "refresh_token"),
-        ("token", refresh_token.expose()),
-    ]))
+async fn revoke(
+    client: &reqwest::Client,
+    url: &str,
+    refresh_token: &Secret,
+    terminal: Terminal,
+) -> Result<()> {
+    auth_request(
+        client.post(format!("{url}/oauth/revoke")).form(&[
+            ("client_id", CLIENT_ID),
+            ("token_type_hint", "refresh_token"),
+            ("token", refresh_token.expose()),
+        ]),
+        terminal,
+    )
     .await?
     .require_success()
 }
@@ -519,6 +551,7 @@ pub async fn resolve(
     settings: &Settings,
     scope: &Scope,
     flags: &GlobalFlags,
+    submission: &SubmissionState,
 ) -> Result<Credential> {
     if let Some(key) = ambient_api_key(flags) {
         if key.expose().trim().is_empty() {
@@ -551,23 +584,40 @@ pub async fn resolve(
                     "Saved credentials cannot be refreshed at a different auth URL",
                 ));
             }
-            let _lock = settings.lock().await?;
-            let Credential::Login(login) = settings.read_credential(&name)? else {
-                return Err(Error::auth("Invalid saved credential"));
-            };
+            // Credential writes replace the whole value atomically, so a fresh login is used
+            // without the lock. Only a refresh, which spends the single-use refresh token, is
+            // serialized.
+            let login = saved_login(settings, &name)?;
             if login.expires_at > now() + REFRESH_MARGIN {
                 return Ok(Credential::Login(login));
             }
-            let refreshed = Credential::Login(refresh(&url, login).await?);
+            let _lock = settings.lock(flags.terminal()).await?;
+            // Another process may have refreshed while this one waited.
+            let login = saved_login(settings, &name)?;
+            if login.expires_at > now() + REFRESH_MARGIN {
+                return Ok(Credential::Login(login));
+            }
+            submission.session_changing(SessionChange::Refresh {
+                account: name.clone(),
+            });
+            let refreshed = Credential::Login(refresh(&url, login, flags.terminal()).await?);
             settings.write_credential(&name, account.store, &refreshed)?;
+            submission.session_settled();
             Ok(refreshed)
         }
     }
 }
 
+fn saved_login(settings: &Settings, name: &str) -> Result<Login> {
+    match settings.read_credential(name)? {
+        Credential::Login(login) => Ok(login),
+        Credential::ApiKey(_) => Err(Error::auth("Invalid saved credential")),
+    }
+}
+
 /// Rotate an expiring login; the refresh token is single use, so the result is saved
 /// before any caller sees it.
-async fn refresh(url: &str, login: Login) -> Result<Login> {
+async fn refresh(url: &str, login: Login, terminal: Terminal) -> Result<Login> {
     let response = auth_request(
         client(AUTH_TIMEOUT)?
             .post(format!("{url}/oauth/token"))
@@ -576,6 +626,7 @@ async fn refresh(url: &str, login: Login) -> Result<Login> {
                 ("grant_type", "refresh_token"),
                 ("refresh_token", login.refresh_token.expose()),
             ]),
+        terminal,
     )
     .await?;
     response.require_success()?;
@@ -589,8 +640,9 @@ pub async fn resolve_organization(
     settings: &Settings,
     scope: &Scope,
     flags: &GlobalFlags,
+    submission: &SubmissionState,
 ) -> Result<ApiCredential> {
-    let login = match resolve(settings, scope, flags).await? {
+    let login = match resolve(settings, scope, flags, submission).await? {
         Credential::ApiKey(key) => return Ok(ApiCredential::ApiKey(key)),
         Credential::Login(login) => login,
     };
@@ -606,6 +658,7 @@ pub async fn resolve_organization(
                 ("subject_token_type", ACCESS_TOKEN_TYPE),
                 ("audience", &organization.to_string()),
             ]),
+        flags.terminal(),
     )
     .await?;
     response.require_success()?;
@@ -620,8 +673,18 @@ pub async fn resolve_organization(
     Ok(ApiCredential::OrganizationToken(token.access_token))
 }
 
-pub async fn logout(settings: &mut Settings, scope: &Scope, local: bool) -> Result<LogoutOutcome> {
-    let _lock = settings.lock().await?;
+pub async fn logout(
+    settings: &mut Settings,
+    scope: &Scope,
+    local: bool,
+    terminal: Terminal,
+    submission: &SubmissionState,
+) -> Result<LogoutOutcome> {
+    // The lock spans the revoke on purpose. Released, a concurrent refresh could rotate the
+    // token in between, and logout would revoke the spent token while the new session stays
+    // live. Logout is rare, and a fresh login is used without the lock, so only refreshes and
+    // configuration writes wait behind it, for at most AUTH_TIMEOUT.
+    let _lock = settings.lock(terminal).await?;
     settings.reload()?;
     let name = settings.account_name(scope)?;
     let account = settings.account(&name)?;
@@ -632,11 +695,15 @@ pub async fn logout(settings: &mut Settings, scope: &Scope, local: bool) -> Resu
             ));
         };
         let url = base_url(&account.auth_url)?;
-        revoke(&client(AUTH_TIMEOUT)?, &url, &login.refresh_token).await?;
+        submission.session_changing(SessionChange::Logout {
+            account: name.clone(),
+        });
+        revoke(&client(AUTH_TIMEOUT)?, &url, &login.refresh_token, terminal).await?;
     }
     settings.delete_credential(&name)?;
     settings.config.accounts.remove(&name);
     settings.save()?;
+    submission.session_settled();
     Ok(LogoutOutcome {
         account: name,
         removed: true,
@@ -661,22 +728,20 @@ pub async fn import_key(
         _ => return Err(Error::usage("Exactly one --env is required")),
     };
     let key = if flags.stdin {
-        read_secret(&InputSource::Stdin)?
+        read_secret(&InputSource::Stdin).await?
     } else {
-        if !std::io::stdin().is_terminal() {
+        let terminal = global.terminal();
+        if !terminal.can_prompt() {
             return Err(Error::usage(
-                "Use --stdin to import an API key noninteractively",
+                "Use --stdin to import an API key when input is disabled or noninteractive (--yes does not supply a key)",
             ));
         }
-        Secret::new(
-            rpassword::prompt_password("Environment API key: ")
-                .map_err(|error| Error::transport(error.to_string()))?,
-        )
+        terminal.read_hidden("Environment API key: ").await?
     };
     if key.expose().trim().is_empty() {
         return Err(Error::usage("API key cannot be empty"));
     }
-    let _lock = settings.lock().await?;
+    let _lock = settings.lock(global.terminal()).await?;
     settings.reload()?;
     if settings.config.accounts.contains_key(&name) {
         return Err(Error::usage("Credential already exists"));
@@ -706,17 +771,20 @@ pub async fn discover(
     scope: &Scope,
     flags: &GlobalFlags,
     what: Discovery,
+    submission: &SubmissionState,
 ) -> Result<Value> {
     let requires_login = || Error::auth("Organization/environment discovery requires a user login");
     let token = match what {
-        Discovery::Organizations => match resolve(settings, scope, flags).await? {
+        Discovery::Organizations => match resolve(settings, scope, flags, submission).await? {
             Credential::Login(login) => login.access_token,
             Credential::ApiKey(_) => return Err(requires_login()),
         },
-        Discovery::Environments => match resolve_organization(settings, scope, flags).await? {
-            ApiCredential::OrganizationToken(token) => token,
-            ApiCredential::ApiKey(_) => return Err(requires_login()),
-        },
+        Discovery::Environments => {
+            match resolve_organization(settings, scope, flags, submission).await? {
+                ApiCredential::OrganizationToken(token) => token,
+                ApiCredential::ApiKey(_) => return Err(requires_login()),
+            }
+        }
     };
     let name = settings.account_name(scope)?;
     let url = base_url(&settings.account(&name)?.auth_url)?;
@@ -730,6 +798,7 @@ pub async fn discover(
         client(AUTH_TIMEOUT)?
             .get(format!("{url}{path}"))
             .bearer_auth(token.expose()),
+        flags.terminal(),
     )
     .await?;
     response.require_success()?;
