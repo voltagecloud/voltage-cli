@@ -14,6 +14,7 @@ These commands use the auth service (`https://auth.voltage.cloud/api/v1`, overri
 | `voltage auth import-key` | local only |
 | `voltage organizations list` | GET `/api/v1/users/current` |
 | `voltage environments list` | POST `/api/v1/oauth/token`<br>GET `/api/v1/organizations/{organization_id}/environments` |
+| `voltage context` | local only |
 | `voltage profiles create NAME` | local only |
 | `voltage profiles get NAME` | local only |
 | `voltage profiles list` | local only |

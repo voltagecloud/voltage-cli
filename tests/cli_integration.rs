@@ -189,6 +189,7 @@ fn process_at(dir: &Path, api_url: &str) -> std::process::Command {
         "VOLTAGE_API_KEY",
         "VOLTAGE_CHECKOUT_TOKEN",
         "VOLTAGE_STREAM_TOKEN",
+        "VOLTAGE_CONFIG_DIR",
     ] {
         cmd.env_remove(name);
     }
@@ -861,6 +862,162 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
     let reloaded = Settings::open(settings.dir.clone()).unwrap();
     assert!(reloaded.config.profiles.is_empty());
     assert!(reloaded.config.accounts.contains_key(LOGIN_NAME));
+}
+
+#[tokio::test]
+async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
+    let (server, dir) = fixture().await;
+    let mut settings = seeded_api_key(dir.path(), "stage", "stage-key");
+    settings.config.profiles.insert(
+        "stage".into(),
+        Profile {
+            organization_id: uuid(ORG),
+            environment_id: uuid(ENV),
+            account: "stage".into(),
+        },
+    );
+    settings.save().unwrap();
+    // Inspection must not need the secret, so remove it from the store.
+    for entry in std::fs::read_dir(dir.path().join("credentials")).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let profiled = cli(dir.path(), &server)
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_CONFIG_DIR", dir.path().join("unused"))
+        .args(["context", "--profile", "stage", "--wallet", WALLET])
+        .assert()
+        .success();
+    let setting = |value: Value, source: &str| json!({"value": value, "source": source});
+    let data = json_stdout(&profiled)["data"].clone();
+    assert_eq!(data["profile"], setting(json!("stage"), "flag"));
+    assert_eq!(data["account"], setting(json!("stage"), "profile"));
+    assert_eq!(
+        data["credential"],
+        json!({"kind": "api_key", "location": "file"})
+    );
+    assert_eq!(data["credential_problem"], Value::Null);
+    assert_eq!(data["organization_id"], setting(json!(ORG), "profile"));
+    assert_eq!(data["environment_ids"], setting(json!([ENV]), "profile"));
+    assert_eq!(data["wallet_id"], setting(json!(WALLET), "flag"));
+    assert_eq!(data["webhook_id"], setting(Value::Null, "unset"));
+    assert_eq!(data["api_url"], setting(json!(server.uri()), "flag"));
+    assert_eq!(
+        data["config_dir"],
+        setting(json!(dir.path().display().to_string()), "flag")
+    );
+    assert_eq!(data["config_file"]["exists"], true);
+    // The profile silences ambient scope and the ambient key; the flag beats the variable.
+    assert_eq!(
+        data["ignored_variables"],
+        json!([
+            "VOLTAGE_ORGANIZATION_ID",
+            "VOLTAGE_CONFIG_DIR",
+            "VOLTAGE_API_KEY"
+        ])
+    );
+    assert!(!stdout(&profiled).contains("stage-key"));
+
+    let ambient = cli(dir.path(), &server)
+        .env("VOLTAGE_ORGANIZATION_ID", ORG)
+        .args(["context", "--env", ENV])
+        .assert()
+        .success();
+    let data = json_stdout(&ambient)["data"].clone();
+    assert_eq!(data["account"], setting(Value::Null, "environment"));
+    assert_eq!(
+        data["credential"],
+        json!({"kind": "api_key", "location": "environment"})
+    );
+    assert_eq!(data["credential_problem"], Value::Null);
+    assert_eq!(data["organization_id"], setting(json!(ORG), "environment"));
+    assert_eq!(data["environment_ids"], setting(json!([ENV]), "flag"));
+    assert_eq!(data["ignored_variables"], json!([]));
+    assert!(!stdout(&ambient).contains(ACCOUNT_KEY));
+
+    // A blank key still wins over saved credentials, and every command rejects it.
+    let blank = cli(dir.path(), &server)
+        .env("VOLTAGE_API_KEY", " ")
+        .arg("context")
+        .assert()
+        .success();
+    let data = json_stdout(&blank)["data"].clone();
+    assert_eq!(
+        data["credential"],
+        json!({"kind": "api_key", "location": "environment"})
+    );
+    assert_eq!(data["credential_problem"], "empty_api_key");
+
+    let only_saved = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .arg("context")
+        .assert()
+        .success();
+    assert_eq!(
+        json_stdout(&only_saved)["data"]["account"],
+        setting(json!("stage"), "default")
+    );
+
+    // A saved key used outside its bound organization is reported the way commands reject it.
+    let elsewhere = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["context", "--org", RESOURCE])
+        .assert()
+        .success();
+    let data = json_stdout(&elsewhere)["data"].clone();
+    assert_eq!(
+        data["credential"],
+        json!({"kind": "api_key", "location": "file"})
+    );
+    assert_eq!(data["credential_problem"], "bound_elsewhere");
+    cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["wallets", "list", "--org", RESOURCE])
+        .assert()
+        .code(2);
+
+    let unknown = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["context", "--account", "missing"])
+        .assert()
+        .success();
+    let data = json_stdout(&unknown)["data"].clone();
+    assert_eq!(data["account"], setting(json!("missing"), "flag"));
+    assert_eq!(data["credential"], Value::Null);
+    assert_eq!(data["credential_problem"], "unknown_credential");
+
+    let stage = settings.config.accounts["stage"].clone();
+    settings.config.accounts.insert("prod".into(), stage);
+    settings.save().unwrap();
+    let ambiguous = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .arg("context")
+        .assert()
+        .success();
+    let data = json_stdout(&ambiguous)["data"].clone();
+    assert_eq!(data["account"], setting(Value::Null, "unset"));
+    assert_eq!(data["credential_problem"], "multiple_credentials");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn context_inspection_creates_no_configuration() {
+    let (server, dir) = fixture().await;
+    let fresh = dir.path().join("fresh");
+    let inspected = cli(&fresh, &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .arg("context")
+        .assert()
+        .success();
+    let data = json_stdout(&inspected)["data"].clone();
+    assert_eq!(data["account"], json!({"value": null, "source": "unset"}));
+    assert_eq!(data["credential"], Value::Null);
+    assert_eq!(data["config_file"]["exists"], false);
+    assert!(!fresh.exists());
+    cli(&fresh, &server)
+        .args(["context", "--profile", "missing"])
+        .assert()
+        .code(2);
+    assert!(!fresh.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

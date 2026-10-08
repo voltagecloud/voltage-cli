@@ -21,6 +21,7 @@ AUTH_COMMANDS = [
     ('voltage auth import-key', []),
     ('voltage organizations list', [('GET', '/api/v1/users/current')]),
     ('voltage environments list', [('POST', '/api/v1/oauth/token'), ('GET', '/api/v1/organizations/{organization_id}/environments')]),
+    ('voltage context', []),
     ('voltage profiles create NAME', []),
     ('voltage profiles get NAME', []),
     ('voltage profiles list', []),

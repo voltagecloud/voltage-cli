@@ -157,6 +157,8 @@ pub enum LocalCommand {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// Show the effective profile, scope, credential, and config path without secrets
+    Context,
     /// Show the BTC/USD price and the sats one dollar buys
     Price(PriceFlags),
     /// Convert an amount between BTC and USD at the current or a past price
@@ -1268,6 +1270,12 @@ mod tests {
         assert_eq!(flags.to, Currency::Btc);
         assert_eq!(flags.at.as_deref(), Some("2026-09-18T17:30:00Z"));
         assert!(Invocation::try_parse_from(["voltage", "convert", "10", "usd"]).is_err());
+        assert!(matches!(
+            Invocation::try_parse_from(["voltage", "context"])
+                .unwrap()
+                .command,
+            Command::Local(LocalCommand::Context)
+        ));
         assert!(matches!(
             Invocation::try_parse_from(["voltage", "price"])
                 .unwrap()

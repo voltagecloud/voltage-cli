@@ -9,8 +9,8 @@ use crate::{
     api::{SessionChange, SubmissionState},
     cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
-        AUTH_URL, Account, AccountKind, Credential, InputSource, LOCK_TIMEOUT, Login, Scope,
-        Settings, read_secret,
+        AUTH_URL, Account, AccountKind, Credential, CredentialProblem, InputSource, LOCK_TIMEOUT,
+        Login, Scope, Settings, read_secret,
     },
     secret::Secret,
     terminal::Terminal,
@@ -333,6 +333,63 @@ fn ambient_api_key(flags: &GlobalFlags) -> Option<Secret> {
     std::env::var("VOLTAGE_API_KEY").ok().map(Secret::new)
 }
 
+/// `VOLTAGE_API_KEY` is set, but a profile or account selection takes precedence over it.
+pub(crate) fn ignores_ambient_api_key(flags: &GlobalFlags) -> bool {
+    std::env::var_os("VOLTAGE_API_KEY").is_some() && ambient_api_key(flags).is_none()
+}
+
+/// The credential a command would use, chosen without reading a saved secret.
+pub(crate) enum Selected<'a> {
+    /// `VOLTAGE_API_KEY`.
+    Ambient(Secret),
+    Saved {
+        name: String,
+        account: &'a Account,
+    },
+}
+
+/// A selection commands would reject, with the credential it named when there is one.
+pub(crate) struct Rejected<'a> {
+    pub(crate) problem: CredentialProblem,
+    pub(crate) selected: Option<Selected<'a>>,
+}
+
+/// Choose the credential every command uses, and why commands would reject it. `resolve`
+/// and `voltage context` share this, so inspection cannot drift from what commands do.
+pub(crate) fn select<'a>(
+    settings: &'a Settings,
+    scope: &Scope,
+    flags: &GlobalFlags,
+) -> std::result::Result<Selected<'a>, Rejected<'a>> {
+    if let Some(key) = ambient_api_key(flags) {
+        // A blank key still shadows saved credentials, so commands fail rather than fall back.
+        if key.expose().trim().is_empty() {
+            return Err(Rejected {
+                problem: CredentialProblem::EmptyApiKey,
+                selected: Some(Selected::Ambient(key)),
+            });
+        }
+        return Ok(Selected::Ambient(key));
+    }
+    let rejected = |problem| Rejected {
+        problem,
+        selected: None,
+    };
+    let name = settings.select_account(scope).map_err(rejected)?;
+    let account = settings
+        .config
+        .accounts
+        .get(&name)
+        .ok_or(rejected(CredentialProblem::UnknownCredential))?;
+    if account.bound_elsewhere(scope) {
+        return Err(Rejected {
+            problem: CredentialProblem::BoundElsewhere,
+            selected: Some(Selected::Saved { name, account }),
+        });
+    }
+    Ok(Selected::Saved { name, account })
+}
+
 pub fn status(settings: &Settings, scope: &Scope, flags: &GlobalFlags) -> Result<AuthStatus> {
     if let Some(key) = ambient_api_key(flags) {
         return Ok(AuthStatus::Ambient {
@@ -553,30 +610,13 @@ pub async fn resolve(
     flags: &GlobalFlags,
     submission: &SubmissionState,
 ) -> Result<Credential> {
-    if let Some(key) = ambient_api_key(flags) {
-        if key.expose().trim().is_empty() {
-            return Err(Error::auth("VOLTAGE_API_KEY is empty"));
-        }
-        return Ok(Credential::ApiKey(key));
-    }
-    let name = settings.account_name(scope)?;
-    let account = settings.account(&name)?;
+    let (name, account) =
+        match select(settings, scope, flags).map_err(|rejected| rejected.problem.error(scope))? {
+            Selected::Ambient(key) => return Ok(Credential::ApiKey(key)),
+            Selected::Saved { name, account } => (name, account),
+        };
     match account.kind {
-        AccountKind::ApiKey => {
-            let organization_mismatch = scope
-                .org
-                .zip(account.organization_id)
-                .is_some_and(|(selected, bound)| selected != bound);
-            let environment_mismatch = account
-                .environment_id
-                .is_some_and(|bound| scope.envs.iter().any(|env| *env != bound));
-            if organization_mismatch || environment_mismatch {
-                return Err(Error::usage(
-                    "API key is bound to a different organization or environment; select a matching credential",
-                ));
-            }
-            settings.read_credential(&name)
-        }
+        AccountKind::ApiKey => settings.read_credential(&name),
         AccountKind::User => {
             let url = base_url(flags.auth_url.as_deref().unwrap_or(&account.auth_url))?;
             if url != account.auth_url {
