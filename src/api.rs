@@ -457,6 +457,7 @@ pub async fn execute(
     let operation = invocation.operation;
     let mut request = Request::read(invocation, scope).await?;
     check_invoice_flags(invocation, &request)?;
+    let run = Run::plan(invocation, &request, scope, global);
     if operation.id.returns_one_time_secret() && !out.secure_destination() {
         return Err(Error::usage(
             "This operation returns a one-time secret; supply --output-file PATH or --show-secrets before executing",
@@ -464,72 +465,296 @@ pub async fn execute(
     }
     // Decline a noninteractive confirmation before refreshing credentials or making
     // a wallet preflight request. The summary is still mandatory even in quiet mode.
-    if request.is_consequential(operation) && !global.yes && !global.terminal().can_prompt() {
-        return confirm(operation, scope, &request, global).await;
+    if let Run::Mutation(Mutation {
+        confirmation: confirmation @ Confirmation::WouldBeRefused,
+        ..
+    }) = run
+    {
+        return confirm(operation, scope, &request, confirmation, global.terminal()).await;
     }
     let authorization =
         Authorization::resolve(invocation, global, settings, scope, submission).await?;
     let api = Api::new(global, invocation, authorization)?;
-    let deadline = Instant::now() + global.timeout;
-    if request.pagination_mode() == PaginationMode::Offset && operation.has_parameter("cursor") {
-        api.terminal.important(
-            "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor."
-        );
-    }
-    guard_submission(&api, invocation, &request, settings, scope, global).await?;
-    if operation.auth == AuthScheme::CheckoutStream {
-        return api.stream(&request, out).await;
-    }
-    let Submission {
-        mut response,
-        reconciled,
-    } = submit(&api, invocation, &request, scope, submission).await?;
-    check_response(invocation, &response, scope)?;
-    if let Some(until) = wait_target(invocation) {
-        return wait_for_payment(
-            &api, invocation, &request, scope, response, until, deadline, out,
-        )
-        .await;
-    }
-    if operation.id == OperationId::GetSession {
-        response = await_session_projection(&api, &request, response, deadline).await?;
-    }
-    write_pages(
-        &api,
+    let steps = Steps {
+        api: &api,
         invocation,
-        &mut request,
-        response,
-        reconciled,
-        deadline,
-        out,
-    )
-    .await
+        scope,
+        deadline: Instant::now() + global.timeout,
+    };
+    if request.pagination_mode() == PaginationMode::Offset && operation.has_parameter("cursor") {
+        api.terminal.important(OFFSET_PAGINATION_DEPRECATED);
+    }
+    match run {
+        Run::EventStream => api.stream(&request, out).await,
+        Run::Read(read) => read.execute(&steps, &mut request, out).await,
+        Run::Mutation(mutation) => {
+            mutation
+                .execute(&steps, &mut request, settings, submission, out)
+                .await
+        }
+    }
 }
 
-/// Everything that must hold before a request leaves the process, in order: a wallet
-/// mutation's environment is verified against the wallet, consequential actions are
-/// confirmed, and an ID-bearing mutation is journaled for recovery.
-async fn guard_submission(
-    api: &Api,
-    invocation: &ApiInvocation,
-    request: &Request,
-    settings: &Settings,
-    scope: &Scope,
-    global: &GlobalFlags,
-) -> Result<()> {
-    let operation = invocation.operation;
-    if operation.targets_wallet() && operation.method != Method::Get && !scope.envs.is_empty() {
-        verify_wallet_environment(api, scope, invocation.resource_id).await?;
+const OFFSET_PAGINATION_DEPRECATED: &str =
+    "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor.";
+
+/// What a validated API command does, decided once after local validation, so `execute`
+/// and its steps cannot disagree about it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Run {
+    /// A GET: send it, check the response, then finish as `then` says.
+    Read(Read),
+    /// Any other method: guard it, record it, send it once, then write or wait.
+    Mutation(Mutation),
+    /// A checkout event stream: open it with the stream token and follow it.
+    EventStream,
+}
+
+impl Run {
+    pub fn plan(
+        invocation: &ApiInvocation,
+        request: &Request,
+        scope: &Scope,
+        global: &GlobalFlags,
+    ) -> Self {
+        let operation = invocation.operation;
+        if operation.auth == AuthScheme::CheckoutStream {
+            Self::EventStream
+        } else if operation.method == Method::Get {
+            Self::Read(Read::plan(invocation, scope))
+        } else {
+            Self::Mutation(Mutation::plan(invocation, request, scope, global))
+        }
     }
-    if request.is_consequential(operation) {
-        confirm(operation, scope, request, global).await?;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Read {
+    /// `wallets get` checks that the returned wallet is in the selected environment.
+    pub check_wallet_environment: bool,
+    pub then: ReadThen,
+}
+
+/// How a read finishes after its first response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadThen {
+    /// Write the response, then follow further pages when `follow` (`--all`) is set.
+    Pages { follow: bool },
+    /// A checkout session read answers 202 until its projection exists.
+    SessionProjection,
+    /// Poll the payment until `until`. A submitted payment can be missing from the read
+    /// projection at first; only an explicit `--wait` treats that 404 as pending, while
+    /// `--qr` and `--copy` alone fail like an ordinary read.
+    PaymentWait {
+        until: WaitTarget,
+        missing_is_pending: bool,
+    },
+}
+
+impl Read {
+    fn plan(invocation: &ApiInvocation, scope: &Scope) -> Self {
+        let operation = invocation.operation;
+        let then = match wait_target(invocation) {
+            Some(until) => ReadThen::PaymentWait {
+                until,
+                missing_is_pending: operation.id == OperationId::GetPayment
+                    && invocation.wait.is_some(),
+            },
+            None if operation.id == OperationId::GetSession => ReadThen::SessionProjection,
+            None => ReadThen::Pages {
+                follow: invocation.all,
+            },
+        };
+        Self {
+            check_wallet_environment: operation.id == OperationId::GetWallet
+                && !scope.envs.is_empty(),
+            then,
+        }
     }
-    if operation.method != Method::Get
-        && let (Some(body), Some(id)) = (&request.body, request.body_id)
-    {
-        journal(settings, operation, scope, body, id, api.terminal)?;
+
+    async fn execute(
+        self,
+        steps: &Steps<'_>,
+        request: &mut Request,
+        out: &mut Output,
+    ) -> Result<()> {
+        let operation = steps.invocation.operation;
+        let sent = steps
+            .api
+            .send(
+                operation.method,
+                &request.path,
+                &request.query,
+                request.body.as_ref(),
+            )
+            .await;
+        let response = match (sent, self.then) {
+            (
+                Err(error),
+                ReadThen::PaymentWait {
+                    missing_is_pending: true,
+                    ..
+                },
+            ) if error.http_status() == Some(404) => Response {
+                status: 404,
+                body: Value::Null,
+                retry_after: None,
+            },
+            (sent, _) => sent?,
+        };
+        if self.check_wallet_environment {
+            require_wallet_in_environment(&response.body, steps.scope)?;
+        }
+        check_invoice_payment(steps.invocation, &response)?;
+        match self.then {
+            ReadThen::PaymentWait { until, .. } => {
+                wait_for_payment(steps, request, response, until, out).await
+            }
+            ReadThen::SessionProjection => {
+                let response =
+                    await_session_projection(steps.api, request, response, steps.deadline).await?;
+                write_pages(steps, request, response, Outcome::Retrieved, false, out).await
+            }
+            ReadThen::Pages { follow } => {
+                write_pages(steps, request, response, Outcome::Retrieved, follow, out).await
+            }
+        }
     }
-    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Mutation {
+    /// A wallet mutation with an environment scope first reads the wallet to verify it,
+    /// because wallets have organization scope.
+    pub verify_wallet_environment: bool,
+    pub confirmation: Confirmation,
+    /// The body ID recorded in the recovery journal before submission.
+    pub journal_id: Option<Uuid>,
+    /// A payment whose submission fails in transport is looked up by its ID.
+    pub reconcile: bool,
+    pub wait: Option<WaitTarget>,
+}
+
+/// How a real run handles confirmation of a consequential action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Confirmation {
+    /// The action is not consequential.
+    NotRequired,
+    /// `--yes` approves it.
+    ApprovedByYes,
+    /// It asks on the terminal.
+    Prompt,
+    /// It is refused: input is disabled or not a terminal, and `--yes` is absent.
+    WouldBeRefused,
+}
+
+impl Mutation {
+    fn plan(
+        invocation: &ApiInvocation,
+        request: &Request,
+        scope: &Scope,
+        global: &GlobalFlags,
+    ) -> Self {
+        let operation = invocation.operation;
+        let confirmation = if !request.is_consequential(operation) {
+            Confirmation::NotRequired
+        } else if global.yes {
+            Confirmation::ApprovedByYes
+        } else if global.terminal().can_prompt() {
+            Confirmation::Prompt
+        } else {
+            Confirmation::WouldBeRefused
+        };
+        Self {
+            verify_wallet_environment: operation.targets_wallet() && !scope.envs.is_empty(),
+            confirmation,
+            // `body_id` comes from the body, so only a mutation with a body is journaled.
+            journal_id: request.body_id,
+            reconcile: operation.id.submits_payment(),
+            wait: wait_target(invocation),
+        }
+    }
+
+    /// Verify, confirm, and journal, then send the mutation exactly once. A transport
+    /// failure is reported as an uncertain submission unless reconciliation proves acceptance.
+    async fn execute(
+        self,
+        steps: &Steps<'_>,
+        request: &mut Request,
+        settings: &Settings,
+        submission: &SubmissionState,
+        out: &mut Output,
+    ) -> Result<()> {
+        let operation = steps.invocation.operation;
+        let scope = steps.scope;
+        if self.verify_wallet_environment {
+            verify_wallet_environment(steps.api, scope, steps.invocation.resource_id).await?;
+        }
+        confirm(
+            operation,
+            scope,
+            request,
+            self.confirmation,
+            steps.api.terminal,
+        )
+        .await?;
+        if let (Some(id), Some(body)) = (self.journal_id, &request.body) {
+            journal(settings, operation, scope, body, id, steps.api.terminal)?;
+        }
+        submission.record(operation.id, request.resource_id, scope);
+        let sent = steps
+            .api
+            .send(
+                operation.method,
+                &request.path,
+                &request.query,
+                request.body.as_ref(),
+            )
+            .await;
+        let (response, reconciled) = match sent {
+            Ok(response) => (response, false),
+            Err(error) if self.reconcile && error.is_transport() => {
+                match reconcile_payment(steps.api, request, scope).await {
+                    Some(response) => (response, true),
+                    None => return Err(uncertain(error, request, scope)),
+                }
+            }
+            Err(error) => return Err(uncertain(error, request, scope)),
+        };
+        check_invoice_payment(steps.invocation, &response)?;
+        match self.wait {
+            Some(until) => wait_for_payment(steps, request, response, until, out).await,
+            None => {
+                let settled = if reconciled {
+                    Outcome::Accepted
+                } else {
+                    Outcome::Succeeded
+                };
+                write_pages(steps, request, response, settled, false, out).await
+            }
+        }
+    }
+}
+
+/// What every step of one command's run shares.
+#[derive(Clone, Copy)]
+struct Steps<'a> {
+    api: &'a Api,
+    invocation: &'a ApiInvocation,
+    scope: &'a Scope,
+    deadline: Instant,
+}
+
+/// A transport failure after a mutation may have been sent leaves its outcome unknown.
+fn uncertain(mut error: Error, request: &Request, scope: &Scope) -> Error {
+    if error.is_transport() {
+        error.detail = Some(ErrorDetail::uncertain_submission(
+            request.resource_id,
+            scope.org,
+            scope.envs.clone(),
+        ));
+    }
+    error
 }
 
 /// `--qr` and `--copy` imply `--wait ready` when no explicit wait was given.
@@ -539,12 +764,8 @@ fn wait_target(invocation: &ApiInvocation) -> Option<WaitTarget> {
         .or_else(|| invocation.presents_invoice().then_some(WaitTarget::Ready))
 }
 
-/// Checks on the first response: a wallet read must sit in the selected environment, and
-/// an invoice can only be presented for a receive.
-fn check_response(invocation: &ApiInvocation, response: &Response, scope: &Scope) -> Result<()> {
-    if invocation.operation.id == OperationId::GetWallet && !scope.envs.is_empty() {
-        require_wallet_in_environment(&response.body, scope)?;
-    }
+/// An invoice can only be presented for a receive.
+fn check_invoice_payment(invocation: &ApiInvocation, response: &Response) -> Result<()> {
     if invocation.presents_invoice()
         && PaymentView::from_body(&response.body).direction == Some(PaymentDirection::Send)
     {
@@ -609,14 +830,18 @@ struct ConfirmationSummary<'a> {
     request: Option<&'a Value>,
 }
 
-/// Show the resolved scope and request on stderr, then require `--yes` or a terminal answer.
+/// Carry out the planned confirmation. A consequential action shows the resolved scope and
+/// request on stderr, even in quiet mode, then proceeds, asks, or is refused.
 async fn confirm(
     operation: &Operation,
     scope: &Scope,
     request: &Request,
-    global: &GlobalFlags,
+    confirmation: Confirmation,
+    terminal: Terminal,
 ) -> Result<()> {
-    let terminal = global.terminal();
+    if confirmation == Confirmation::NotRequired {
+        return Ok(());
+    }
     let mut summary = serde_json::to_value(ConfirmationSummary {
         action: operation.command.join(" "),
         organization: scope.org,
@@ -631,18 +856,14 @@ async fn confirm(
             "Network/provider fee limits exclude additional processing fees. The wallet determines the network."
         );
     }
-    if global.yes {
-        return Ok(());
-    }
-    if !terminal.can_prompt() {
-        return Err(Error::usage(
+    match confirmation {
+        Confirmation::NotRequired | Confirmation::ApprovedByYes => Ok(()),
+        Confirmation::WouldBeRefused => Err(Error::usage(
             "This operation requires --yes when input is disabled or noninteractive",
-        ));
+        )),
+        Confirmation::Prompt if terminal.confirm("Proceed?").await? => Ok(()),
+        Confirmation::Prompt => Err(Error::usage("Operation cancelled before submission")),
     }
-    if !terminal.confirm("Proceed?").await? {
-        return Err(Error::usage("Operation cancelled before submission"));
-    }
-    Ok(())
 }
 
 /// What the recovery journal remembers about a submission: never the body itself.
@@ -796,77 +1017,6 @@ impl SubmissionState {
     }
 }
 
-struct Submission {
-    response: Response,
-    /// The mutation's transport failed, but reading the original ID proved acceptance.
-    reconciled: bool,
-}
-
-/// Send the request once. A payment whose transport failed is looked up by its ID within a
-/// short bound; an explicit wait tolerates a projection that is not visible yet.
-async fn submit(
-    api: &Api,
-    invocation: &ApiInvocation,
-    request: &Request,
-    scope: &Scope,
-    submission: &SubmissionState,
-) -> Result<Submission> {
-    let operation = invocation.operation;
-    if operation.method != Method::Get {
-        submission.record(operation.id, request.resource_id, scope);
-    }
-    let result = api
-        .send(
-            operation.method,
-            &request.path,
-            &request.query,
-            request.body.as_ref(),
-        )
-        .await;
-    let submission = match result {
-        Ok(response) => Ok(Submission {
-            response,
-            reconciled: false,
-        }),
-        Err(error)
-            if operation.id == OperationId::GetPayment
-                && invocation.wait.is_some()
-                && error.http_status() == Some(404) =>
-        {
-            // A submitted payment can be missing from the read projection initially.
-            // Only an explicit wait treats that 404 as pending; ordinary reads fail.
-            Ok(Submission {
-                response: Response {
-                    status: 404,
-                    body: Value::Null,
-                    retry_after: None,
-                },
-                reconciled: false,
-            })
-        }
-        Err(error) if error.is_transport() && operation.id.submits_payment() => {
-            match reconcile_payment(api, request, scope).await {
-                Some(response) => Ok(Submission {
-                    response,
-                    reconciled: true,
-                }),
-                None => Err(error),
-            }
-        }
-        Err(error) => Err(error),
-    };
-    submission.map_err(|mut error| {
-        if operation.method != Method::Get && error.is_transport() {
-            error.detail = Some(ErrorDetail::uncertain_submission(
-                request.resource_id,
-                scope.org,
-                scope.envs.clone(),
-            ));
-        }
-        error
-    })
-}
-
 /// A read can establish acceptance without sending the mutation again. A missing
 /// projection remains uncertain and keeps the original recovery record.
 async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Option<Response> {
@@ -888,20 +1038,19 @@ async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Optio
 }
 
 /// Poll the payment until the wait target, pacing by the server's retry hints.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one wait has exactly these inputs"
-)]
 async fn wait_for_payment(
-    api: &Api,
-    invocation: &ApiInvocation,
+    steps: &Steps<'_>,
     request: &Request,
-    scope: &Scope,
     mut response: Response,
     until: WaitTarget,
-    deadline: Instant,
     out: &mut Output,
 ) -> Result<()> {
+    let Steps {
+        api,
+        invocation,
+        scope,
+        deadline,
+    } = *steps;
     let id = request
         .resource_id
         .ok_or_else(|| Error::usage("Waiting requires a payment ID"))?;
@@ -1061,31 +1210,29 @@ struct Pages {
     pages: Vec<Envelope>,
 }
 
-/// Write the response, then follow pages under `--all`: collected for JSON, streamed for NDJSON.
+/// Write the response, then follow pages when `follow`: collected for JSON, streamed for
+/// NDJSON. A 202 is reported as accepted; any other status as `settled`.
 async fn write_pages(
-    api: &Api,
-    invocation: &ApiInvocation,
+    steps: &Steps<'_>,
     request: &mut Request,
     mut response: Response,
-    reconciled: bool,
-    deadline: Instant,
+    settled: Outcome,
+    follow: bool,
     out: &mut Output,
 ) -> Result<()> {
-    let operation = invocation.operation;
+    let Steps { api, deadline, .. } = *steps;
     let mut pages = Vec::new();
     let mut cursors = BTreeSet::new();
     loop {
-        let next = if invocation.all {
+        let next = if follow {
             next_page(&response.body, request)?
         } else {
             None
         };
-        let outcome = if response.status == 202 || reconciled {
+        let outcome = if response.status == 202 {
             Outcome::Accepted
-        } else if operation.method == Method::Get {
-            Outcome::Retrieved
         } else {
-            Outcome::Succeeded
+            settled
         };
         let envelope = Envelope::new(
             Some(response.status),
@@ -1093,7 +1240,7 @@ async fn write_pages(
             request.resource_id,
             outcome,
         );
-        if invocation.all && out.collects_pages() {
+        if follow && out.collects_pages() {
             pages.push(envelope);
         } else {
             out.write(envelope, &api.secrets())?;
@@ -1112,7 +1259,7 @@ async fn write_pages(
         .await
         .map_err(|_| Error::timeout("Pagination deadline exceeded; use a longer --timeout"))??;
     }
-    if invocation.all && out.collects_pages() {
+    if follow && out.collects_pages() {
         out.write(
             Envelope::new(
                 Some(200),
@@ -1544,6 +1691,35 @@ mod tests {
                 .unwrap()
                 .contains(WALLET)
         );
+    }
+
+    #[test]
+    fn reads_plan_how_they_finish_and_only_an_explicit_wait_tolerates_a_missing_payment() {
+        let read = |args: &[&str]| Read::plan(&invocation(args), &scope());
+        assert_eq!(
+            read(&["payments", "get", WALLET, "--wait", "completed"]).then,
+            ReadThen::PaymentWait {
+                until: WaitTarget::Completed,
+                missing_is_pending: true,
+            }
+        );
+        assert_eq!(
+            read(&["payments", "get", WALLET, "--qr"]).then,
+            ReadThen::PaymentWait {
+                until: WaitTarget::Ready,
+                missing_is_pending: false,
+            }
+        );
+        assert_eq!(
+            read(&["checkout", "sessions", "get", WALLET]).then,
+            ReadThen::SessionProjection
+        );
+        assert_eq!(
+            read(&["payments", "list", "--all"]).then,
+            ReadThen::Pages { follow: true }
+        );
+        assert!(read(&["wallets", "get", WALLET]).check_wallet_environment);
+        assert!(!read(&["wallets", "list"]).check_wallet_environment);
     }
 
     #[test]
