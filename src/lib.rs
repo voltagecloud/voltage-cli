@@ -8,6 +8,7 @@ mod auth;
 mod backoff;
 mod cli;
 pub mod config;
+mod context;
 mod error;
 mod input;
 mod output;

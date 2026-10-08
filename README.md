@@ -92,6 +92,13 @@ voltage profiles get staging
 voltage profiles delete staging
 ```
 
+`voltage context` shows the effective profile, account, organization, environments, wallet, API URL, and configuration directory, and where each came from (`flag`, `profile`, `environment`, `default`, or `unset`). It reports why commands would reject the credential selection as `credential_problem` (`empty_api_key`, `no_credential`, `multiple_credentials`, `unknown_credential`, or `bound_elsewhere` for an API key used outside its organization or environment), using the same selection commands use. It also lists `VOLTAGE_*` variables that are set but ignored because a flag or the selected profile takes precedence. It reads no saved secret, makes no network request, and creates no files:
+
+```sh
+voltage context --profile staging
+voltage context --json | jq -r '.data.organization_id.value'
+```
+
 Configuration lives in `$XDG_CONFIG_HOME/voltage` or `~/.config/voltage`; override the directory with `VOLTAGE_CONFIG_DIR` or `--config-dir`. The directory and everything in it are owner-only.
 
 Only endpoints that filter by environment receive `--env`. Organization-wide commands say so in their help, and wallet mutations verify a supplied environment against the wallet before changing anything.

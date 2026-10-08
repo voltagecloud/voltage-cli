@@ -78,6 +78,70 @@ pub struct Account {
     pub auth_url: String,
 }
 
+impl Account {
+    /// An API key bound to a different organization or environment than the scope selects.
+    pub(crate) fn bound_elsewhere(&self, scope: &Scope) -> bool {
+        let organization_mismatch = scope
+            .org
+            .zip(self.organization_id)
+            .is_some_and(|(selected, bound)| selected != bound);
+        let environment_mismatch = self
+            .environment_id
+            .is_some_and(|bound| scope.envs.iter().any(|env| *env != bound));
+        self.kind == AccountKind::ApiKey && (organization_mismatch || environment_mismatch)
+    }
+}
+
+/// Why commands would reject the credential selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CredentialProblem {
+    /// `VOLTAGE_API_KEY` is set but blank, and still shadows saved credentials.
+    EmptyApiKey,
+    /// Nothing is saved and no key is in the environment.
+    NoCredential,
+    /// More than one credential is saved and none is selected.
+    MultipleCredentials,
+    /// The selected credential name is not saved.
+    UnknownCredential,
+    /// The saved API key is bound to a different organization or environment.
+    BoundElsewhere,
+}
+
+impl CredentialProblem {
+    pub(crate) fn error(self, scope: &Scope) -> Error {
+        match self {
+            Self::EmptyApiKey => Error::auth("VOLTAGE_API_KEY is empty"),
+            Self::NoCredential => Error::auth("No credential is available")
+                .with_hint("Run voltage login, select --account, or provide VOLTAGE_API_KEY."),
+            Self::MultipleCredentials => Error::usage("Multiple credentials are saved")
+                .with_hint("Select one with --account NAME or --profile NAME."),
+            Self::UnknownCredential => Error::auth(format!(
+                "Unknown credential {}",
+                scope.account.as_deref().unwrap_or_default()
+            )),
+            Self::BoundElsewhere => Error::usage(
+                "API key is bound to a different organization or environment; select a matching credential",
+            ),
+        }
+    }
+}
+
+/// `VOLTAGE_*` variables that are set but supply nothing, because a flag or the selected
+/// profile takes precedence. Kept beside the precedence rules that decide it.
+pub(crate) fn ignored_variables(sources: &ScopeSources, config_dir: Source) -> Vec<&'static str> {
+    [
+        ("VOLTAGE_ORGANIZATION_ID", sources.org),
+        ("VOLTAGE_ENVIRONMENT_ID", sources.envs),
+        ("VOLTAGE_WALLET_ID", sources.wallet),
+        ("VOLTAGE_CONFIG_DIR", config_dir),
+    ]
+    .into_iter()
+    .filter(|(name, source)| std::env::var_os(name).is_some() && *source != Source::Environment)
+    .map(|(name, _)| name)
+    .collect()
+}
+
 /// A browser login's tokens and identity.
 pub struct Login {
     pub access_token: Secret,
@@ -188,6 +252,31 @@ impl Scope {
     }
 }
 
+/// Where an effective setting came from.
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Source {
+    /// A command-line flag.
+    Flag,
+    /// The selected profile.
+    Profile,
+    /// A `VOLTAGE_*` environment variable.
+    Environment,
+    /// The built-in default, or the only saved credential.
+    Default,
+    /// Nothing supplied it.
+    Unset,
+}
+
+/// Where each part of a resolved `Scope` came from.
+pub(crate) struct ScopeSources {
+    pub(crate) org: Source,
+    pub(crate) envs: Source,
+    pub(crate) wallet: Source,
+    pub(crate) webhook: Source,
+    pub(crate) account: Source,
+}
+
 /// Scope-affecting inputs resolved from flags, a profile, or ambient variables.
 pub struct ScopeSelection {
     pub profile: Option<String>,
@@ -200,22 +289,32 @@ pub struct ScopeSelection {
 
 /// The configuration directory: `--config-dir`, then `VOLTAGE_CONFIG_DIR`, then XDG.
 pub fn directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    let dir = explicit
-        .or_else(|| std::env::var_os("VOLTAGE_CONFIG_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-                })
-                .join("voltage")
-        });
+    sourced_directory(explicit).map(|(dir, _)| dir)
+}
+
+/// `directory` and which of its sources supplied it.
+pub(crate) fn sourced_directory(explicit: Option<PathBuf>) -> Result<(PathBuf, Source)> {
+    let (dir, source) = match explicit {
+        Some(dir) => (dir, Source::Flag),
+        None => match std::env::var_os("VOLTAGE_CONFIG_DIR") {
+            Some(dir) => (PathBuf::from(dir), Source::Environment),
+            None => (
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+                    })
+                    .join("voltage"),
+                Source::Default,
+            ),
+        },
+    };
     if !dir.is_absolute() {
         return Err(Error::usage(
             "The configuration directory must be an absolute path",
         ));
     }
-    Ok(dir)
+    Ok((dir, source))
 }
 
 pub struct Settings {
@@ -228,6 +327,11 @@ impl Settings {
     pub fn open(dir: PathBuf) -> Result<Self> {
         let config = read_config(&dir)?;
         Ok(Self { dir, config })
+    }
+
+    /// Where `config.toml` lives, whether or not it exists yet.
+    pub(crate) fn config_file(&self) -> PathBuf {
+        self.dir.join(CONFIG_FILE)
     }
 
     /// Re-read the configuration after taking the lock, so concurrent edits are not lost.
@@ -246,6 +350,11 @@ impl Settings {
     /// A profile selects everything together and ignores ambient variables; otherwise
     /// explicit flags override `VOLTAGE_*` variables.
     pub fn scope(&self, selection: ScopeSelection) -> Result<Scope> {
+        self.sourced_scope(selection).map(|(scope, _)| scope)
+    }
+
+    /// `scope` and where each of its values came from.
+    pub(crate) fn sourced_scope(&self, selection: ScopeSelection) -> Result<(Scope, ScopeSources)> {
         let profile = selection
             .profile
             .as_deref()
@@ -256,63 +365,89 @@ impl Settings {
                     .ok_or_else(|| Error::usage(format!("Unknown profile {name}")))
             })
             .transpose()?;
-        let ambient = |name: &str| -> Result<Option<Uuid>> {
+        let ambient = |name: &str| -> Result<(Option<Uuid>, Source)> {
             if profile.is_some() {
-                return Ok(None);
+                return Ok((None, Source::Unset));
             }
-            std::env::var(name)
+            let value = std::env::var(name)
                 .ok()
                 .map(|value| {
                     Uuid::parse_str(&value)
                         .map_err(|_| Error::usage(format!("Expected UUID, got {value}")))
                 })
-                .transpose()
+                .transpose()?;
+            Ok(sourced(value, Source::Environment))
         };
-        let org = match selection.org {
-            Some(org) => Some(org),
+        let (org, org_source) = match selection.org {
+            Some(org) => (Some(org), Source::Flag),
             None => match profile {
-                Some(profile) => Some(profile.organization_id),
+                Some(profile) => (Some(profile.organization_id), Source::Profile),
                 None => ambient("VOLTAGE_ORGANIZATION_ID")?,
             },
         };
-        let envs = if !selection.envs.is_empty() {
-            selection.envs
+        let (envs, envs_source) = if !selection.envs.is_empty() {
+            (selection.envs, Source::Flag)
         } else {
             match profile {
-                Some(profile) => vec![profile.environment_id],
-                None => ambient("VOLTAGE_ENVIRONMENT_ID")?.into_iter().collect(),
+                Some(profile) => (vec![profile.environment_id], Source::Profile),
+                None => {
+                    let (env, source) = ambient("VOLTAGE_ENVIRONMENT_ID")?;
+                    (env.into_iter().collect(), source)
+                }
             }
         };
-        let wallet = match selection.wallet {
-            Some(wallet) => Some(wallet),
+        let (wallet, wallet_source) = match selection.wallet {
+            Some(wallet) => (Some(wallet), Source::Flag),
             None => ambient("VOLTAGE_WALLET_ID")?,
         };
-        Ok(Scope {
-            org,
-            envs,
-            wallet,
-            webhook: selection.webhook,
-            account: selection
-                .account
-                .or_else(|| profile.map(|profile| profile.account.clone())),
-        })
+        let (webhook, webhook_source) = sourced(selection.webhook, Source::Flag);
+        let (account, account_source) = match selection.account {
+            Some(account) => (Some(account), Source::Flag),
+            None => sourced(
+                profile.map(|profile| profile.account.clone()),
+                Source::Profile,
+            ),
+        };
+        Ok((
+            Scope {
+                org,
+                envs,
+                wallet,
+                webhook,
+                account,
+            },
+            ScopeSources {
+                org: org_source,
+                envs: envs_source,
+                wallet: wallet_source,
+                webhook: webhook_source,
+                account: account_source,
+            },
+        ))
     }
 
     /// The saved credential a command uses: the selected one, or the only one.
     pub fn account_name(&self, scope: &Scope) -> Result<String> {
+        self.select_account(scope)
+            .map_err(|problem| problem.error(scope))
+    }
+
+    /// The saved credential a scope selects: the named one, or the only one saved.
+    pub(crate) fn select_account(
+        &self,
+        scope: &Scope,
+    ) -> std::result::Result<String, CredentialProblem> {
         if let Some(name) = &scope.account {
             if !self.config.accounts.contains_key(name) {
-                return Err(Error::auth(format!("Unknown credential {name}")));
+                return Err(CredentialProblem::UnknownCredential);
             }
             return Ok(name.clone());
         }
         let mut names = self.config.accounts.keys();
         match (names.next(), names.next()) {
-            (None, _) => Err(Error::auth("No credential is available")
-                .with_hint("Run voltage login, select --account, or provide VOLTAGE_API_KEY.")),
+            (None, _) => Err(CredentialProblem::NoCredential),
             (Some(name), None) => Ok(name.clone()),
-            (Some(_), Some(_)) => Err(Error::usage("Multiple credentials are saved")
-                .with_hint("Select one with --account NAME or --profile NAME.")),
+            (Some(_), Some(_)) => Err(CredentialProblem::MultipleCredentials),
         }
     }
 
@@ -425,6 +560,16 @@ impl Settings {
             }
         }
     }
+}
+
+/// `source` when a value is present, otherwise `Unset`.
+fn sourced<T>(value: Option<T>, source: Source) -> (Option<T>, Source) {
+    let source = if value.is_some() {
+        source
+    } else {
+        Source::Unset
+    };
+    (value, source)
 }
 
 fn read_config(dir: &Path) -> Result<Config> {
@@ -658,7 +803,9 @@ mod tests {
     }
 
     #[test]
-    fn profiles_ignore_ambient_scope() {
+    fn profiles_supply_scope_and_flags_still_win() {
+        // Any value distinct from the profile's IDs, standing in for `--webhook`.
+        let flag_webhook = Uuid::from_u128(1);
         let mut settings = settings(PathBuf::from("/tmp/test"));
         settings.config.profiles.insert(
             "stage".into(),
@@ -668,19 +815,25 @@ mod tests {
                 account: "user".into(),
             },
         );
-        let scope = settings
-            .scope(ScopeSelection {
+        let (scope, sources) = settings
+            .sourced_scope(ScopeSelection {
                 profile: Some("stage".into()),
                 account: None,
                 org: None,
                 envs: Vec::new(),
                 wallet: None,
-                webhook: None,
+                webhook: Some(flag_webhook),
             })
             .unwrap();
         assert_eq!(scope.account.as_deref(), Some("user"));
         assert_eq!(scope.org, Some(Uuid::nil()));
         assert_eq!(scope.envs, [Uuid::nil()]);
+        assert_eq!(scope.webhook, Some(flag_webhook));
+        assert_eq!(sources.account, Source::Profile);
+        assert_eq!(sources.org, Source::Profile);
+        assert_eq!(sources.envs, Source::Profile);
+        assert_eq!(sources.wallet, Source::Unset);
+        assert_eq!(sources.webhook, Source::Flag);
     }
 
     #[test]
