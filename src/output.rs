@@ -82,6 +82,9 @@ pub enum Outcome {
     Ready,
     /// The payment settled.
     Completed,
+    /// `--dry-run` described a request without sending it.
+    #[serde(rename = "dry_run")]
+    DryRun,
 }
 
 impl Outcome {
@@ -93,6 +96,7 @@ impl Outcome {
             Self::Event => "event",
             Self::Ready => "ready",
             Self::Completed => "completed",
+            Self::DryRun => "dry_run",
         }
     }
 }
@@ -375,6 +379,7 @@ mod tests {
             Outcome::Event,
             Outcome::Ready,
             Outcome::Completed,
+            Outcome::DryRun,
         ] {
             assert_eq!(serde_json::to_value(outcome).unwrap(), outcome.as_str());
         }

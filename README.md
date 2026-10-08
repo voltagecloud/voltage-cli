@@ -127,8 +127,8 @@ voltage completions powershell > _voltage.ps1
 Every operation that takes a body accepts its complete API payload from a file or stdin. The JSON is sent exactly as given, including fields the CLI does not know about, and is limited to 16 MiB:
 
 ```sh
-voltage payments create --profile prod --data @payment.json --yes
-cat payment.json | voltage payments create --profile prod --data - --yes
+voltage payments create --profile prod --data @payment.json --execute
+cat payment.json | voltage payments create --profile prod --data - --execute
 ```
 
 Common operations also offer friendly flags (`wallets create`, `wallets update`, `payments receive`, `payments send`, `quotes create`, `webhooks create`, `webhooks update`); `--help` lists them. Friendly flags and `--data` are mutually exclusive, and a payload whose IDs conflict with the selected scope is rejected.
@@ -140,19 +140,31 @@ voltage payments list --profile prod --statuses completed --statuses failed \
   --metadata order_id=123 --query sort_order=desc --all
 ```
 
+Commands that change something (any method but GET) only describe their request unless you pass `--execute`, then exit with code 6 so a script that forgot it fails loudly. Reads run as usual. To send every change in a script or chain of commands, set `VOLTAGE_EXECUTE=1` (or `true`) instead; `0`, `false`, or an empty value keeps the default, and any other value fails every API command, reads included. The flag wins over the variable, a change sent because of the variable says so on stderr, and `voltage context` reports it as `execute_changes` with its source. `--execute` is the only approval: nothing asks again before sending. A described change reports the same `resource_id` a real run would use, so chained commands see the same IDs in both modes.
+
+`-n, --dry-run` validates any API command and describes the request it would send, then stops: it reports the method, URL, query, `Origin` header, and body, plus a `run` object with what a real run would do next. That is the same plan a real run follows: a `read` says whether it checks the wallet's environment and whether it then pages, waits for a payment, or waits for a checkout session; a `mutation` says whether it verifies the wallet's environment, the ID it would journal for recovery, whether a failed payment submission is reconciled, and what it waits for; an `event_stream` follows checkout events. It authenticates nothing, makes no network request (including the wallet environment check a real mutation performs), prompts for nothing, writes no journal entry, and does not create `--output-file`. Body and metadata-filter values are replaced with `[OMITTED]` unless the field holds only identifiers, enums, or amounts; `--show-secrets` shows them. `--data -` still reads stdin, and a friendly create generates a fresh ID each run unless you pass `--id`. Passing local validation does not mean the API will accept the request.
+
+```sh
+voltage payments send --profile prod --wallet WALLET_ID --currency btc \
+  --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --dry-run
+voltage wallets delete WALLET_ID --profile prod -n --json
+```
+
+The result is a normal envelope with `outcome: dry_run` and no `http_status`.
+
 `--all` follows pagination by cursor, which the API recommends and the CLI requests by default; endpoints that only page by offset are followed by offset and count. The API has deprecated explicit offset paging (`--offset`, `--pagination offset`) where cursors exist, and the CLI warns when you use it. `--timeout SECONDS` (default 60) bounds the whole request, including paging and waits.
 
 ## Payments
 
 ```sh
 voltage payments receive --profile prod --wallet WALLET_ID \
-  --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready
+  --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready --execute
 voltage payments send --profile prod --wallet WALLET_ID \
-  --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --yes
+  --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --execute
 voltage payments send --profile prod --wallet WALLET_ID \
-  --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --yes
+  --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --execute
 voltage quotes create --profile prod --credit-line CREDIT_LINE_ID \
-  --network mutinynet --amount 10 --unit usd --to btc
+  --network mutinynet --amount 10 --unit usd --to btc --execute
 ```
 
 Amounts are decimals in the unit you name (`msats`, `sats`, `btc`, `cents`, `usd`) and are converted to the API's integer base units exactly; a value with more precision than the unit allows is rejected. `--currency` is the wallet currency for sends and the receive currency for open-amount receives. Fee limits cover network and provider fees only.
@@ -177,9 +189,9 @@ voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120
 
 For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--copy` puts it on the clipboard as soon as it is ready. Either flag implies `--wait ready`; with `--wait completed` the invoice is shown first and polling continues to settlement.
 
-Sends, treasury movements, deletes, webhook key rotation, and disabling a credit line ask for confirmation after printing the resolved scope and request to stderr. Non-interactive use needs `--yes`. `--no-input` forbids prompts even on a terminal: use `--yes --no-input` to approve a consequential action, and supply credentials via environment, private file, or `--stdin` (for `auth import-key`). `--yes` never supplies a secret.
+There is no confirmation prompt: run a change without `--execute` to see exactly what it would send, then add `--execute` to send it. Sending a payment notes on stderr that its fee limit excludes processing fees. `--no-input` forbids the hidden API-key prompt even on a terminal; supply credentials via environment, private file, or `--stdin` (for `auth import-key`).
 
-Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if the payment is visible, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130, including at a confirmation prompt: before a write is sent it reports that no resource change was submitted, or, if a login was being refreshed, created, or logged out, how to recover it; once a write may have been sent it reports the outcome as unknown, with the original ID and reconciliation instructions for a payment. It never cancels a submitted request.
+Payments and treasury movements carry an ID, generated for you unless you pass `--id`. Before sending, the CLI records the ID, operation, scope, and request hash (never the body) in a private journal under `requests/`, and it refuses to reuse an ID with a different request. If the connection drops after a submission, the CLI makes one short read of the ID: if the payment is visible, it reports acceptance; otherwise it exits with code 4 and the ID, without resubmitting. Check the ID before deciding to retry. Ctrl-C exits with code 130, including at the hidden API-key prompt: before a write is sent it reports that no resource change was submitted, or, if a login was being refreshed, created, or logged out, how to recover it; once a write may have been sent it reports the outcome as unknown, with the original ID and reconciliation instructions for a payment. It never cancels a submitted request.
 
 ## Output
 
@@ -189,7 +201,7 @@ On a terminal, results are readable tables; when piped, they are JSON. `--json` 
 {"http_status":202,"data":null,"resource_id":"PAYMENT_ID","outcome":"accepted"}
 ```
 
-API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr. Interactive stderr shows immediate, cancellable status for network requests and waits; redirected stderr gets no spinner/control codes. `-q, --quiet` suppresses optional status and notices, never requested results, errors, confirmation details, warnings, or recovery IDs. Human errors start with `error:` and may include a safe `hint:`; `--json` makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
+API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives. Diagnostics, prompts, and progress go to stderr. Interactive stderr shows immediate, cancellable status for network requests and waits; redirected stderr gets no spinner/control codes. `-q, --quiet` suppresses optional status and notices, never requested results, errors, warnings, or recovery IDs. Human errors start with `error:` and may include a safe `hint:`; `--json` makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
 
 Known secret fields and the credentials the CLI presented are redacted from normal output and from error details. Operations that return a one-time secret (webhook creation and key rotation, checkout sessions, stream tokens) refuse to run unless you pass `--output-file PATH`, which writes the complete response to a new owner-only file, or `--show-secrets`. Treat your own metadata as potentially sensitive; redaction cannot recognise it.
 
@@ -214,6 +226,7 @@ voltage checkout events watch --token-file - < ./stream.token
 | 3 | Authentication or authorization failure |
 | 4 | Transport failure or a submission with an unknown outcome |
 | 5 | A wait or pagination deadline passed |
+| 6 | A change was described but not sent: pass `--execute` or set `VOLTAGE_EXECUTE=1` |
 | 130 | Interrupted |
 
 ## Contributing

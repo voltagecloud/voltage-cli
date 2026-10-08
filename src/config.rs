@@ -13,6 +13,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -563,6 +564,27 @@ impl Settings {
 }
 
 /// `source` when a value is present, otherwise `Unset`.
+/// Sends every change in a script or chain of commands when set to `1` or `true`, as an
+/// exported `MAKEFLAGS=-n` reaches every sub-make.
+pub const EXECUTE_VARIABLE: &str = "VOLTAGE_EXECUTE";
+
+/// `VOLTAGE_EXECUTE`, validated for every API command so a misspelling fails before any
+/// change instead of being read as either mode. `None` when it is not set.
+pub fn execute_variable() -> Result<Option<bool>> {
+    parse_execute(std::env::var_os(EXECUTE_VARIABLE).as_deref())
+}
+
+fn parse_execute(value: Option<&OsStr>) -> Result<Option<bool>> {
+    match value.map(OsStr::to_str) {
+        None => Ok(None),
+        Some(Some("" | "0" | "false")) => Ok(Some(false)),
+        Some(Some("1" | "true")) => Ok(Some(true)),
+        Some(_) => Err(Error::usage(format!(
+            "{EXECUTE_VARIABLE} must be 1, true, 0, or false"
+        ))),
+    }
+}
+
 fn sourced<T>(value: Option<T>, source: Source) -> (Option<T>, Source) {
     let source = if value.is_some() {
         source
@@ -800,6 +822,23 @@ mod tests {
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read_config(dir.path()).is_err());
+    }
+
+    #[test]
+    fn execute_variable_accepts_only_explicit_values() {
+        assert_eq!(parse_execute(None).unwrap(), None);
+        for value in ["1", "true"] {
+            assert_eq!(parse_execute(Some(OsStr::new(value))).unwrap(), Some(true));
+        }
+        for value in ["", "0", "false"] {
+            assert_eq!(parse_execute(Some(OsStr::new(value))).unwrap(), Some(false));
+        }
+        for value in ["yes", "TRUE", "2"] {
+            assert_eq!(
+                parse_execute(Some(OsStr::new(value))).unwrap_err().message,
+                "VOLTAGE_EXECUTE must be 1, true, 0, or false"
+            );
+        }
     }
 
     #[test]

@@ -83,6 +83,9 @@ pub struct Context {
     api_url: Setting<String>,
     config_dir: Setting<String>,
     config_file: ConfigFile,
+    /// Whether changes are sent without `--execute`, from `VOLTAGE_EXECUTE`, so an exported
+    /// variable cannot silently replace the describe-by-default behavior.
+    execute_changes: Setting<bool>,
     /// `VOLTAGE_*` variables that are set but supply nothing, because a flag or the selected
     /// profile takes precedence.
     ignored_variables: Vec<&'static str>,
@@ -166,6 +169,16 @@ pub fn inspect(settings: &Settings, global: &GlobalFlags) -> Result<Context> {
         config_file: ConfigFile {
             exists: config_file.exists(),
             path: config_file.display().to_string(),
+        },
+        execute_changes: match config::execute_variable()? {
+            Some(value) => Setting {
+                value,
+                source: Source::Environment,
+            },
+            None => Setting {
+                value: false,
+                source: Source::Default,
+            },
         },
         ignored_variables,
     })

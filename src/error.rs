@@ -20,6 +20,9 @@ pub enum ErrorKind {
     Transport = 4,
     /// A wait or pagination deadline passed.
     Timeout = 5,
+    /// A change was described but not sent, because neither `--execute` nor
+    /// `VOLTAGE_EXECUTE` asked for it to be sent.
+    NotExecuted = 6,
     /// Interrupted by Ctrl-C.
     Interrupted = 130,
 }
@@ -215,6 +218,7 @@ mod tests {
         assert_eq!(ErrorKind::Auth.exit_code(), 3);
         assert_eq!(ErrorKind::Transport.exit_code(), 4);
         assert_eq!(ErrorKind::Timeout.exit_code(), 5);
+        assert_eq!(ErrorKind::NotExecuted.exit_code(), 6);
         assert_eq!(ErrorKind::Interrupted.exit_code(), 130);
         assert_eq!(ErrorKind::for_http_status(403), ErrorKind::Auth);
         assert_eq!(ErrorKind::for_http_status(500), ErrorKind::Api);

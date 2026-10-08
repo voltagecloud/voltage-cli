@@ -77,7 +77,7 @@ python3 scripts/check-coverage.py
 
 Integration tests start mock HTTP servers on port 0 and never contact a real service. They
 cover every operation in the contract, query encoding, complete JSON bodies, credential
-selection, confirmation, secret output, pagination, payment waits, uncertain submissions,
+selection, describe-by-default changes, secret output, pagination, payment waits, uncertain submissions,
 checkout tokens and streams, and the credential lifecycle. Live payment tests must use an
 explicitly configured test-network wallet; routine tests never send a live payment.
 

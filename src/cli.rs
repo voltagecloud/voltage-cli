@@ -12,7 +12,7 @@ use crate::{
     output::OutputFormat,
     payment::{AmountUnit, Currency, Network, PaymentDirection, ReceiveKind, WaitTarget},
     price::ConversionRequest,
-    registry::{OPERATIONS, Operation, OperationId, Parameter, operation},
+    registry::{Method, OPERATIONS, Operation, OperationId, Parameter, operation},
     terminal::Terminal,
 };
 use clap::{
@@ -63,10 +63,7 @@ pub struct GlobalFlags {
     /// Explicitly allow secrets in result output
     #[arg(long, global = true, help_heading = "Output")]
     pub show_secrets: bool,
-    /// Approve consequential actions without prompting (never supplies a credential)
-    #[arg(short = 'y', long, global = true, help_heading = "Safety")]
-    pub yes: bool,
-    /// Never prompt for approval or a secret; supply --yes or --stdin as needed
+    /// Never prompt for a secret; supply it with --stdin or the environment instead
     #[arg(long, global = true, help_heading = "Safety")]
     pub no_input: bool,
     /// Hide optional progress and notices, not errors, results, or recovery IDs
@@ -366,6 +363,28 @@ struct InvoiceFlags {
 }
 
 #[derive(Debug, Args)]
+struct DryRunFlags {
+    /// Validate and show the request without authenticating, confirming, or sending it
+    #[arg(short = 'n', long, help_heading = "Safety")]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct ExecuteFlags {
+    /// Send this change. Without it or VOLTAGE_EXECUTE=1, the change is only described
+    #[arg(long, help_heading = "Safety", conflicts_with = "dry_run")]
+    execute: bool,
+}
+
+/// What the command line asked for: `--dry-run`, `--execute`, or neither.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Requested {
+    DryRun,
+    Execute,
+    Unspecified,
+}
+
+#[derive(Debug, Args)]
 struct DataFlags {
     /// Complete JSON object from @file or - for stdin
     #[arg(long, value_name = "@FILE|-", value_parser = parse_data_source, help_heading = "Request body")]
@@ -518,6 +537,19 @@ pub enum FriendlyFlags {
     UpdateWebhook(UpdateWebhookFlags),
 }
 
+impl FriendlyFlags {
+    /// A create builds a fresh UUID for its body because `--id` was not given.
+    pub fn generates_id(&self) -> bool {
+        match self {
+            Self::CreateWallet(flags) => flags.id.is_none(),
+            Self::Payment(flags) => flags.id.is_none(),
+            Self::Quote(flags) => flags.id.is_none(),
+            Self::CreateWebhook(flags) => flags.id.is_none(),
+            Self::UpdateWallet(_) | Self::UpdateWebhook(_) => false,
+        }
+    }
+}
+
 /// Where a body-bearing operation gets its payload.
 #[derive(Debug)]
 pub enum BodySource {
@@ -549,12 +581,28 @@ pub struct ApiInvocation {
     pub qr: bool,
     pub copy: bool,
     pub body: Option<BodySource>,
+    pub requested: Requested,
 }
 
 impl ApiInvocation {
     /// `--qr` or `--copy` was requested.
     pub fn presents_invoice(&self) -> bool {
         self.qr || self.copy
+    }
+
+    /// The command words as typed: `payments send` rather than `payments create`.
+    pub fn command_name(&self) -> String {
+        let alias = PAYMENT_ALIASES
+            .iter()
+            .find(|(_, direction)| Some(*direction) == self.alias);
+        match alias {
+            Some((name, _)) => [
+                payment_alias_parent(self.operation).join(" "),
+                (*name).into(),
+            ]
+            .join(" "),
+            None => self.operation.command.join(" "),
+        }
     }
 }
 
@@ -679,6 +727,8 @@ fn api_invocation(
         .collect();
     let target = parse_if::<TargetFlags>(operation.target.is_some(), m)?;
     let query = parse::<QueryFlags>(m)?;
+    let dry_run = parse::<DryRunFlags>(m)?;
+    let execute = parse_if::<ExecuteFlags>(operation.method != Method::Get, m)?;
     let pagination = parse_if::<PaginationFlags>(operation.has_parameter("limit"), m)?;
     let checkout = parse_if::<CheckoutFlags>(operation.auth.is_checkout(), m)?;
     let origin = parse_if::<OriginFlags>(takes_origin(operation), m)?;
@@ -705,6 +755,13 @@ fn api_invocation(
         qr: invoice.as_ref().is_some_and(|flags| flags.qr),
         copy: invoice.as_ref().is_some_and(|flags| flags.copy),
         body,
+        requested: if dry_run.dry_run {
+            Requested::DryRun
+        } else if execute.is_some_and(|flags| flags.execute) {
+            Requested::Execute
+        } else {
+            Requested::Unspecified
+        },
     })
 }
 
@@ -840,6 +897,10 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
         cmd = cmd.arg(filter_arg(parameter));
     }
     cmd = QueryFlags::augment_args(cmd);
+    cmd = DryRunFlags::augment_args(cmd);
+    if operation.method != Method::Get {
+        cmd = ExecuteFlags::augment_args(cmd);
+    }
     if operation.has_parameter("limit") {
         cmd = PaginationFlags::augment_args(cmd);
     }
@@ -919,7 +980,7 @@ fn friendly_requirements(id: OperationId, command_name: &str) -> Option<&'static
 fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str> {
     match (id, command_name) {
         (OperationId::CreatePayment, "send") => Some(
-            "  voltage payments send --profile prod --wallet WALLET_ID --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --yes\n  voltage payments send --profile prod --wallet WALLET_ID --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --yes",
+            "  voltage payments send --profile prod --wallet WALLET_ID --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --execute\n  voltage payments send --profile prod --wallet WALLET_ID --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --execute",
         ),
         (OperationId::CreatePayment, "receive") => Some(
             "  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready",
@@ -1130,6 +1191,22 @@ mod tests {
         assert_eq!(flags.kind, Some(ReceiveKind::Bolt11));
         assert_eq!(flags.currency, Some(Currency::Btc));
         assert_eq!(api(&["payments", "create", "--data", "-"]).alias, None);
+        assert_eq!(
+            api(&["payments", "send", "-n"]).requested,
+            Requested::DryRun
+        );
+        assert_eq!(
+            api(&["payments", "send", "--execute"]).requested,
+            Requested::Execute
+        );
+        assert!(
+            Invocation::try_parse_from(["voltage", "payments", "send", "-n", "--execute"]).is_err()
+        );
+        assert!(Invocation::try_parse_from(["voltage", "payments", "list", "--execute"]).is_err());
+        assert_eq!(api(&["payments", "send"]).command_name(), "payments send");
+        assert_eq!(api(&["payments", "list"]).command_name(), "payments list");
+        assert_eq!(api(&["payments", "list"]).requested, Requested::Unspecified);
+        assert!(Invocation::try_parse_from(["voltage", "login", "--dry-run"]).is_err());
     }
 
     #[test]

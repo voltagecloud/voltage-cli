@@ -2,7 +2,7 @@
 //!
 //! Friendly flags build typed payloads. Raw `--data` bodies are preserved byte for byte,
 //! including unknown extension fields and exact numbers, and only checked for the facts
-//! the CLI relies on: identity, scope agreement, and whether confirmation is required.
+//! the CLI relies on: identity, scope agreement, and whether the change is consequential.
 
 use crate::{
     Error, Result,
@@ -113,8 +113,7 @@ impl Request {
     }
 
     /// Sends, deletes, treasury movements, key rotation, and disabling credit lines are
-    /// confirmed before submission. A receive is exempt only when the payload is
-    /// unambiguously a receive.
+    /// consequential. A receive is exempt only when the payload is unambiguously a receive.
     pub fn is_consequential(&self, operation: &Operation) -> bool {
         let payload = self.body.as_ref().map(RawPayload);
         operation.method == Method::Delete
@@ -162,8 +161,8 @@ impl RawPayload<'_> {
             .and_then(|kind| ReceiveKind::deserialize(kind).ok())
     }
 
-    /// A send discriminator or send data always requires confirmation, including mixed
-    /// payloads. A nullable or unknown receive kind cannot exempt a send.
+    /// A send discriminator or send data always makes a payload consequential, including
+    /// mixed payloads. A nullable or unknown receive kind cannot exempt a send.
     fn is_receive(&self) -> bool {
         !self.has("type") && !self.has("data") && self.receive_kind().is_some()
     }
@@ -781,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_sends_require_confirmation() {
+    fn raw_sends_are_consequential() {
         let create_payment = operation(OperationId::CreatePayment);
         let send = Request {
             path: String::new(),
