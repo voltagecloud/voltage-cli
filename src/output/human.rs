@@ -268,16 +268,16 @@ fn amount(value: &Value) -> Option<String> {
     Some(scrub_line(&format!("{sign}{amount} {unit}")))
 }
 
-/// One `field  value` line, with where a local setting's value came from.
+/// One field: its value's lines, and where a local setting's value came from.
 struct Line {
     key: String,
-    value: String,
+    values: Vec<String>,
     source: Option<String>,
 }
 
-/// Nested objects flatten to dotted field names; amounts stay whole. In a local result, a
-/// `{value, source}` setting is one line, `name  value  (source)`, and string lists are
-/// comma-separated.
+/// Nested objects flatten to dotted field names; amounts stay whole. A list of strings, such
+/// as a dry run's notes, puts each item on its own line under the first. In a local result, a
+/// `{value, source}` setting reads `name  value  (source)`.
 fn fields(out: &mut impl Write, map: &Map<String, Value>, local: bool) -> Result<()> {
     let mut lines = Vec::new();
     flatten(String::new(), map, local, &mut lines);
@@ -286,10 +286,22 @@ fn fields(out: &mut impl Write, map: &Map<String, Value>, local: bool) -> Result
         .map(|line| line.key.chars().count())
         .max()
         .unwrap_or(0);
-    for Line { key, value, source } in lines {
-        match source {
-            Some(source) => writeln!(out, "{key:<width$}{GAP}{value}{GAP}({source})")?,
-            None => writeln!(out, "{key:<width$}{GAP}{value}")?,
+    for Line {
+        key,
+        values,
+        source,
+    } in lines
+    {
+        let source = source
+            .map(|source| format!("{GAP}({source})"))
+            .unwrap_or_default();
+        for (index, value) in values.iter().enumerate() {
+            let (key, source) = if index == 0 {
+                (key.as_str(), source.as_str())
+            } else {
+                ("", "")
+            };
+            writeln!(out, "{key:<width$}{GAP}{value}{source}")?;
         }
     }
     Ok(())
@@ -305,7 +317,7 @@ fn flatten(prefix: String, map: &Map<String, Value>, local: bool, lines: &mut Ve
         if local && let Some((value, source)) = value.as_object().and_then(setting) {
             lines.push(Line {
                 key,
-                value: local_cell(value),
+                values: value_lines(value),
                 source: Some(scrub_line(source)),
             });
             continue;
@@ -316,11 +328,7 @@ fn flatten(prefix: String, map: &Map<String, Value>, local: bool, lines: &mut Ve
             }
             other => lines.push(Line {
                 key,
-                value: if local {
-                    local_cell(other)
-                } else {
-                    cell(other)
-                },
+                values: value_lines(other),
                 source: None,
             }),
         }
@@ -335,15 +343,16 @@ fn setting(map: &Map<String, Value>) -> Option<(&Value, &str)> {
     Some((map.get("value")?, map.get("source")?.as_str()?))
 }
 
-/// Like `cell`, but a list of strings is comma-separated, or `-` when empty.
-fn local_cell(value: &Value) -> String {
+/// A field's value as display lines: one per item of a list of strings, `-` for an empty
+/// list, and otherwise the single `cell`.
+fn value_lines(value: &Value) -> Vec<String> {
     let strings = value
         .as_array()
         .and_then(|items| items.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
     match strings {
-        Some(items) if items.is_empty() => EMPTY_CELL.into(),
-        Some(items) => scrub_line(&items.join(", ")),
-        None => cell(value),
+        Some(items) if items.is_empty() => vec![EMPTY_CELL.into()],
+        Some(items) => items.into_iter().map(scrub_line).collect(),
+        None => vec![cell(value)],
     }
 }
 
@@ -496,7 +505,8 @@ mod tests {
              balance.held       -\n\
              empty              {}\n\
              id                 w\n\
-             tags               [\"a\",\"b\"]\n"
+             tags               a\n\
+             \x20                  b\n"
         );
     }
 
@@ -520,7 +530,8 @@ mod tests {
                 "config_file.exists  false\n\
                  config_file.path    /c/config.toml\n\
                  credential          -\n\
-                 environment_ids     {ID}, e2  (profile)\n\
+                 environment_ids     {ID}  (profile)\n\
+                 \x20                   e2\n\
                  ignored_variables   VOLTAGE_WALLET_ID\n\
                  notes               -\n\
                  organization_id     {ID}  (flag)\n\
