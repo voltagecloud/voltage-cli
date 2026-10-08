@@ -9,11 +9,15 @@ use crate::{
     Error, Result,
     auth::{self, ApiCredential},
     backoff::{Backoff, POLL_CEILING},
-    cli::{ApiInvocation, GlobalFlags, Origin},
-    config::{API_URL, Scope, Settings, new_private, private_dir, read_private, read_secret},
+    cli::{ApiInvocation, GlobalFlags, Origin, Requested},
+    config::{
+        API_URL, EXECUTE_VARIABLE, Scope, Settings, new_private, private_dir, read_private,
+        read_secret,
+    },
+    dry_run,
     error::{ErrorDetail, ErrorKind},
     input::{PaginationMode, Request},
-    output::{Envelope, Outcome, Output, redact},
+    output::{Envelope, Outcome, Output},
     payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
     registry::{AuthScheme, Method, Operation, OperationId},
     secret::Secret,
@@ -448,6 +452,7 @@ impl EventAssembler {
 /// Run one registry operation end to end and write its envelopes.
 pub async fn execute(
     invocation: &ApiInvocation,
+    execution: Execution,
     global: &GlobalFlags,
     settings: &Settings,
     scope: &Scope,
@@ -457,20 +462,32 @@ pub async fn execute(
     let operation = invocation.operation;
     let mut request = Request::read(invocation, scope).await?;
     check_invoice_flags(invocation, &request)?;
-    let run = Run::plan(invocation, &request, scope, global);
+    let run = Run::plan(invocation, &request, scope);
+    match execution {
+        Execution::DryRun => {
+            global
+                .terminal()
+                .notice("Dry run: nothing was authenticated, confirmed, recorded, or sent.");
+            return out.write(dry_run::describe(invocation, global, &request, run)?, &[]);
+        }
+        Execution::DescribeChange => {
+            out.write(dry_run::describe(invocation, global, &request, run)?, &[])?;
+            return Err(Error::new(
+                ErrorKind::NotExecuted,
+                format!(
+                    "Described this change without sending it; pass --execute or set {EXECUTE_VARIABLE}=1 to send it"
+                ),
+            ));
+        }
+        Execution::SendFromEnvironment => global.terminal().notice(format!(
+            "Sending this change because {EXECUTE_VARIABLE} is set."
+        )),
+        Execution::Send => {}
+    }
     if operation.id.returns_one_time_secret() && !out.secure_destination() {
         return Err(Error::usage(
             "This operation returns a one-time secret; supply --output-file PATH or --show-secrets before executing",
         ));
-    }
-    // Decline a noninteractive confirmation before refreshing credentials or making
-    // a wallet preflight request. The summary is still mandatory even in quiet mode.
-    if let Run::Mutation(Mutation {
-        confirmation: confirmation @ Confirmation::WouldBeRefused,
-        ..
-    }) = run
-    {
-        return confirm(operation, scope, &request, confirmation, global.terminal()).await;
     }
     let authorization =
         Authorization::resolve(invocation, global, settings, scope, submission).await?;
@@ -495,12 +512,46 @@ pub async fn execute(
     }
 }
 
-const OFFSET_PAGINATION_DEPRECATED: &str =
+/// Whether an API command sends its request, and what decided it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Execution {
+    /// `--dry-run`: describe the command and succeed.
+    DryRun,
+    /// A change with neither `--execute` nor `VOLTAGE_EXECUTE`: describe it, then fail, so
+    /// a script that forgot `--execute` does not pass silently.
+    DescribeChange,
+    /// A read, or a change sent because of `--execute`.
+    Send,
+    /// A change sent because `VOLTAGE_EXECUTE` is set; the command says so.
+    SendFromEnvironment,
+}
+
+impl Execution {
+    /// The flag decides first, then `VOLTAGE_EXECUTE`, then the default: reads are sent and
+    /// changes are described.
+    pub fn resolve(invocation: &ApiInvocation, execute_variable: Option<bool>) -> Self {
+        match invocation.requested {
+            Requested::DryRun => Self::DryRun,
+            Requested::Execute => Self::Send,
+            Requested::Unspecified if invocation.operation.method == Method::Get => Self::Send,
+            Requested::Unspecified if execute_variable == Some(true) => Self::SendFromEnvironment,
+            Requested::Unspecified => Self::DescribeChange,
+        }
+    }
+
+    /// The command describes its request instead of sending it.
+    pub fn describes(self) -> bool {
+        matches!(self, Self::DryRun | Self::DescribeChange)
+    }
+}
+
+pub const OFFSET_PAGINATION_DEPRECATED: &str =
     "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor.";
 
-/// What a validated API command does, decided once after local validation, so `execute`
-/// and its steps cannot disagree about it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// What a validated API command does, decided once after local validation. `execute`
+/// follows it and `--dry-run` reports it, so the two cannot disagree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Run {
     /// A GET: send it, check the response, then finish as `then` says.
     Read(Read),
@@ -511,24 +562,19 @@ pub enum Run {
 }
 
 impl Run {
-    pub fn plan(
-        invocation: &ApiInvocation,
-        request: &Request,
-        scope: &Scope,
-        global: &GlobalFlags,
-    ) -> Self {
+    pub fn plan(invocation: &ApiInvocation, request: &Request, scope: &Scope) -> Self {
         let operation = invocation.operation;
         if operation.auth == AuthScheme::CheckoutStream {
             Self::EventStream
         } else if operation.method == Method::Get {
             Self::Read(Read::plan(invocation, scope))
         } else {
-            Self::Mutation(Mutation::plan(invocation, request, scope, global))
+            Self::Mutation(Mutation::plan(invocation, request, scope))
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct Read {
     /// `wallets get` checks that the returned wallet is in the selected environment.
     pub check_wallet_environment: bool,
@@ -536,7 +582,8 @@ pub struct Read {
 }
 
 /// How a read finishes after its first response.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReadThen {
     /// Write the response, then follow further pages when `follow` (`--all`) is set.
     Pages { follow: bool },
@@ -622,12 +669,11 @@ impl Read {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct Mutation {
     /// A wallet mutation with an environment scope first reads the wallet to verify it,
     /// because wallets have organization scope.
     pub verify_wallet_environment: bool,
-    pub confirmation: Confirmation,
     /// The body ID recorded in the recovery journal before submission.
     pub journal_id: Option<Uuid>,
     /// A payment whose submission fails in transport is looked up by its ID.
@@ -635,39 +681,11 @@ pub struct Mutation {
     pub wait: Option<WaitTarget>,
 }
 
-/// How a real run handles confirmation of a consequential action.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Confirmation {
-    /// The action is not consequential.
-    NotRequired,
-    /// `--yes` approves it.
-    ApprovedByYes,
-    /// It asks on the terminal.
-    Prompt,
-    /// It is refused: input is disabled or not a terminal, and `--yes` is absent.
-    WouldBeRefused,
-}
-
 impl Mutation {
-    fn plan(
-        invocation: &ApiInvocation,
-        request: &Request,
-        scope: &Scope,
-        global: &GlobalFlags,
-    ) -> Self {
+    fn plan(invocation: &ApiInvocation, request: &Request, scope: &Scope) -> Self {
         let operation = invocation.operation;
-        let confirmation = if !request.is_consequential(operation) {
-            Confirmation::NotRequired
-        } else if global.yes {
-            Confirmation::ApprovedByYes
-        } else if global.terminal().can_prompt() {
-            Confirmation::Prompt
-        } else {
-            Confirmation::WouldBeRefused
-        };
         Self {
             verify_wallet_environment: operation.targets_wallet() && !scope.envs.is_empty(),
-            confirmation,
             // `body_id` comes from the body, so only a mutation with a body is journaled.
             journal_id: request.body_id,
             reconcile: operation.id.submits_payment(),
@@ -675,7 +693,7 @@ impl Mutation {
         }
     }
 
-    /// Verify, confirm, and journal, then send the mutation exactly once. A transport
+    /// Verify and journal, then send the mutation exactly once. A transport
     /// failure is reported as an uncertain submission unless reconciliation proves acceptance.
     async fn execute(
         self,
@@ -690,14 +708,11 @@ impl Mutation {
         if self.verify_wallet_environment {
             verify_wallet_environment(steps.api, scope, steps.invocation.resource_id).await?;
         }
-        confirm(
-            operation,
-            scope,
-            request,
-            self.confirmation,
-            steps.api.terminal,
-        )
-        .await?;
+        // `--execute` is the approval, so nothing asks again; a send still states that its
+        // fee limit is not the whole cost.
+        if operation.id == OperationId::CreatePayment && request.is_consequential(operation) {
+            steps.api.terminal.important(PAYMENT_FEE_LIMIT_NOTE);
+        }
         if let (Some(id), Some(body)) = (self.journal_id, &request.body) {
             journal(settings, operation, scope, body, id, steps.api.terminal)?;
         }
@@ -821,50 +836,7 @@ async fn verify_wallet_environment(api: &Api, scope: &Scope, wallet: Option<Uuid
     require_wallet_in_environment(&response.body, scope)
 }
 
-#[derive(Serialize)]
-struct ConfirmationSummary<'a> {
-    action: String,
-    organization: Option<Uuid>,
-    environments: &'a [Uuid],
-    resource_id: Option<Uuid>,
-    request: Option<&'a Value>,
-}
-
-/// Carry out the planned confirmation. A consequential action shows the resolved scope and
-/// request on stderr, even in quiet mode, then proceeds, asks, or is refused.
-async fn confirm(
-    operation: &Operation,
-    scope: &Scope,
-    request: &Request,
-    confirmation: Confirmation,
-    terminal: Terminal,
-) -> Result<()> {
-    if confirmation == Confirmation::NotRequired {
-        return Ok(());
-    }
-    let mut summary = serde_json::to_value(ConfirmationSummary {
-        action: operation.command.join(" "),
-        organization: scope.org,
-        environments: &scope.envs,
-        resource_id: request.resource_id,
-        request: request.body.as_ref(),
-    })?;
-    redact(&mut summary, &[]);
-    terminal.important(serde_json::to_string_pretty(&summary)?);
-    if operation.id == OperationId::CreatePayment {
-        terminal.important(
-            "Network/provider fee limits exclude additional processing fees. The wallet determines the network."
-        );
-    }
-    match confirmation {
-        Confirmation::NotRequired | Confirmation::ApprovedByYes => Ok(()),
-        Confirmation::WouldBeRefused => Err(Error::usage(
-            "This operation requires --yes when input is disabled or noninteractive",
-        )),
-        Confirmation::Prompt if terminal.confirm("Proceed?").await? => Ok(()),
-        Confirmation::Prompt => Err(Error::usage("Operation cancelled before submission")),
-    }
-}
+const PAYMENT_FEE_LIMIT_NOTE: &str = "Network/provider fee limits exclude additional processing fees. The wallet determines the network.";
 
 /// What the recovery journal remembers about a submission: never the body itself.
 #[derive(Debug, Serialize, Deserialize)]
@@ -929,7 +901,7 @@ fn journal(
 }
 
 /// What this command may have changed, for reporting an interruption. A write is recorded
-/// immediately before the request leaves the process, never during validation, confirmation,
+/// immediately before the request leaves the process, never during validation,
 /// or wallet preflight: once sending starts, a cancelled future cannot tell whether the
 /// service received the request.
 #[derive(Default)]
@@ -1720,6 +1692,63 @@ mod tests {
         );
         assert!(read(&["wallets", "get", WALLET]).check_wallet_environment);
         assert!(!read(&["wallets", "list"]).check_wallet_environment);
+    }
+
+    #[test]
+    fn the_flag_decides_then_voltage_execute_then_reads_send_and_changes_are_described() {
+        let resolve = |args: &[&str], variable| Execution::resolve(&invocation(args), variable);
+        let change = ["wallets", "delete", WALLET];
+        let dry_run = ["wallets", "delete", WALLET, "--dry-run"];
+        let execute = ["wallets", "delete", WALLET, "--execute"];
+        for variable in [None, Some(false), Some(true)] {
+            assert_eq!(resolve(&dry_run, variable), Execution::DryRun);
+            assert_eq!(resolve(&execute, variable), Execution::Send);
+            assert_eq!(resolve(&["wallets", "list"], variable), Execution::Send);
+        }
+        assert_eq!(resolve(&change, None), Execution::DescribeChange);
+        assert_eq!(resolve(&change, Some(false)), Execution::DescribeChange);
+        assert_eq!(resolve(&change, Some(true)), Execution::SendFromEnvironment);
+        assert!(Execution::DescribeChange.describes() && Execution::DryRun.describes());
+        assert!(!Execution::SendFromEnvironment.describes());
+    }
+
+    #[test]
+    fn run_encoding_is_stable() {
+        let mutation = Run::Mutation(Mutation {
+            verify_wallet_environment: true,
+            journal_id: Some(WALLET.parse().unwrap()),
+            reconcile: true,
+            wait: Some(WaitTarget::Ready),
+        });
+        assert_eq!(
+            serde_json::to_value(mutation).unwrap(),
+            json!({
+                "kind": "mutation",
+                "verify_wallet_environment": true,
+                "journal_id": WALLET,
+                "reconcile": true,
+                "wait": "ready"
+            })
+        );
+        let read = Run::Read(Read {
+            check_wallet_environment: false,
+            then: ReadThen::PaymentWait {
+                until: WaitTarget::Completed,
+                missing_is_pending: true,
+            },
+        });
+        assert_eq!(
+            serde_json::to_value(read).unwrap(),
+            json!({
+                "kind": "read",
+                "check_wallet_environment": false,
+                "then": {"kind": "payment_wait", "until": "completed", "missing_is_pending": true}
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Run::EventStream).unwrap(),
+            json!({"kind": "event_stream"})
+        );
     }
 
     #[test]

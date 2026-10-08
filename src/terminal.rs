@@ -56,18 +56,6 @@ impl Terminal {
         eprintln!("{message}");
     }
 
-    /// Ask a yes/no question on stderr. Anything but an explicit yes declines.
-    pub async fn confirm(self, question: &str) -> Result<bool> {
-        eprint!("{question} [y/N] ");
-        std::io::stderr().flush()?;
-        let reply = read_detached(|| {
-            let mut reply = String::new();
-            std::io::stdin().read_line(&mut reply).map(|_| reply)
-        })
-        .await??;
-        Ok(matches!(reply.trim(), "y" | "Y" | "yes"))
-    }
-
     /// Read a secret without echo.
     pub async fn read_hidden(self, prompt: &'static str) -> Result<Secret> {
         // The detached read restores echo only when it returns, and Ctrl-C does not wait for

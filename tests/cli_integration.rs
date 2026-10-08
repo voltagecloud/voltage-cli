@@ -190,10 +190,14 @@ fn process_at(dir: &Path, api_url: &str) -> std::process::Command {
         "VOLTAGE_CHECKOUT_TOKEN",
         "VOLTAGE_STREAM_TOKEN",
         "VOLTAGE_CONFIG_DIR",
+        "VOLTAGE_EXECUTE",
     ] {
         cmd.env_remove(name);
     }
+    // Most tests exercise sending, as a script that exports VOLTAGE_EXECUTE does; the
+    // describe-by-default tests remove it.
     cmd.env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .env("VOLTAGE_EXECUTE", "1")
         .arg("--config-dir")
         .arg(dir)
         .arg("--api-url")
@@ -307,6 +311,7 @@ async fn result_output_treats_an_early_closing_pipe_as_success_without_resubmitt
     }
     let mut child = command
         .env("VOLTAGE_API_KEY", ACCOUNT_KEY)
+        .env("VOLTAGE_EXECUTE", "1")
         .arg("--config-dir")
         .arg(dir.path())
         .args([
@@ -535,7 +540,7 @@ async fn every_documented_operation_reaches_its_exact_route_and_auth_scheme() {
         }
         let mut cmd = cli(dir.path(), &server);
         cmd.args(&op.command)
-            .args(["--org", ORG, "--env", ENV, "--yes", "--show-secrets"]);
+            .args(["--org", ORG, "--env", ENV, "--show-secrets"]);
         if op.target.is_some() {
             cmd.arg(target);
         }
@@ -906,6 +911,7 @@ async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
         setting(json!(dir.path().display().to_string()), "flag")
     );
     assert_eq!(data["config_file"]["exists"], true);
+    assert_eq!(data["execute_changes"], setting(json!(true), "environment"));
     // The profile silences ambient scope and the ambient key; the flag beats the variable.
     assert_eq!(
         data["ignored_variables"],
@@ -949,13 +955,13 @@ async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
 
     let only_saved = cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
+        .env_remove("VOLTAGE_EXECUTE")
         .arg("context")
         .assert()
         .success();
-    assert_eq!(
-        json_stdout(&only_saved)["data"]["account"],
-        setting(json!("stage"), "default")
-    );
+    let data = json_stdout(&only_saved)["data"].clone();
+    assert_eq!(data["account"], setting(json!("stage"), "default"));
+    assert_eq!(data["execute_changes"], setting(json!(false), "default"));
 
     // A saved key used outside its bound organization is reported the way commands reject it.
     let elsewhere = cli(dir.path(), &server)
@@ -1623,29 +1629,11 @@ async fn progress_is_terminal_only_and_cleared_on_completion() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_input_requires_explicit_approval_and_secret_source() {
+async fn no_input_requires_a_secret_source_instead_of_a_prompt() {
     let (server, dir) = fixture().await;
-    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
-    let rejected = cli(dir.path(), &server)
-        .args([
-            "--no-input",
-            "payments",
-            "create",
-            "--org",
-            ORG,
-            "--env",
-            ENV,
-            "--data",
-            "-",
-        ])
-        .write_stdin(body.to_string())
-        .assert()
-        .code(2);
-    assert!(stderr(&rejected).contains("requires --yes"));
     let missing_secret = cli(dir.path(), &server)
         .args([
             "--no-input",
-            "--yes",
             "auth",
             "import-key",
             "--account",
@@ -1670,7 +1658,6 @@ async fn quiet_keeps_results_errors_and_payment_recovery_id() {
     let result = cli(dir.path(), &server)
         .args([
             "-q",
-            "--yes",
             "--no-input",
             "payments",
             "create",
@@ -1686,8 +1673,12 @@ async fn quiet_keeps_results_errors_and_payment_recovery_id() {
         .success();
     assert_eq!(json_stdout(&result)["resource_id"], RESOURCE);
     assert!(stderr(&result).contains("Recovery record:"));
+    assert!(
+        stderr(&result).contains("Network/provider fee limits exclude additional processing fees.")
+    );
     assert!(!stderr(&result).contains("\u{1b}["));
     let error = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
         .args([
             "--quiet",
             "--no-input",
@@ -1702,67 +1693,9 @@ async fn quiet_keeps_results_errors_and_payment_recovery_id() {
         ])
         .write_stdin(body.to_string())
         .assert()
-        .code(2);
-    assert!(stderr(&error).contains("requires --yes"));
+        .code(6);
+    assert!(stderr(&error).contains("pass --execute"));
     server.verify().await;
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn interrupt_at_the_confirmation_prompt_exits_130_without_submitting() {
-    use std::io::Read;
-    use std::process::Stdio;
-    let (server, dir) = fixture().await;
-    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
-    let data = dir.path().join("request.json");
-    std::fs::write(&data, body.to_string()).unwrap();
-    let (mut controller, terminal) = open_pty();
-    let child = process_at(dir.path(), &server.uri())
-        .args(["payments", "create", "--org", ORG, "--env", ENV, "--data"])
-        .arg(format!("@{}", data.display()))
-        .stdin(Stdio::from(terminal.try_clone().unwrap()))
-        .stderr(Stdio::from(terminal))
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // The controller stays open until the child exits so its stderr writes never fail.
-    let controller = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || {
-            let mut shown = Vec::new();
-            let mut chunk = [0; 4096];
-            while !String::from_utf8_lossy(&shown).contains("Proceed? [y/N]") {
-                let read = controller.read(&mut chunk).unwrap();
-                assert_ne!(read, 0, "{}", String::from_utf8_lossy(&shown));
-                shown.extend_from_slice(&chunk[..read]);
-            }
-            controller
-        }),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    interrupt(&child);
-    let pid = child.id().to_string();
-    let exited = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
-    )
-    .await;
-    let Ok(output) = exited else {
-        // Unblock the waiter so the runtime can shut down, then fail.
-        std::process::Command::new("kill")
-            .args(["-KILL", &pid])
-            .status()
-            .unwrap();
-        panic!("Ctrl-C at the confirmation prompt did not end the process");
-    };
-    let output = output.unwrap();
-    drop(controller);
-    assert_eq!(output.status.code(), Some(130));
-    assert!(output.stdout.is_empty());
-    assert!(server.received_requests().await.unwrap().is_empty());
-    assert!(!dir.path().join("requests").exists());
 }
 
 /// Local modes of a pseudo-terminal, as the child sees them through `/dev/tty`.
@@ -2131,7 +2064,7 @@ async fn interrupt_during_payment_submission_reports_original_id_without_retry()
         &server,
         &arrived,
         &[
-            "--yes", "payments", "create", "--org", ORG, "--env", ENV, "--data", &data,
+            "payments", "create", "--org", ORG, "--env", ENV, "--data", &data,
         ],
     )
     .await;
@@ -2166,7 +2099,7 @@ async fn interrupt_during_another_write_reports_an_uncertain_submission() {
         dir.path(),
         &server,
         &arrived,
-        &["--yes", "wallets", "delete", WALLET, "--org", ORG],
+        &["wallets", "delete", WALLET, "--org", ORG],
     )
     .await;
     let report = error_report(&output.stderr);
@@ -2178,31 +2111,236 @@ async fn interrupt_during_another_write_reports_an_uncertain_submission() {
     server.verify().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn raw_send_without_yes_never_submits() {
+#[tokio::test]
+async fn dry_run_sends_nothing_records_nothing_and_omits_private_values() {
     let (server, dir) = fixture().await;
-    let original = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"invoice"}});
-    for kind in [
-        None,
-        Some(Value::Null),
-        Some(json!("bolt11")),
-        Some(json!("unknown")),
-    ] {
-        let mut body = original.clone();
-        if let Some(kind) = kind {
-            body["payment_kind"] = kind;
-        }
-        let result = cli(dir.path(), &server)
-            .args([
-                "payments", "create", "--org", ORG, "--env", ENV, "--data", "-",
-            ])
-            .write_stdin(body.to_string())
-            .assert()
-            .code(2);
-        assert!(stderr(&result).contains("requires --yes"));
-    }
+    let output_file = dir.path().join("result.json");
+    let planned = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wallet",
+            WALLET,
+            "--id",
+            RESOURCE,
+            "--currency",
+            "btc",
+            "--invoice",
+            "lnbc1private",
+            "--max-fee",
+            "10",
+            "--fee-unit",
+            "sats",
+            "--metadata",
+            "order=private-order",
+            "--dry-run",
+        ])
+        .arg("--output-file")
+        .arg(&output_file)
+        .assert()
+        .success();
+    let envelope = json_stdout(&planned);
+    assert_eq!(envelope["outcome"], "dry_run");
+    assert_eq!(envelope["http_status"], Value::Null);
+    assert_eq!(envelope["resource_id"], RESOURCE);
+    let data = &envelope["data"];
+    assert_eq!(data["operation"], "payments send");
+    assert_eq!(data["method"], "POST");
+    assert_eq!(data["url"], format!("{}{}", server.uri(), payments_path()));
+    assert_eq!(
+        data["body"],
+        json!({
+            "id": RESOURCE, "wallet_id": WALLET, "type": "bolt11", "currency": "btc",
+            "data": {"payment_request": "[OMITTED]", "max_fee": {"currency": "btc", "amount": 10000}},
+            "metadata": "[OMITTED]"
+        })
+    );
+    assert_eq!(data["values_omitted"], true);
+    assert_eq!(
+        data["run"],
+        json!({
+            "kind": "mutation",
+            "verify_wallet_environment": false,
+            "journal_id": RESOURCE,
+            "reconcile": true,
+            "wait": null
+        })
+    );
+    let text = stdout(&planned);
+    assert!(!text.contains("lnbc1private") && !text.contains("private-order"));
+    assert!(!text.contains(ACCOUNT_KEY));
+    assert!(!output_file.exists());
+    assert!(!dir.path().join("requests").exists());
+
+    // Wallet preflight reads are skipped when describing a delete.
+    let delete = cli(dir.path(), &server)
+        .args([
+            "wallets", "delete", WALLET, "--org", ORG, "--env", ENV, "-n",
+        ])
+        .assert()
+        .success();
+    let data = json_stdout(&delete)["data"].clone();
+    assert_eq!(data["method"], "DELETE");
+    assert_eq!(data["run"]["verify_wallet_environment"], true);
+    let read = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG, "-n"])
+        .assert()
+        .success();
+    assert_eq!(
+        json_stdout(&read)["data"]["run"],
+        json!({
+            "kind": "read",
+            "check_wallet_environment": false,
+            "then": {"kind": "pages", "follow": false}
+        })
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn changes_are_described_unless_execute_or_voltage_execute_asks_to_send_them() {
+    let (server, dir) = fixture().await;
+    let output_file = dir.path().join("result.json");
+    let delete = ["wallets", "delete", WALLET, "--org", ORG];
+    let described = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(delete)
+        .arg("--output-file")
+        .arg(&output_file)
+        .assert()
+        .code(6);
+    let envelope = json_stdout(&described);
+    assert_eq!(envelope["outcome"], "dry_run");
+    assert_eq!(envelope["resource_id"], WALLET);
+    assert!(stderr(&described).contains("pass --execute or set VOLTAGE_EXECUTE=1"));
+    assert!(!output_file.exists());
+    // A misspelled value is rejected for every API command, reads included, so a read-only
+    // script surfaces it before its first change.
+    let unclear = cli(dir.path(), &server)
+        .env("VOLTAGE_EXECUTE", "yes")
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .code(2);
+    assert!(stderr(&unclear).contains("VOLTAGE_EXECUTE must be 1, true, 0, or false"));
+    // An explicit --dry-run describes and succeeds, even when the environment says to send.
+    cli(dir.path(), &server)
+        .args(delete)
+        .arg("--dry-run")
+        .assert()
+        .success();
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // Reads are unaffected by the default.
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)),
+        ok(json!({"items": []})),
+    )
+    .await;
+    cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .success();
+    let path = format!("{}/{WALLET}", wallets_path(ORG));
+    route("DELETE", path.as_str())
+        .respond_with(ResponseTemplate::new(204))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let flagged = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(delete)
+        .arg("--execute")
+        .assert()
+        .success();
+    assert!(!stderr(&flagged).contains("VOLTAGE_EXECUTE"));
+    // Sending because of the environment is reported, so an exported variable is visible.
+    let inherited = cli(dir.path(), &server).args(delete).assert().success();
+    assert!(stderr(&inherited).contains("Sending this change because VOLTAGE_EXECUTE is set."));
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn dry_run_reads_raw_bodies_and_shows_them_only_with_show_secrets() {
+    let (server, dir) = fixture().await;
+    let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"lnbc1raw"},"extension":{"note":"x"}});
+    let args = [
+        "payments",
+        "create",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--data",
+        "-",
+        "--dry-run",
+    ];
+    let hidden = cli(dir.path(), &server)
+        .args(args)
+        .write_stdin(body.to_string())
+        .assert()
+        .success();
+    let data = json_stdout(&hidden)["data"].clone();
+    assert_eq!(data["body"]["data"]["payment_request"], "[OMITTED]");
+    assert_eq!(data["body"]["extension"], "[OMITTED]");
+    assert!(data["notes"].as_array().unwrap().contains(&json!(
+        "The --data payload was read and validated; a real run reads it again."
+    )));
+    let shown = cli(dir.path(), &server)
+        .args(args)
+        .arg("--show-secrets")
+        .write_stdin(body.to_string())
+        .assert()
+        .success();
+    let data = json_stdout(&shown)["data"].clone();
+    assert_eq!(data["body"], body);
+    assert_eq!(data["values_omitted"], false);
+    // Local validation still applies.
+    cli(dir.path(), &server)
+        .args(args)
+        .write_stdin(json!({"wallet_id": WALLET}).to_string())
+        .assert()
+        .code(2);
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(!dir.path().join("requests").exists());
+}
+
+#[tokio::test]
+async fn dry_run_describes_checkout_requests_without_a_token() {
+    let (server, dir) = fixture().await;
+    let watched = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_STREAM_TOKEN")
+        .args(["checkout", "events", "watch", "-n"])
+        .assert()
+        .success();
+    let data = json_stdout(&watched)["data"].clone();
+    assert_eq!(data["run"], json!({"kind": "event_stream"}));
+    assert_eq!(data["origin"], Value::Null);
+
+    // The Origin header decides whether a browser-bound session accepts the request.
+    let session = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_CHECKOUT_TOKEN")
+        .args([
+            "checkout",
+            "sessions",
+            "get",
+            RESOURCE,
+            "--origin",
+            "https://shop.example.test",
+            "-n",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_stdout(&session)["data"]["origin"],
+        "https://shop.example.test"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2225,7 +2363,6 @@ async fn payment_timeout_preserves_id_and_does_not_retry() {
             ENV,
             "--data",
             "-",
-            "--yes",
             "--timeout",
             "1",
         ])
@@ -2558,7 +2695,7 @@ async fn secret_destination_is_required_before_request() {
     let (server, dir) = fixture().await;
     cli(dir.path(), &server)
         .args([
-            "webhooks", "keys", "rotate", RESOURCE, "--org", ORG, "--env", ENV, "--yes",
+            "webhooks", "keys", "rotate", RESOURCE, "--org", ORG, "--env", ENV,
         ])
         .assert()
         .code(2);
@@ -2585,7 +2722,6 @@ async fn file_output_retains_one_time_secret_with_private_permissions() {
             ORG,
             "--env",
             ENV,
-            "--yes",
             "--output-file",
         ])
         .arg(&out)

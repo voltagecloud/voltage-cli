@@ -2,7 +2,7 @@
 
 use crate::{
     Error, Result,
-    api::{self, SubmissionState},
+    api::{self, Execution, SubmissionState},
     auth::{self, Discovery},
     cli::{
         self, AuthCommand, Command, GlobalFlags, Invocation, LocalCommand, ParseFailure,
@@ -94,13 +94,17 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         return write_stdout(&script);
     }
     let terminal = global.terminal();
-    let mut out = Output::new(
-        global.output_format(),
-        global.show_secrets,
-        global.output_file.as_deref(),
-    )?;
+    // `reserve` is false for a description, which goes to stdout and never reserves the file.
+    let output = |reserve: bool| {
+        Output::new(
+            global.output_format(),
+            global.show_secrets,
+            global.output_file.as_deref().filter(|_| reserve),
+        )
+    };
     // Price commands need neither configuration nor credentials.
     if let Command::Local(LocalCommand::Price(_) | LocalCommand::Convert(_)) = &command {
+        let mut out = output(true)?;
         let service = PriceService::new(
             global.price_url.as_deref().unwrap_or(PRICE_URL),
             global.timeout,
@@ -128,9 +132,15 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
     let scope = settings.scope(global.scope_selection())?;
     match command {
         Command::Api(api) => {
-            api::execute(&api, &global, &settings, &scope, &mut out, submission).await
+            let execution = Execution::resolve(&api, config::execute_variable()?);
+            let mut out = output(!execution.describes())?;
+            api::execute(
+                &api, execution, &global, &settings, &scope, &mut out, submission,
+            )
+            .await
         }
         Command::Local(local) => {
+            let mut out = output(true)?;
             let envelope = local_command(local, &global, &mut settings, &scope, submission).await?;
             out.write(envelope, &[])
         }

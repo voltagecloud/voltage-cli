@@ -773,7 +773,7 @@ pub async fn import_key(
         let terminal = global.terminal();
         if !terminal.can_prompt() {
             return Err(Error::usage(
-                "Use --stdin to import an API key when input is disabled or noninteractive (--yes does not supply a key)",
+                "Use --stdin to import an API key when input is disabled or noninteractive",
             ));
         }
         terminal.read_hidden("Environment API key: ").await?

@@ -10,7 +10,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// What `--wait` waits for.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum WaitTarget {
     /// The payer-facing invoice or address exists.
     Ready,
