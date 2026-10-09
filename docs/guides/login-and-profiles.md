@@ -43,6 +43,17 @@ Without a profile, flags override `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMEN
 
 Only endpoints that filter by environment receive `--env`. Organization-wide commands say so in their help, and wallet mutations verify a supplied environment against the wallet before changing anything.
 
+## Pick the scope interactively
+
+On a terminal, a command that lacks the organization, environment, or wallet it needs asks for it instead of failing. The picker lists each choice as `name  UUID`; type to filter, use the arrow keys, and press Enter. Afterwards, the CLI prints the flags that select the same scope, so you can pass them next time or save a profile.
+
+```sh
+voltage wallets list                            # asks for the organization
+voltage payments receive --currency btc --kind bolt11 --amount 1000 --unit sats --execute
+```
+
+An API key cannot list organizations or environments, so with a key the CLI offers only wallets; pass `--org` and `--env` or use a profile. Esc leaves the scope unchanged, and the command then reports what is missing. Ctrl-C exits with code 130. Picking a scope never sends a change: changes still need `--execute`. The CLI never asks when stdin or stderr is not a terminal, or with `--no-input`, `--json`, `--output json|ndjson`, or `--dry-run`. In those cases, the command fails with the same error as before.
+
 ## Profiles
 
 A profile bundles an organization, an environment, and a credential, and ignores the scope variables above and `VOLTAGE_API_KEY`; flags still override its scope for one command.
