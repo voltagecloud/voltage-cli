@@ -18,18 +18,18 @@ clap_complete = "=4.6.11"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 toml = "=1.1.6"
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
+tokio = { version = "=1.53.2", features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "form", "query", "stream"] }
 # The TLS provider is ring, installed at startup; aws-lc-rs would need a C toolchain on every platform.
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
-uuid = { version = "=1.26.1", features = ["v4", "serde"] }
+uuid = { version = "=1.27.0", features = ["v4", "serde"] }
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 rpassword = "=7.5.4"
 webbrowser = "=1.2.4"
 futures-util = "=0.3.34"
 url = "=2.5.8"
-zeroize = { version = "=1.9.0", features = ["serde"] }
+zeroize = { version = "=1.9.1", features = ["serde"] }
 bytes = "=1.12.1"
 fastrand = "=2.5.0"
 httpdate = "=1.0.3"
@@ -47,7 +47,7 @@ comfy-table = { version = "=8.0.1", default-features = false }
 crossterm = { version = "=0.29.0", default-features = false, features = ["windows"] }
 
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.189"
+libc = "=0.2.190"
 
 [build-dependencies]
 serde_json = "=1.0.151"
