@@ -45,6 +45,9 @@ comfy-table = { version = "=8.0.1", default-features = false }
 # Reads the terminal width on every platform. Without its `windows` feature, crossterm
 # refuses to compile on Windows.
 crossterm = { version = "=0.29.0", default-features = false, features = ["windows"] }
+# Pickers for a missing organization, environment, or wallet. Its default filter matches a
+# substring of a name or ID. It draws through crossterm, so the CLI keeps one terminal backend.
+inquire = { version = "=0.9.4", default-features = false, features = ["crossterm"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"

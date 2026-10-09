@@ -2995,6 +2995,214 @@ async fn interrupting_checkout_stream_returns_130_without_leaking_its_token() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Interactive scope pickers
+// ---------------------------------------------------------------------------------------
+
+/// What a command did on a pseudo-terminal.
+#[cfg(unix)]
+struct TerminalRun {
+    code: Option<i32>,
+    /// The terminal's local modes before the command started and after it exited.
+    modes: (libc::tcflag_t, libc::tcflag_t),
+    shown: String,
+    stdout: String,
+}
+
+/// Run a command with stdin and stderr on a pseudo-terminal and stdout piped. Once the
+/// terminal shows `prompt`, type `keys`; without a prompt, nothing is typed.
+#[cfg(unix)]
+async fn on_a_terminal(
+    dir: &Path,
+    server: &MockServer,
+    args: &[&str],
+    prompt: Option<&'static str>,
+    keys: &'static [u8],
+) -> TerminalRun {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let (mut controller, terminal) = open_pty();
+    let observer = controller.try_clone().unwrap();
+    let before = local_modes(&observer);
+    let mut command = human_process_at(dir, &server.uri());
+    command
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(args)
+        .stdin(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .stdout(Stdio::piped());
+    // SAFETY: as in `interrupt_the_hidden_key_prompt`: setsid and ioctl are
+    // async-signal-safe, and the closure allocates nothing.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    let (prompted, shown_prompt) = tokio::sync::oneshot::channel();
+    let drain = tokio::task::spawn_blocking(move || {
+        let mut prompted = Some(prompted);
+        let mut shown = Vec::new();
+        let mut chunk = [0; 4096];
+        while let Ok(read @ 1..) = controller.read(&mut chunk) {
+            shown.extend_from_slice(&chunk[..read]);
+            if prompt.is_some_and(|prompt| String::from_utf8_lossy(&shown).contains(prompt)) {
+                prompted.take().map(|prompted| prompted.send(()));
+            }
+        }
+        String::from_utf8_lossy(&shown).into_owned()
+    });
+    if prompt.is_some() {
+        tokio::time::timeout(Duration::from_secs(10), shown_prompt)
+            .await
+            .unwrap()
+            .unwrap();
+        (&observer).write_all(keys).unwrap();
+    }
+    let pid = child.id().to_string();
+    let Ok(output) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    else {
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap();
+        panic!("the command on the terminal did not exit");
+    };
+    let output = output.unwrap();
+    let after = local_modes(&observer);
+    drop(command);
+    let shown = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    TerminalRun {
+        code: output.status.code(),
+        modes: (before, after),
+        shown,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
+    let (server, dir) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path(wallets_path(ORG)))
+        .and(query_param("environment_id", ENV))
+        .respond_with(ok(json!([
+            {"id": RESOURCE, "name": "ops"},
+            {"id": WALLET, "name": "Payroll"}
+        ])))
+        .mount(&server)
+        .await;
+    let send = [
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--currency",
+        "btc",
+        "--invoice",
+        "lnbc1",
+        "--output",
+        "table",
+    ];
+    let listings = || async {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == wallets_path(ORG))
+            .count()
+    };
+
+    // Typing filters the list, and Enter picks; the change is still only described.
+    let picked = on_a_terminal(dir.path(), &server, &send, Some("Wallet:"), b"Pay\r").await;
+    assert_eq!(picked.code, Some(6), "{}", picked.shown);
+    assert!(
+        picked.stdout.contains("body.wallet_id"),
+        "{}",
+        picked.stdout
+    );
+    assert!(picked.stdout.contains(WALLET), "{}", picked.stdout);
+    assert!(
+        picked
+            .shown
+            .contains(&format!("Next time, pass --wallet {WALLET}"))
+    );
+    assert_eq!(picked.modes.0, picked.modes.1);
+
+    // Esc leaves the scope unset, so the command fails as it did before pickers.
+    let escaped = on_a_terminal(dir.path(), &server, &send, Some("Wallet:"), b"\x1b").await;
+    assert_eq!(escaped.code, Some(2), "{}", escaped.shown);
+    assert!(
+        escaped
+            .shown
+            .contains("--wallet is required for payment creation")
+    );
+    assert_eq!(escaped.modes.0, escaped.modes.1);
+
+    // A typed Ctrl-C reaches the picker as a key in raw mode and still exits with 130.
+    let interrupted = on_a_terminal(dir.path(), &server, &send, Some("Wallet:"), b"\x03").await;
+    assert_eq!(interrupted.code, Some(130), "{}", interrupted.shown);
+    assert!(
+        interrupted
+            .shown
+            .contains("Interrupted before any resource change was submitted")
+    );
+    assert_eq!(interrupted.modes.0, interrupted.modes.1);
+    assert_eq!(listings().await, 3);
+
+    // JSON output, --no-input, and dry runs neither ask nor list.
+    for extra in ["--json", "--no-input", "--dry-run"] {
+        let mut args = send.to_vec();
+        args.push(extra);
+        let run = on_a_terminal(dir.path(), &server, &args, None, b"").await;
+        assert_eq!(run.code, Some(2), "{extra}: {}", run.shown);
+        assert!(
+            run.shown
+                .contains("--wallet is required for payment creation"),
+            "{extra}"
+        );
+        assert!(!run.shown.contains("Wallet:"), "{extra}");
+    }
+    assert_eq!(listings().await, 3);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_api_key_without_an_organization_keeps_the_original_error() {
+    let (server, dir) = fixture().await;
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &["wallets", "list", "--output", "table"],
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown.contains("--org is required for wallets list"),
+        "{}",
+        run.shown
+    );
+    assert!(run.shown.contains("--profile NAME"), "{}", run.shown);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------
 // Prices and conversions
 // ---------------------------------------------------------------------------------------
 

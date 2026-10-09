@@ -14,6 +14,7 @@ mod error;
 mod input;
 mod output;
 mod payment;
+mod pick;
 mod price;
 pub mod registry;
 pub mod secret;
