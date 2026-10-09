@@ -2,11 +2,13 @@
 //! errors are written by `output`.
 
 use crate::{Error, Result, secret::Secret};
+use inquire::{InquireError, Select};
 use std::{
-    fmt::Display,
+    fmt::{self, Display},
     io::{ErrorKind, IsTerminal, Write},
 };
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 /// What the process may show to and ask of the person at the terminal, from `--quiet` and
 /// `--no-input`.
@@ -56,6 +58,24 @@ impl Terminal {
         eprintln!("{}", scrub_text(&message.to_string()));
     }
 
+    /// A picker also draws on stderr, so it needs both streams to be interactive.
+    pub fn can_pick(self) -> bool {
+        self.can_prompt() && std::io::stderr().is_terminal()
+    }
+
+    /// Ask the person to pick one of a non-empty list of choices, filtering as they type.
+    /// `None` means they pressed Esc. Raw mode turns a typed Ctrl-C into a key, so the picker
+    /// reports Ctrl-C as an interruption.
+    pub async fn pick(self, question: &'static str, choices: Vec<Choice>) -> Result<Option<Uuid>> {
+        #[cfg(unix)]
+        let _modes = TerminalModes::save();
+        let _screen = PickerScreen;
+        picked(
+            read_detached(move || Select::new(question, choices).with_page_size(12).prompt())
+                .await?,
+        )
+    }
+
     /// Read a secret without echo.
     pub async fn read_hidden(self, prompt: &'static str) -> Result<Secret> {
         // The detached read restores echo only when it returns, and Ctrl-C does not wait for
@@ -69,6 +89,58 @@ impl Terminal {
             Err(error) if error.kind() == ErrorKind::Interrupted => std::future::pending().await,
             read => Ok(read?),
         }
+    }
+}
+
+/// What the picker's answer means: a choice, Esc as `None`, Ctrl-C as an interruption, and
+/// any other failure, such as a terminal that cannot be read, as a transport error.
+fn picked(answer: std::result::Result<Choice, InquireError>) -> Result<Option<Uuid>> {
+    match answer {
+        Ok(choice) => Ok(Some(choice.id)),
+        Err(InquireError::OperationCanceled) => Ok(None),
+        Err(InquireError::OperationInterrupted) => Err(Error::interrupted(
+            "Interrupted before any resource change was submitted",
+        )),
+        Err(_) => Err(Error::transport(
+            "Could not read the selection from the terminal",
+        )),
+    }
+}
+
+/// The picker turns on bracketed paste and hides the cursor, and undoes both only when its
+/// read returns. A signal that ends the command first leaves that to this guard.
+struct PickerScreen;
+
+impl Drop for PickerScreen {
+    fn drop(&mut self) {
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(b"\x1b[?2004l\x1b[?25h");
+        let _ = stderr.flush();
+    }
+}
+
+/// One resource a person can pick: its name, scrubbed because the API supplied it, and its ID.
+pub struct Choice {
+    id: Uuid,
+    name: String,
+}
+
+impl Choice {
+    pub fn new(id: Uuid, name: &str) -> Self {
+        Self {
+            id,
+            name: scrub_line(name),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Display for Choice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}  {}", self.name, self.id)
     }
 }
 
@@ -201,6 +273,28 @@ impl Drop for Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorKind as Exit;
+
+    #[test]
+    fn a_picker_answer_becomes_a_choice_nothing_an_interruption_or_a_transport_error() {
+        let id = Uuid::nil();
+        assert_eq!(picked(Ok(Choice::new(id, "a"))).unwrap(), Some(id));
+        assert_eq!(picked(Err(InquireError::OperationCanceled)).unwrap(), None);
+        let interrupted = picked(Err(InquireError::OperationInterrupted)).unwrap_err();
+        assert_eq!(interrupted.kind, Exit::Interrupted);
+        // A terminal that goes away or is not one fails the read; no choice is assumed.
+        for failure in [
+            InquireError::NotTTY,
+            InquireError::IO(std::io::Error::from(ErrorKind::BrokenPipe)),
+        ] {
+            let error = picked(Err(failure)).unwrap_err();
+            assert_eq!(error.kind, Exit::Transport);
+            assert_eq!(
+                error.message,
+                "Could not read the selection from the terminal"
+            );
+        }
+    }
 
     #[test]
     fn scrubbing_removes_controls_and_bidirectional_marks() {
