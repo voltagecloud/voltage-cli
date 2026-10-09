@@ -180,7 +180,7 @@ async fn local_command(
         LocalCommand::Environments { .. } => Envelope::local(
             auth::discover(settings, scope, global, Discovery::Environments, submission).await?,
         ),
-        LocalCommand::Context => Envelope::local(context::inspect(settings, global)?),
+        LocalCommand::Context => Envelope::settings(context::inspect(settings, global)?),
         LocalCommand::Profiles { command } => {
             profiles(command, settings, scope, global.terminal()).await
         }

@@ -181,6 +181,13 @@ fn cli_at(dir: &Path, api_url: &str) -> Command {
 
 /// `cli_at` as a plain process, for tests that attach a terminal or deliver a signal.
 fn process_at(dir: &Path, api_url: &str) -> std::process::Command {
+    let mut cmd = human_process_at(dir, api_url);
+    cmd.arg("--json");
+    cmd
+}
+
+/// `process_at` without `--json`, so the output format can be chosen.
+fn human_process_at(dir: &Path, api_url: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
     for name in [
         "VOLTAGE_ORGANIZATION_ID",
@@ -201,8 +208,7 @@ fn process_at(dir: &Path, api_url: &str) -> std::process::Command {
         .arg("--config-dir")
         .arg(dir)
         .arg("--api-url")
-        .arg(api_url)
-        .arg("--json");
+        .arg(api_url);
     cmd
 }
 
@@ -2563,6 +2569,77 @@ async fn wait_tolerates_projection_delay_and_distinguishes_invoice_from_settleme
 // ---------------------------------------------------------------------------------------
 // Pagination, output, and transport failures
 // ---------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_output_fits_the_terminal_and_scrubs_api_text() {
+    let (server, dir) = fixture().await;
+    let hostile = "evil\u{1b}]52;c;AAAA\u{7}\u{202e}name";
+    respond_once(
+        &server,
+        route("GET", payments_path()),
+        ok(json!({"items": [{
+            "id": RESOURCE, "status": "completed", "description": hostile,
+            "amount": {"amount": 150000, "currency": "btc"},
+            "created_at": "2026-09-29T10:00:00Z"
+        }], "has_more": false})),
+    )
+    .await;
+    let listed = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .env("COLUMNS", "64")
+        .args([
+            "payments", "list", "--org", ORG, "--env", ENV, "--output", "table",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        stdout(&listed),
+        format!(
+            "{:<36}  {:<9}  AMOUNT\n{RESOURCE}  completed  150000 msats\n\
+             Hidden columns: created_at. Use a wider terminal or --json for every field.\n\
+             1 result.\n",
+            "ID", "STATUS"
+        )
+    );
+
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": hostile})),
+            ok(json!({"id": RESOURCE, "status": "completed", "description": hostile})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let waited = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .args([
+            "payments",
+            "get",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wait",
+            "completed",
+            "--output",
+            "table",
+        ])
+        .assert()
+        .success();
+    for text in [stdout(&waited), stderr(&waited)] {
+        assert!(
+            !text
+                .chars()
+                .any(|c| (c.is_control() && c != '\n') || c == '\u{202e}'),
+            "{text:?}"
+        );
+    }
+    assert!(
+        stderr(&waited).contains("status: evil ]52;c;AAAA  name; waiting for completed"),
+        "{}",
+        stderr(&waited)
+    );
+    assert!(stdout(&waited).contains("description  evil ]52;c;AAAA  name\n"));
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cursor_pagination_is_the_default_and_carries_filters_across_pages() {

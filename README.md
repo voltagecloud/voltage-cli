@@ -195,7 +195,7 @@ Payments and treasury movements carry an ID, generated for you unless you pass `
 
 ## Output
 
-On a terminal, results are readable tables; when piped, they are JSON. `--json` forces JSON and `--output table|json|ndjson` selects explicitly. The JSON envelope is stable:
+On a terminal, results are readable tables; when piped, they are JSON. `--json` forces JSON and `--output table|json|ndjson` selects explicitly. Tables show up to seven of the fields a list's items share (ID, name, status, amount, and similar) with aligned columns, a result count, and the next cursor; amounts are shown in their base units (`msats` or `cents`). A table wider than the terminal (its width, or `COLUMNS`) hides trailing columns and then shortens text cells with `…`, naming what it hid; IDs, timestamps, and amounts are never shortened. Timestamps are shown in UTC to the second, such as `2024-02-27 01:58:51 UTC`; JSON keeps the exact value. A table starts with the outcome only when it adds something, such as `accepted` or `dry_run`, or when there is no data to show. A single resource is shown as aligned `field  value` lines, with nested fields joined by dots; `voltage context` shows each setting as `name  value  (source)`. API text is stripped of terminal control, bidirectional formatting, and invisible characters (including tag characters that can carry hidden text) in tables, notices, and errors. The table layout may change between releases; scripts should use JSON. The JSON envelope is stable:
 
 ```json
 {"http_status":202,"data":null,"resource_id":"PAYMENT_ID","outcome":"accepted"}

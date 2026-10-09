@@ -52,8 +52,10 @@ not precedent. Reviews must approve and document exceptions.
 - Keep device login, token refresh and exchange, and credential selection in
   `auth`. Keep settings, credential storage, and private files in `config`.
   Keep payment values and payment read views in `payment`. Keep secret text
-  in `secret`. Keep result envelopes, redaction, and rendering in `output`.
-  Keep exit-code categories and typed error detail in `error`.
+  in `secret`. Keep result envelopes, redaction, and rendering, including the
+  table layout in `output::human`, in `output`. Keep prompts, progress, notices,
+  the terminal's width, and scrubbing of untrusted text bound for the terminal
+  in `terminal`. Keep exit-code categories and typed error detail in `error`.
 - Name each module for the operation that it performs. Do not give two modules
   the same capability name. For example, keep private-file mechanics in
   `config` and redaction in `output`.
