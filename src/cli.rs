@@ -983,10 +983,10 @@ fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str
             "  voltage payments send --profile prod --wallet WALLET_ID --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --execute\n  voltage payments send --profile prod --wallet WALLET_ID --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --execute",
         ),
         (OperationId::CreatePayment, "receive") => Some(
-            "  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready",
+            "  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready --execute",
         ),
         (OperationId::CreateWallet, "create") => Some(
-            "  voltage wallets create --profile prod --name treasury --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000",
+            "  voltage wallets create --profile prod --name treasury --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000 --execute",
         ),
         _ => None,
     }
@@ -1375,5 +1375,96 @@ mod tests {
                 .is_err()
         );
         assert!(Invocation::try_parse_from(["voltage", "bogus"]).is_err());
+    }
+
+    /// Every `voltage` line in a README shell block, with continuations joined, comments
+    /// dropped, and pipes, redirections, and leading variable assignments cut away.
+    fn readme_examples() -> Vec<String> {
+        let mut examples = Vec::new();
+        let mut shell = false;
+        let mut line = String::new();
+        for raw in include_str!("../README.md").lines() {
+            if raw.starts_with("```") {
+                shell = raw == "```sh";
+                continue;
+            }
+            if !shell {
+                continue;
+            }
+            line.push_str(raw.trim_end_matches('\\'));
+            if raw.ends_with('\\') {
+                continue;
+            }
+            let command = line.split(" #").next().unwrap_or_default();
+            let command = command.split('|').find(|part| part.contains("voltage "));
+            if let Some(command) = command.and_then(|part| part.split(['<', '>']).next()) {
+                let start = command.find("voltage ").unwrap_or_default();
+                examples.push(command[start..].trim().to_owned());
+            }
+            line.clear();
+        }
+        examples
+    }
+
+    /// Every example line in the long help of every command.
+    fn help_examples(cmd: &mut ClapCommand, examples: &mut Vec<String>) {
+        let help = cmd.render_long_help().to_string();
+        if let Some((_, section)) = help.split_once("Examples:") {
+            examples.extend(
+                section
+                    .lines()
+                    .skip(1)
+                    .map(str::trim)
+                    .take_while(|line| line.starts_with("voltage "))
+                    .map(str::to_owned),
+            );
+        }
+        for sub in cmd.get_subcommands_mut() {
+            help_examples(sub, examples);
+        }
+    }
+
+    #[test]
+    fn documented_examples_parse_and_changes_say_whether_to_send() {
+        let mut examples = readme_examples();
+        let from_readme = examples.len();
+        let mut root = command();
+        root.build();
+        help_examples(&mut root, &mut examples);
+        assert!(
+            from_readme >= 40 && examples.len() > from_readme,
+            "{examples:?}"
+        );
+        for example in &examples {
+            // Placeholder IDs stand for real UUIDs; every other placeholder parses as typed.
+            let args = example.split_whitespace().map(|word| {
+                if word.ends_with("_ID") && word.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                {
+                    WALLET
+                } else {
+                    word
+                }
+            });
+            let matches = match command().try_get_matches_from(args) {
+                Ok(matches) => matches,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("{example}: {error}"),
+            };
+            let invocation = Invocation::from_matches(&matches)
+                .unwrap_or_else(|error| panic!("{example}: {error:?}"));
+            if let Command::Api(api) = invocation.command {
+                assert!(
+                    api.operation.method == Method::Get || api.requested != Requested::Unspecified,
+                    "a change without --execute or --dry-run only describes itself: {example}"
+                );
+            }
+        }
     }
 }
