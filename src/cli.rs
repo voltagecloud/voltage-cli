@@ -1377,33 +1377,127 @@ mod tests {
         assert!(Invocation::try_parse_from(["voltage", "bogus"]).is_err());
     }
 
-    /// Every `voltage` line in a README shell block, with continuations joined, comments
-    /// dropped, and pipes, redirections, and leading variable assignments cut away.
-    fn readme_examples() -> Vec<String> {
+    /// The README and the docs index, guides, concepts, reference, and development guide, as
+    /// (path from the repository root, contents).
+    fn user_docs() -> Vec<(PathBuf, String)> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut paths = ["README.md", "docs/README.md", "docs/development.md"]
+            .map(|path| root.join(path))
+            .to_vec();
+        for dir in ["guides", "concepts", "reference"] {
+            for entry in std::fs::read_dir(root.join("docs").join(dir)).unwrap() {
+                paths.push(entry.unwrap().path());
+            }
+        }
+        paths
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).unwrap();
+                (path.strip_prefix(&root).unwrap().to_owned(), text)
+            })
+            .collect()
+    }
+
+    /// Every `voltage` line in a documentation shell block, with continuations joined,
+    /// comments dropped, and pipes, redirections, and leading variable assignments cut away.
+    fn doc_examples() -> Vec<String> {
         let mut examples = Vec::new();
-        let mut shell = false;
-        let mut line = String::new();
-        for raw in include_str!("../README.md").lines() {
-            if raw.starts_with("```") {
-                shell = raw == "```sh";
-                continue;
+        for (_, text) in user_docs() {
+            let mut shell = false;
+            let mut line = String::new();
+            for raw in text.lines().map(str::trim) {
+                if let Some(language) = raw.strip_prefix("```") {
+                    shell = matches!(language, "sh" | "bash" | "shell" | "console");
+                    continue;
+                }
+                if !shell {
+                    continue;
+                }
+                line.push_str(raw.trim_end_matches('\\'));
+                if raw.ends_with('\\') {
+                    continue;
+                }
+                let command = line.split(" #").next().unwrap_or_default();
+                let command = command.split('|').find(|part| part.contains("voltage "));
+                if let Some(command) = command.and_then(|part| part.split(['<', '>']).next()) {
+                    let start = command.find("voltage ").unwrap_or_default();
+                    let command = command[start..].trim();
+                    // `--build` belongs to the development guide's staging wrapper.
+                    if command != "voltage --build" {
+                        examples.push(command.to_owned());
+                    }
+                }
+                line.clear();
             }
-            if !shell {
-                continue;
-            }
-            line.push_str(raw.trim_end_matches('\\'));
-            if raw.ends_with('\\') {
-                continue;
-            }
-            let command = line.split(" #").next().unwrap_or_default();
-            let command = command.split('|').find(|part| part.contains("voltage "));
-            if let Some(command) = command.and_then(|part| part.split(['<', '>']).next()) {
-                let start = command.find("voltage ").unwrap_or_default();
-                examples.push(command[start..].trim().to_owned());
-            }
-            line.clear();
         }
         examples
+    }
+
+    /// GitHub's anchors for a document's headings: lowercase, punctuation dropped, spaces
+    /// as hyphens, and `-1`, `-2`, ... after repeats. Lines inside code fences are skipped.
+    fn anchors(text: &str) -> Vec<String> {
+        let mut anchors: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut fenced = false;
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+            }
+            if fenced || !line.starts_with('#') {
+                continue;
+            }
+            let base: String = line
+                .trim_start_matches('#')
+                .trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+                .map(|c| if c == ' ' { '-' } else { c })
+                .collect();
+            let repeats = seen.iter().filter(|heading| **heading == base).count();
+            anchors.push(match repeats {
+                0 => base.clone(),
+                n => format!("{base}-{n}"),
+            });
+            seen.push(base);
+        }
+        anchors
+    }
+
+    #[test]
+    fn documentation_links_reach_existing_files_and_headings() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for (path, text) in user_docs() {
+            // Markdown links, and the README's HTML image paths.
+            let markdown = text
+                .split("](")
+                .skip(1)
+                .filter_map(|rest| rest.split(')').next());
+            let html = ["src=\"", "srcset=\""]
+                .into_iter()
+                .flat_map(|attribute| text.split(attribute).skip(1))
+                .filter_map(|rest| rest.split('"').next());
+            for link in markdown.chain(html) {
+                if link.contains("://") {
+                    continue;
+                }
+                let (file, fragment) = link.split_once('#').unwrap_or((link, ""));
+                let target = if file.is_empty() {
+                    root.join(&path)
+                } else {
+                    root.join(&path).parent().unwrap().join(file)
+                };
+                let contents = std::fs::read_to_string(&target)
+                    .unwrap_or_else(|error| panic!("{}: {link}: {error}", path.display()));
+                if !fragment.is_empty() {
+                    assert!(
+                        anchors(&contents).iter().any(|anchor| anchor == fragment),
+                        "{}: no heading for {link}",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     /// Every example line in the long help of every command.
@@ -1426,13 +1520,13 @@ mod tests {
 
     #[test]
     fn documented_examples_parse_and_changes_say_whether_to_send() {
-        let mut examples = readme_examples();
-        let from_readme = examples.len();
+        let mut examples = doc_examples();
+        let from_docs = examples.len();
         let mut root = command();
         root.build();
         help_examples(&mut root, &mut examples);
         assert!(
-            from_readme >= 40 && examples.len() > from_readme,
+            from_docs >= 40 && examples.len() > from_docs,
             "{examples:?}"
         );
         for example in &examples {
