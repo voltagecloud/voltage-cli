@@ -3,7 +3,14 @@
 //! Every successful command writes one or more envelopes to stdout or to a private file.
 //! Diagnostics go to stderr so scripts can parse stdout.
 
-use crate::{Error, Result, config::new_private, error::ErrorDetail};
+mod human;
+
+use crate::{
+    Error, Result,
+    config::new_private,
+    error::ErrorDetail,
+    terminal::{self, scrub_line},
+};
 use clap::ValueEnum;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -29,9 +36,6 @@ const SECRET_KEYS: [&str; 12] = [
     "checkout_url",
     "preimage",
 ];
-
-/// Columns shown for list results in table output, in display order.
-const TABLE_COLUMNS: [&str; 5] = ["id", "name", "status", "currency", "environment_id"];
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -117,6 +121,20 @@ pub struct Envelope {
     pub outcome: Outcome,
     #[serde(flatten)]
     pub event: Option<StreamEvent>,
+    /// How a person reads the data; never part of the JSON.
+    #[serde(skip)]
+    pub layout: Layout,
+}
+
+/// How table output lays out a single result. Decided by the command that built the data, not
+/// guessed from its shape, so API or price data can never be read as local settings.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Layout {
+    /// Aligned `field  value` lines.
+    #[default]
+    Fields,
+    /// `{value, source}` settings shown as `name  value  (source)`, from `voltage context`.
+    Settings,
 }
 
 impl Envelope {
@@ -132,6 +150,7 @@ impl Envelope {
             resource_id,
             outcome,
             event: None,
+            layout: Layout::Fields,
         }
     }
 
@@ -143,6 +162,14 @@ impl Envelope {
             None,
             Outcome::Succeeded,
         ))
+    }
+
+    /// A local result made of `{value, source}` settings.
+    pub fn settings(data: impl Serialize) -> Result<Self> {
+        Ok(Self {
+            layout: Layout::Settings,
+            ..Self::local(data)?
+        })
     }
 
     /// One checkout stream event.
@@ -201,7 +228,7 @@ impl Output {
         let mut bytes = match self.format {
             OutputFormat::Table => {
                 let mut buf = Vec::new();
-                human(&mut buf, &envelope)?;
+                human::render(&mut buf, &envelope, terminal::width())?;
                 buf
             }
             OutputFormat::Json | OutputFormat::Ndjson => serde_json::to_vec(&envelope)?,
@@ -251,61 +278,6 @@ pub fn redact(value: &mut Value, secrets: &[&str]) {
     }
 }
 
-fn human(out: &mut impl Write, envelope: &Envelope) -> Result<()> {
-    let resource = envelope
-        .resource_id
-        .map(|id| format!("  {id}"))
-        .unwrap_or_default();
-    writeln!(out, "{}{resource}", envelope.outcome.as_str())?;
-    let data = &envelope.data;
-    let items = data
-        .as_array()
-        .or_else(|| data.get("items").and_then(Value::as_array));
-    if let Some(items) = items {
-        if items.is_empty() {
-            writeln!(out, "No results.")?;
-            return Ok(());
-        }
-        let columns: Vec<_> = TABLE_COLUMNS
-            .iter()
-            .filter(|column| items.iter().any(|item| item.get(**column).is_some()))
-            .collect();
-        if columns.is_empty() {
-            writeln!(out, "{}", serde_json::to_string_pretty(data)?)?;
-        } else {
-            let header: Vec<_> = columns.iter().map(|column| column.to_uppercase()).collect();
-            writeln!(out, "{}", header.join("  "))?;
-            for item in items {
-                let cells: Vec<_> = columns.iter().map(|column| cell(&item[**column])).collect();
-                writeln!(out, "{}", cells.join("  "))?;
-            }
-        }
-    } else if !data.is_null() {
-        writeln!(out, "{}", serde_json::to_string_pretty(data)?)?;
-    }
-    if let Some(cursor) = data.get("next_cursor").and_then(Value::as_str) {
-        writeln!(out, "Next cursor: {}", scrub(cursor))?;
-    }
-    Ok(())
-}
-
-/// Untrusted text bound for the terminal; control characters would let API data rewrite it.
-fn scrub(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
-
-/// One table cell; control characters would let API data rewrite the terminal.
-fn cell(value: &Value) -> String {
-    scrub(
-        &value
-            .as_str()
-            .map(String::from)
-            .unwrap_or_else(|| value.to_string()),
-    )
-}
-
 #[derive(Serialize)]
 struct ErrorReport<'a> {
     error: ErrorBody<'a>,
@@ -337,13 +309,13 @@ pub fn report_error(error: &Error, format: OutputFormat) {
         eprintln!("{body}");
     } else {
         // Messages can interpolate untrusted input; keep control characters off the terminal.
-        eprintln!("error: {}", scrub(&error.message));
+        eprintln!("error: {}", scrub_line(&error.message));
         if let Some(hint) = error.hint {
             // Hints are static today; scrub defensively if they ever become dynamic.
-            eprintln!("hint: {}", scrub(hint));
+            eprintln!("hint: {}", scrub_line(hint));
         }
         if let Some(detail) = body["error"]["detail"].as_object() {
-            eprintln!("details: {}", json!(detail));
+            eprintln!("details: {}", scrub_line(&json!(detail).to_string()));
         }
     }
 }
@@ -383,35 +355,6 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(outcome).unwrap(), outcome.as_str());
         }
-    }
-
-    #[test]
-    fn tables_show_known_columns_and_strip_control_characters() {
-        let envelope = Envelope::new(
-            Some(200),
-            json!({"items":[{"id":"a\u{1b}[31m","name":"x"}],"next_cursor":"n"}),
-            None,
-            Outcome::Retrieved,
-        );
-        let mut out = Vec::new();
-        human(&mut out, &envelope).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert_eq!(text, "retrieved\nID  NAME\na [31m  x\nNext cursor: n\n");
-    }
-
-    #[test]
-    fn cursors_strip_control_characters() {
-        let envelope = Envelope::new(
-            Some(200),
-            json!({"items":[{"id":"a"}],"next_cursor":"n\u{1b}[2J\u{7}"}),
-            None,
-            Outcome::Retrieved,
-        );
-        let mut out = Vec::new();
-        human(&mut out, &envelope).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
-        assert!(text.ends_with("Next cursor: n [2J \n"));
     }
 
     #[test]

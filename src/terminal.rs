@@ -47,13 +47,13 @@ impl Terminal {
     /// Optional information that `--quiet` suppresses.
     pub fn notice(self, message: impl Display) {
         if !self.quiet {
-            eprintln!("{message}");
+            eprintln!("{}", scrub_text(&message.to_string()));
         }
     }
 
     /// Information needed to confirm or recover an operation; `--quiet` never hides it.
     pub fn important(self, message: impl Display) {
-        eprintln!("{message}");
+        eprintln!("{}", scrub_text(&message.to_string()));
     }
 
     /// Read a secret without echo.
@@ -70,6 +70,65 @@ impl Terminal {
             read => Ok(read?),
         }
     }
+}
+
+/// The terminal's width in columns: `COLUMNS` when set, else the controlling terminal's
+/// size while stdout is interactive. crossterm falls back to running `tput` when the size
+/// query fails. `None` means output is not width-limited.
+pub fn width() -> Option<usize> {
+    if let Some(columns) = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|columns| *columns > 0)
+    {
+        return Some(columns);
+    }
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    crossterm::terminal::size()
+        .ok()
+        .map(|(columns, _)| usize::from(columns))
+        .filter(|columns| *columns > 0)
+}
+
+/// Characters that could rewrite, reorder, or hide text on the terminal: C0 and C1
+/// controls, every Unicode `Bidi_Control` mark (including U+061C), zero-width and other
+/// invisible formatting characters, the line and paragraph separators, interlinear
+/// annotation marks, Hangul fillers that render as blank, and the tag characters that can
+/// carry hidden text.
+fn is_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{3164}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
+/// Untrusted text for one line: every unsafe character, including a newline, becomes a space.
+pub fn scrub_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if is_unsafe(c) { ' ' } else { c })
+        .collect()
+}
+
+/// Text that may span lines: newlines stay, and every other unsafe character becomes a space.
+pub fn scrub_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if c != '\n' && is_unsafe(c) { ' ' } else { c })
+        .collect()
 }
 
 /// A blocked read of a terminal, stdin, or FIFO cannot be cancelled, and a runtime waits for
@@ -136,5 +195,32 @@ impl Drop for Progress {
             eprint!("\r\x1b[2K");
             let _ = std::io::stderr().flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrubbing_removes_controls_and_bidirectional_marks() {
+        let hostile = "a\u{1b}[2J\u{9b}b\u{202e}c\u{200b}d\te\nf";
+        assert_eq!(scrub_line(hostile), "a [2J b c d e f");
+        assert_eq!(scrub_text(hostile), "a [2J b c d e\nf");
+        assert_eq!(scrub_line("plain ₿ text"), "plain ₿ text");
+        // The rest of Bidi_Control, invisible operators, soft hyphen, and line separators.
+        assert_eq!(
+            scrub_line("a\u{061c}b\u{2028}c\u{2029}d\u{2060}e\u{2064}f\u{00ad}g"),
+            "a b c d e f g"
+        );
+        // Tag characters can spell hidden ASCII; fillers and annotation marks render blank.
+        assert_eq!(
+            scrub_line("ok\u{e0068}\u{e0069}\u{e0064}\u{e0065}"),
+            "ok    "
+        );
+        assert_eq!(
+            scrub_line("a\u{180e}b\u{3164}c\u{115f}d\u{ffa0}e\u{fff9}f\u{e007f}g"),
+            "a b c d e f g"
+        );
     }
 }
