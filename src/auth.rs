@@ -682,7 +682,21 @@ pub async fn resolve_organization(
     flags: &GlobalFlags,
     submission: &SubmissionState,
 ) -> Result<ApiCredential> {
-    let login = match resolve(settings, scope, flags, submission).await? {
+    let credential = resolve(settings, scope, flags, submission).await?;
+    exchange(settings, scope, flags, credential).await
+}
+
+/// The credential to send to the Voltage API for the scope's organization. An API key is sent
+/// unchanged. A browser login's access token is account-wide and the API does not accept it,
+/// so it is traded at the auth service (OAuth token exchange) for a short-lived token whose
+/// audience is the `--org` organization.
+pub async fn exchange(
+    settings: &Settings,
+    scope: &Scope,
+    flags: &GlobalFlags,
+    credential: Credential,
+) -> Result<ApiCredential> {
+    let login = match credential {
         Credential::ApiKey(key) => return Ok(ApiCredential::ApiKey(key)),
         Credential::Login(login) => login,
     };
@@ -826,6 +840,18 @@ pub async fn discover(
             }
         }
     };
+    list(settings, scope, flags, what, &token).await
+}
+
+/// One discovery listing with a token already in hand: the login's access token for
+/// organizations, or an organization token for environments.
+pub async fn list(
+    settings: &Settings,
+    scope: &Scope,
+    flags: &GlobalFlags,
+    what: Discovery,
+    token: &Secret,
+) -> Result<Value> {
     let name = settings.account_name(scope)?;
     let url = base_url(&settings.account(&name)?.auth_url)?;
     let path = match what {

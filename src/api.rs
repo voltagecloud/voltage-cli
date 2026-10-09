@@ -127,14 +127,14 @@ struct Api {
 impl Api {
     fn new(
         global: &GlobalFlags,
-        invocation: &ApiInvocation,
+        origin: Option<Origin>,
         authorization: Authorization,
     ) -> Result<Self> {
         Ok(Self {
             client: auth::client(global.timeout)?,
             base: auth::base_url(global.api_url.as_deref().unwrap_or(API_URL))?,
             authorization,
-            origin: invocation.origin.clone(),
+            origin,
             terminal: global.terminal(),
         })
     }
@@ -491,7 +491,7 @@ pub async fn execute(
     }
     let authorization =
         Authorization::resolve(invocation, global, settings, scope, submission).await?;
-    let api = Api::new(global, invocation, authorization)?;
+    let api = Api::new(global, invocation.origin.clone(), authorization)?;
     let steps = Steps {
         api: &api,
         invocation,
@@ -510,6 +510,24 @@ pub async fn execute(
                 .await
         }
     }
+}
+
+/// The organization's wallets, in the environment when the scope names one, for a person to
+/// pick from. It reads with the account credential, as `wallets list` does.
+pub async fn wallets(
+    global: &GlobalFlags,
+    credential: ApiCredential,
+    scope: &Scope,
+) -> Result<Value> {
+    let api = Api::new(global, None, Authorization::Account(credential))?;
+    let query: Vec<(String, String)> = scope
+        .single_env()
+        .ok()
+        .map(|env| ("environment_id".to_owned(), env.to_string()))
+        .into_iter()
+        .collect();
+    let path = format!("/organizations/{}/wallets", scope.require_org()?);
+    Ok(api.send(Method::Get, &path, &query, None).await?.body)
 }
 
 /// Whether an API command sends its request, and what decided it.

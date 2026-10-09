@@ -11,6 +11,7 @@ use crate::{
     config::{self, Profile, Scope, Settings},
     context,
     output::{Envelope, Output, OutputFormat, report_error, write_stdout},
+    pick,
     price::{PRICE_URL, PriceService},
     terminal::Terminal,
 };
@@ -129,7 +130,8 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         return out.write(envelope, &[]);
     }
     let mut settings = Settings::open(config::directory(global.config_dir.clone())?)?;
-    let scope = settings.scope(global.scope_selection())?;
+    let mut scope = settings.scope(global.scope_selection())?;
+    pick::fill(&command, &global, &settings, &mut scope, submission).await?;
     match command {
         Command::Api(api) => {
             let execution = Execution::resolve(&api, config::execute_variable()?);
