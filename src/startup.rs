@@ -214,11 +214,11 @@ async fn profiles(
 ) -> Result<Envelope> {
     let _lock = settings.lock(terminal).await?;
     settings.reload()?;
-    let unknown = || Error::usage("Unknown profile");
     match command {
         ProfileCommand::List => Envelope::local(&settings.config.profiles),
         ProfileCommand::Get { name } => {
-            Envelope::local(settings.config.profiles.get(&name).ok_or_else(unknown)?)
+            let profile = settings.config.profiles.get(&name);
+            Envelope::local(profile.ok_or_else(|| settings.unknown_profile(&name))?)
         }
         ProfileCommand::Create { name } => {
             if settings.config.profiles.contains_key(&name) {
@@ -238,7 +238,7 @@ async fn profiles(
         }
         ProfileCommand::Delete { name } => {
             if settings.config.profiles.remove(&name).is_none() {
-                return Err(unknown());
+                return Err(settings.unknown_profile(&name));
             }
             settings.save()?;
             Envelope::local(ProfileDeleted {

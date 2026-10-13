@@ -1,8 +1,9 @@
 //! Failure categories, their documented exit codes, and the typed detail reported with them.
 
-use crate::output::redact;
+use crate::output::{redact, redact_text};
 use serde::Serialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -110,7 +111,8 @@ impl ErrorDetail {
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
-    pub hint: Option<&'static str>,
+    /// The next step to take, naming the command when there is one.
+    pub hint: Option<Cow<'static, str>>,
     pub detail: Option<ErrorDetail>,
     pub(crate) stdout_closed: bool,
 }
@@ -150,8 +152,8 @@ impl Error {
         Self::new(ErrorKind::Interrupted, message)
     }
 
-    pub fn with_hint(mut self, hint: &'static str) -> Self {
-        self.hint = Some(hint);
+    pub fn with_hint(mut self, hint: impl Into<Cow<'static, str>>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
@@ -178,7 +180,9 @@ impl Error {
         self.stdout_closed
     }
 
+    /// Remove the presented credentials from the message and detail; both can quote the API.
     pub fn redacted(mut self, secrets: &[&str]) -> Self {
+        redact_text(&mut self.message, secrets);
         if let Some(detail) = &mut self.detail {
             detail.redact(secrets);
         }
@@ -259,5 +263,7 @@ mod tests {
             redacted,
             json!({"http_status": 404, "data": {"api_key": "[REDACTED]"}})
         );
+        let echoed = Error::api("HTTP 400: Bad key key-1").redacted(&["key-1", ""]);
+        assert_eq!(echoed.message, "HTTP 400: Bad key [REDACTED]");
     }
 }
