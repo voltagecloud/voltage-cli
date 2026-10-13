@@ -6,8 +6,10 @@ Start with the [README](../README.md) for install and a quick start.
 
 - [Install](guides/install.md): platforms, download verification, building from source, credential stores, completions
 - [Log in and use profiles](guides/login-and-profiles.md): browser login, API keys, scope, profiles, `voltage context`
+- [Wallets](guides/wallets.md): create, inspect, ledger, policies, delete
 - [Payments](guides/payments.md): receive, send, wait, invoices, quotes, prices
 - [Requests](guides/requests.md): request bodies, friendly flags, filters, paging
+- [Webhooks](guides/webhooks.md): create with a saved secret, events, deliveries, key rotation
 - [Checkout](guides/checkout.md): session and stream tokens, events
 - [Scripting](guides/scripting.md): JSON, `VOLTAGE_EXECUTE`, running without a person
 
