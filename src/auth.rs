@@ -13,7 +13,7 @@ use crate::{
         Login, Scope, Settings, read_secret,
     },
     secret::Secret,
-    terminal::Terminal,
+    terminal::{self, Terminal},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -393,6 +393,20 @@ pub(crate) fn select<'a>(
             selected: Some(Selected::Saved { name, account }),
         });
     }
+    // A login refreshes only at its recorded origin. An invalid flag is not a mismatch here:
+    // `resolve` reports it as an invalid URL.
+    if account.kind == AccountKind::User
+        && flags
+            .auth_url
+            .as_deref()
+            .and_then(|raw| base_url(raw).ok())
+            .is_some_and(|url| url != account.auth_url)
+    {
+        return Err(Rejected {
+            problem: CredentialProblem::AuthUrlMismatch,
+            selected: Some(Selected::Saved { name, account }),
+        });
+    }
     Ok(Selected::Saved { name, account })
 }
 
@@ -483,13 +497,17 @@ async fn poll_device_grant(
         .interval
         .unwrap_or(MIN_POLL_INTERVAL)
         .clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
+    let started = tokio::time::Instant::now();
     loop {
         if tokio::time::Instant::now() + Duration::from_secs(interval) >= deadline {
             return Err(Error::timeout("Login expired; run voltage login again"));
         }
         terminal
             .during(
-                "Waiting for device approval...",
+                format!(
+                    "Waiting for device approval... {}",
+                    terminal::elapsed(started.elapsed())
+                ),
                 tokio::time::sleep(Duration::from_secs(interval)),
             )
             .await;
@@ -625,12 +643,8 @@ pub async fn resolve(
     match account.kind {
         AccountKind::ApiKey => settings.read_credential(&name),
         AccountKind::User => {
+            // `select` rejected a valid flag that differs from the saved URL.
             let url = base_url(flags.auth_url.as_deref().unwrap_or(&account.auth_url))?;
-            if url != account.auth_url {
-                return Err(Error::usage(
-                    "Saved credentials cannot be refreshed at a different auth URL",
-                ));
-            }
             // Credential writes replace the whole value atomically, so a fresh login is used
             // without the lock. Only a refresh, which spends the single-use refresh token, is
             // serialized.
