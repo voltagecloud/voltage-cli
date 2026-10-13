@@ -3378,7 +3378,7 @@ fn placeholder(word: &str) -> &str {
 async fn documented_changes_pass_as_offline_dry_runs() {
     let (server, dir) = fixture().await;
     let mut settings = seeded_api_key(dir.path(), "key", ACCOUNT_KEY);
-    for name in ["prod", "staging"] {
+    for name in ["prod", "staging", "test"] {
         settings.config.profiles.insert(
             name.into(),
             Profile {

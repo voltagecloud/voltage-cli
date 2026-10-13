@@ -21,3 +21,9 @@ gitignored on purpose: plans are local, disposable handoff notes for chunks of w
 reviewed project documentation or a source of truth. Keep durable decisions and user-facing
 behavior in tracked docs, code, and tests; create a subfolder per work item and revise or
 remove it as work progresses.
+
+## Documentation
+
+- A user-visible change updates its guide or reference under `docs/` and adds a line under
+  **Unreleased** in `CHANGELOG.md`. CI fails a pull request that changes `src/cli.rs` or
+  `api/commands.json` without `CHANGELOG.md`, unless it has the `no-changelog` label.
