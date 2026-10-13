@@ -1,0 +1,33 @@
+name: Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    name: Changelog updated for CLI changes
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a CHANGELOG entry when the command surface changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE"...HEAD)"
+          if grep -qxE 'src/cli\.rs|api/commands\.json' <<<"$changed" \
+            && ! grep -qx 'CHANGELOG.md' <<<"$changed"; then
+            echo "::error::src/cli.rs or api/commands.json changed without CHANGELOG.md. Add a line under Unreleased, or label the PR no-changelog."
+            exit 1
+          fi
