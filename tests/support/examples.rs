@@ -4,11 +4,18 @@
 
 use std::path::PathBuf;
 
-/// The README and the docs index, guides, concepts, reference, and development guide, as
+/// The README, changelog, docs index, tutorial, guides, concepts, reference, and development
+/// guide, as
 /// (path from the repository root, contents).
 pub fn user_docs() -> Vec<(PathBuf, String)> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut paths = ["README.md", "docs/README.md", "docs/development.md"]
+    let mut paths = [
+        "README.md",
+        "CHANGELOG.md",
+        "docs/README.md",
+        "docs/getting-started.md",
+        "docs/development.md",
+    ]
         .map(|path| root.join(path))
         .to_vec();
     for dir in ["guides", "concepts", "reference"] {
