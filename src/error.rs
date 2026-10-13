@@ -3,6 +3,7 @@
 use crate::output::redact;
 use serde::Serialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -110,7 +111,8 @@ impl ErrorDetail {
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
-    pub hint: Option<&'static str>,
+    /// The next step to take, naming the command when there is one.
+    pub hint: Option<Cow<'static, str>>,
     pub detail: Option<ErrorDetail>,
     pub(crate) stdout_closed: bool,
 }
@@ -150,8 +152,8 @@ impl Error {
         Self::new(ErrorKind::Interrupted, message)
     }
 
-    pub fn with_hint(mut self, hint: &'static str) -> Self {
-        self.hint = Some(hint);
+    pub fn with_hint(mut self, hint: impl Into<Cow<'static, str>>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
