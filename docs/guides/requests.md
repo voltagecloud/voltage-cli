@@ -1,6 +1,6 @@
 # Requests
 
-Commands mirror the API contract; see [the command reference](../commands.md) for the full list with routes. Every command and group has descriptive `--help`; body-building commands also show required flag combinations and examples:
+Commands mirror the API contract; see [the command reference](../commands.md) for the full list with routes. `-h` shows a command's usage and options. `--help` adds its notes: required flag combinations, scope, examples for every command that changes something, and a "Learn more" link to the guide for the release you run:
 
 ```sh
 voltage --help
