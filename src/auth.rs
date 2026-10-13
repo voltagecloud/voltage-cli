@@ -13,7 +13,7 @@ use crate::{
         Login, Scope, Settings, read_secret,
     },
     secret::Secret,
-    terminal::Terminal,
+    terminal::{self, Terminal},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -483,13 +483,17 @@ async fn poll_device_grant(
         .interval
         .unwrap_or(MIN_POLL_INTERVAL)
         .clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
+    let started = tokio::time::Instant::now();
     loop {
         if tokio::time::Instant::now() + Duration::from_secs(interval) >= deadline {
             return Err(Error::timeout("Login expired; run voltage login again"));
         }
         terminal
             .during(
-                "Waiting for device approval...",
+                format!(
+                    "Waiting for device approval... {}",
+                    terminal::elapsed(started.elapsed())
+                ),
                 tokio::time::sleep(Duration::from_secs(interval)),
             )
             .await;

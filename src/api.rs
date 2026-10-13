@@ -21,7 +21,7 @@ use crate::{
     payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
     registry::{AuthScheme, Method, Operation, OperationId},
     secret::Secret,
-    terminal::Terminal,
+    terminal::{self, Terminal},
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1092,6 +1092,7 @@ async fn wait_for_payment(
     let mut invoice_presented = false;
     let mut last_status: Option<StatusText> = None;
     let mut last_notice = Instant::now() - STATUS_NOTICE_INTERVAL;
+    let started = Instant::now();
     loop {
         let view = PaymentView::from_body(&response.body);
         if let Some(status) = &view.status
@@ -1145,7 +1146,15 @@ async fn wait_for_payment(
             ))
             .with_detail(ErrorDetail::pending(id)));
         }
-        tokio::time::sleep(pause).await;
+        api.terminal
+            .during(
+                format!(
+                    "Waiting for {target}... {}",
+                    terminal::elapsed(started.elapsed())
+                ),
+                tokio::time::sleep(pause),
+            )
+            .await;
         match tokio::time::timeout_at(deadline, api.read(&path)).await {
             Ok(Ok(next)) => {
                 pause = next.retry_after.unwrap_or_else(|| backoff.pause());
