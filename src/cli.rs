@@ -800,6 +800,17 @@ fn takes_origin(operation: &Operation) -> bool {
     operation.auth.is_checkout() || operation.id == OperationId::CreateEventStreamToken
 }
 
+/// The root help's common commands and where the documentation starts.
+const ROOT_HELP: &str = "Common commands:
+  voltage login                     Sign in through your browser
+  voltage context                   Show the profile, scope, and credential in use
+  voltage payments receive --help   Create an invoice or address to get paid
+  voltage payments send --help      Pay an invoice or address
+  voltage webhooks create --help    Send payment events to your server
+
+Changes are only described until you add --execute.
+Documentation: https://github.com/voltagecloud/voltage-cli/tree/master/docs";
+
 /// The complete command tree, for parsing, help, and completions.
 pub fn command() -> ClapCommand {
     let root = ClapCommand::new("voltage")
@@ -807,9 +818,18 @@ pub fn command() -> ClapCommand {
         .subcommand_required(true)
         .arg_required_else_help(true);
     let root = GlobalFlags::augment_args(root);
-    let root = LocalCommand::augment_subcommands(root);
+    let mut root = LocalCommand::augment_subcommands(root);
+    for name in root
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_owned())
+        .collect::<Vec<_>>()
+    {
+        root = root.mut_subcommand(&name, |sub| describe_local(sub, &mut vec![name.clone()]));
+    }
     // Derived types apply their own doc comments as `about`, so the command's text goes last.
-    add_children(root, &[]).about("Manage wallets, payments, and more with the Voltage API")
+    add_children(root, &[])
+        .about("Manage wallets, payments, and more with the Voltage API")
+        .after_help(ROOT_HELP)
 }
 
 /// Add every registry command below `prefix`, recursing through shared prefixes.
@@ -837,7 +857,10 @@ fn add_children(mut parent: ClapCommand, prefix: &[String]) -> ClapCommand {
                     .arg_required_else_help(true),
                 &path,
             )
-            .about(group_about(&path)),
+            .about(group_about(&path))
+            .after_long_help(learn_more(
+                &path.iter().map(String::as_str).collect::<Vec<_>>(),
+            )),
         };
         parent = parent.subcommand(cmd);
     }
@@ -883,9 +906,15 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
             feature.as_str()
         ));
     }
-    if !notes.is_empty() {
-        cmd = cmd.after_help(notes.join("\n\n"));
-    }
+    notes.push(learn_more(
+        &operation
+            .command
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    ));
+    // `-h` stays short; `--help` adds the notes.
+    cmd = cmd.after_long_help(notes.join("\n\n"));
     if let Some(target) = operation.target {
         cmd = TargetFlags::augment_args(cmd)
             .mut_arg("resource_id", |arg| arg.value_name(target.value_name()));
@@ -976,20 +1005,198 @@ fn friendly_requirements(id: OperationId, command_name: &str) -> Option<&'static
     }
 }
 
-/// Focused examples for the commands where friendly-body combinations are least obvious.
+/// Examples for every command that changes something, plus the reads whose flags are least
+/// obvious. Each `# comment` line says what the command under it does.
 fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str> {
-    match (id, command_name) {
-        (OperationId::CreatePayment, "send") => Some(
-            "  voltage payments send --profile prod --wallet WALLET_ID --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --execute\n  voltage payments send --profile prod --wallet WALLET_ID --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --execute",
-        ),
-        (OperationId::CreatePayment, "receive") => Some(
-            "  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready --execute",
-        ),
-        (OperationId::CreateWallet, "create") => Some(
-            "  voltage wallets create --profile prod --name treasury --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000 --execute",
-        ),
-        _ => None,
+    use OperationId::*;
+    Some(match (id, command_name) {
+        (CreatePayment, "send") => {
+            "  # Pay a Lightning invoice, paying at most 10 sats in fees
+  voltage payments send --profile prod --wallet WALLET_ID --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --execute
+  # Send 1,000 sats on-chain
+  voltage payments send --profile prod --wallet WALLET_ID --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --execute"
+        }
+        (CreatePayment, "receive") => {
+            "  # Create a 1,000 sat Lightning invoice and print it when it is ready
+  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --wait ready --execute
+  # Show the invoice as a QR code and wait until it is paid
+  voltage payments receive --profile prod --wallet WALLET_ID --currency btc --kind bolt11 --amount 1000 --unit sats --qr --wait completed --execute"
+        }
+        (CreatePayment, _) => {
+            "  # Send a complete payment request body from a file
+  voltage payments create --profile prod --data @payment.json --execute"
+        }
+        (GetPayment, _) => {
+            "  # Wait up to two minutes for a payment to settle
+  voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120"
+        }
+        (CheckPayment, _) => {
+            "  # Check whether a payment would be accepted, without sending it
+  voltage payments check --profile prod --data @payment.json --execute"
+        }
+        (CreateTreasuryMovement, _) => {
+            "  # Move funds between treasury accounts
+  voltage treasury movements create --profile prod --data @movement.json --execute"
+        }
+        (CreateWallet, _) => {
+            "  # Create a wallet on a line of credit with a 100,000 sat limit
+  voltage wallets create --profile prod --name treasury --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000 --execute"
+        }
+        (UpdateWallet, _) => {
+            "  # Rename a wallet
+  voltage wallets update WALLET_ID --profile prod --name operations --execute"
+        }
+        (DeleteWallet, _) => {
+            "  # Check the request, then delete the wallet
+  voltage wallets delete WALLET_ID --profile prod --dry-run
+  voltage wallets delete WALLET_ID --profile prod --execute"
+        }
+        (UpdateWalletPolicies, _) => {
+            "  # Save the current policies, edit the file, and send it back
+  voltage wallets policies get WALLET_ID --profile prod --output-file policies.json
+  voltage wallets policies update WALLET_ID --profile prod --data @policies.json --execute"
+        }
+        (UpdateSandboxLineOfCredit, _) => {
+            "  # Change a sandbox line of credit
+  voltage credit-lines update-sandbox LINE_ID --profile prod --data @sandbox.json --execute"
+        }
+        (CreateWebhook, _) => {
+            "  # Send completed receives to your URL; the one-time secret is saved to a private file
+  voltage webhooks create --profile prod --name orders --url https://example.com/voltage --event receive.completed --output-file webhook.json --execute"
+        }
+        (UpdateWebhook, _) => {
+            "  # Replace the event selection; list every event you still want
+  voltage webhooks update WEBHOOK_ID --profile prod --event receive.completed --event send.failed --execute"
+        }
+        (DeleteWebhook, _) => {
+            "  # Check the request, then delete the webhook
+  voltage webhooks delete WEBHOOK_ID --profile prod --dry-run
+  voltage webhooks delete WEBHOOK_ID --profile prod --execute"
+        }
+        (GenerateWebhookKey, _) => {
+            "  # Rotate the shared secret and save the new one to a private file
+  voltage webhooks keys rotate WEBHOOK_ID --profile prod --output-file webhook-key.json --execute"
+        }
+        (TestWebhook, _) => {
+            "  # Send a test delivery with a delivery_id and a sample payload
+  voltage webhooks test WEBHOOK_ID --profile prod --data @test-delivery.json --execute"
+        }
+        (StartWebhookAsUser, _) => {
+            "  # Resume deliveries
+  voltage webhooks start WEBHOOK_ID --profile prod --execute"
+        }
+        (StopWebhookAsUser, _) => {
+            "  # Pause deliveries
+  voltage webhooks stop WEBHOOK_ID --profile prod --execute"
+        }
+        (RetryWebhookDelivery, _) => {
+            "  # Deliver a failed event again
+  voltage webhooks deliveries retry DELIVERY_ID --profile prod --webhook WEBHOOK_ID --execute"
+        }
+        (AbandonWebhookDelivery, _) => {
+            "  # Stop retrying a delivery
+  voltage webhooks deliveries abandon DELIVERY_ID --profile prod --webhook WEBHOOK_ID --execute"
+        }
+        (RequestAQuote, _) => {
+            "  # Quote $10 in BTC for a USD payment on a line of credit
+  voltage quotes create --profile prod --credit-line CREDIT_LINE_ID --network mutinynet --amount 10 --unit usd --to btc --execute"
+        }
+        (CreateSession, _) => {
+            "  # Create a hosted checkout session; its one-time token is saved to a private file
+  voltage checkout sessions create --profile prod --data @session.json --output-file session.json --execute"
+        }
+        (CreateEventStreamToken, _) => {
+            "  # Create a checkout event stream token and save it to a private file
+  voltage checkout streams create --profile prod --data @stream.json --output-file stream-token.json --execute"
+        }
+        (UpdateSettings, _) => {
+            "  # Replace the environment's checkout settings
+  voltage checkout settings update --profile prod --data @settings.json --execute"
+        }
+        (GetEvents, _) => {
+            "  # Follow checkout events with a stream token read from stdin
+  voltage checkout events watch --token-file - --json"
+        }
+        _ => return None,
+    })
+}
+
+/// Where each part of the CLI is explained, under `docs/`.
+fn guide(path: &[&str]) -> &'static str {
+    match path {
+        [
+            "login" | "logout" | "auth" | "organizations" | "environments" | "profiles" | "context",
+            ..,
+        ] => "guides/login-and-profiles.md",
+        ["wallets", ..] => "guides/wallets.md",
+        ["webhooks", ..] => "guides/webhooks.md",
+        ["checkout", ..] => "guides/checkout.md",
+        [
+            "payments" | "quotes" | "credit-lines" | "treasury" | "price" | "convert",
+            ..,
+        ] => "guides/payments.md",
+        ["completions", ..] => "guides/install.md",
+        _ => "README.md",
     }
+}
+
+/// The guide for `path` in the docs of this release, so the page matches the binary.
+fn learn_more(path: &[&str]) -> String {
+    format!(
+        "Learn more: https://github.com/voltagecloud/voltage-cli/blob/v{}/docs/{}",
+        env!("CARGO_PKG_VERSION"),
+        guide(path)
+    )
+}
+
+/// Examples for commands the CLI defines itself rather than the API contract.
+fn local_examples(path: &[&str]) -> Option<&'static str> {
+    Some(match path {
+        ["login"] => {
+            "  # Sign in through your browser and save the login as `work`
+  voltage login --account work"
+        }
+        ["auth", "import-key"] => {
+            "  # Save an environment API key read from stdin
+  voltage auth import-key --account ci --stdin < key.txt"
+        }
+        ["profiles", "create"] => {
+            "  # Save an organization, environment, and credential as `prod`
+  voltage profiles create prod --org ORG_ID --env ENV_ID --account work"
+        }
+        ["context"] => {
+            "  # Show what a command with this profile would use, and where each value came from
+  voltage context --profile prod"
+        }
+        ["convert"] => {
+            "  # What $10 buys in bitcoin now, and 21,000 sats in dollars on a past date
+  voltage convert 10 usd --to btc
+  voltage convert 21000 sats --to usd --at 2026-09-01T00:00:00Z"
+        }
+        _ => return None,
+    })
+}
+
+/// Add `Examples:` and `Learn more:` to the long help of the CLI's own commands, which
+/// clap derives without them.
+fn describe_local(mut cmd: ClapCommand, path: &mut Vec<String>) -> ClapCommand {
+    let words: Vec<&str> = path.iter().map(String::as_str).collect();
+    let mut notes = Vec::new();
+    if let Some(examples) = local_examples(&words) {
+        notes.push(format!("Examples:\n{examples}"));
+    }
+    notes.push(learn_more(&words));
+    cmd = cmd.after_long_help(notes.join("\n\n"));
+    for name in cmd
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_owned())
+        .collect::<Vec<_>>()
+    {
+        path.push(name.clone());
+        cmd = cmd.mut_subcommand(&name, |sub| describe_local(sub, path));
+        path.pop();
+    }
+    cmd
 }
 
 /// The generated flag for one documented filter, typed by the contract's schema.
@@ -1461,13 +1668,83 @@ mod tests {
                     .lines()
                     .skip(1)
                     .map(str::trim)
-                    .take_while(|line| line.starts_with("voltage "))
+                    .take_while(|line| !line.is_empty())
+                    .filter(|line| !line.starts_with('#'))
+                    // Keep the command, not a redirection of its input or output.
+                    .map(|line| {
+                        line.split(['<', '>', '|'])
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                    })
                     .map(str::to_owned),
             );
         }
         for sub in cmd.get_subcommands_mut() {
             help_examples(sub, examples);
         }
+    }
+
+    /// Every command below `cmd`, by path, with its rendered long help.
+    fn long_helps(cmd: &mut ClapCommand, path: &mut Vec<String>, out: &mut Vec<(String, String)>) {
+        out.push((path.join(" "), cmd.render_long_help().to_string()));
+        for sub in cmd.get_subcommands_mut() {
+            path.push(sub.get_name().to_owned());
+            long_helps(sub, path, out);
+            path.pop();
+        }
+    }
+
+    #[test]
+    fn every_change_has_an_example_and_every_command_links_its_guide() {
+        let mut root = command();
+        root.build();
+        let mut helps = Vec::new();
+        long_helps(&mut root, &mut vec!["voltage".to_owned()], &mut helps);
+        let help = |path: &str| {
+            helps
+                .iter()
+                .find(|(name, _)| name == path)
+                .map(|(_, help)| help.as_str())
+                .unwrap_or_else(|| panic!("no command {path}"))
+        };
+        let changes = OPERATIONS
+            .iter()
+            .filter(|operation| operation.method != Method::Get)
+            .map(|operation| format!("voltage {}", operation.command.join(" ")))
+            .chain(
+                PAYMENT_ALIASES
+                    .iter()
+                    .map(|(name, _)| format!("voltage payments {name}")),
+            );
+        for path in changes {
+            assert!(
+                help(&path).contains("Examples:\n  #"),
+                "{path} has no example"
+            );
+        }
+        let root_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let prefix = format!(
+            "Learn more: https://github.com/voltagecloud/voltage-cli/blob/v{}/docs/",
+            env!("CARGO_PKG_VERSION")
+        );
+        for (path, help) in helps.iter().filter(|(path, _)| path != "voltage") {
+            // Clap's generated `help` subcommands print other commands' help.
+            if path.split(' ').any(|word| word == "help") {
+                continue;
+            }
+            let page = help
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("{path} has no Learn more link"));
+            assert!(root_dir.join("docs").join(page).is_file(), "{path}: {page}");
+        }
+        // `-h` stays short: the notes are only in `--help`.
+        let short = command()
+            .try_get_matches_from(["voltage", "payments", "send", "-h"])
+            .unwrap_err()
+            .to_string();
+        assert!(!short.contains("Examples:") && !short.contains("Learn more:"));
     }
 
     #[test]
