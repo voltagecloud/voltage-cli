@@ -78,7 +78,7 @@ python3 scripts/check-coverage.py
 Integration tests start mock HTTP servers on port 0 and never contact a real service. They
 cover every operation in the contract, query encoding, complete JSON bodies, credential
 selection, describe-by-default changes, secret output, pagination, payment waits, uncertain submissions,
-checkout tokens and streams, and the credential lifecycle. Every change the docs show with `--execute` also runs as an offline `--dry-run`, so documented flags, units, and scope keep validating. Live payment tests must use an
+checkout tokens and streams, and the credential lifecycle. Every change the docs or `--help` examples show with `--execute` also runs as an offline `--dry-run`, so documented flags, units, and scope keep validating. Live payment tests must use an
 explicitly configured test-network wallet; routine tests never send a live payment.
 
 `docs/reference/global-flags.md` is rendered from the command definitions; after changing a global flag, run `VOLTAGE_BLESS=1 cargo test` to regenerate it, since plain `cargo test` fails on a stale copy. Tests also require every `VOLTAGE_*` variable read in `src/` to appear in `docs/reference/environment.md`, and every exit code in `docs/reference/exit-codes.md`.
