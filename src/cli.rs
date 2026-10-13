@@ -1818,6 +1818,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn troubleshooting_covers_every_exit_code_and_credential_problem() {
+        use crate::config::CredentialProblem as Problem;
+        let text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/guides/troubleshooting.md"),
+        )
+        .unwrap()
+        // Git may check the file out with CRLF line endings, as on Windows.
+        .replace("\r\n", "\n");
+        for code in [1, 2, 3, 4, 5, 6, 130] {
+            assert!(
+                text.contains(&format!("\n### Exit code {code}\n")),
+                "exit code {code}"
+            );
+        }
+        // A new problem fails to compile here until it has an entry.
+        let name = |problem: Problem| match problem {
+            Problem::EmptyApiKey => "empty_api_key",
+            Problem::NoCredential => "no_credential",
+            Problem::MultipleCredentials => "multiple_credentials",
+            Problem::UnknownCredential => "unknown_credential",
+            Problem::BoundElsewhere => "bound_elsewhere",
+        };
+        for problem in [
+            Problem::EmptyApiKey,
+            Problem::NoCredential,
+            Problem::MultipleCredentials,
+            Problem::UnknownCredential,
+            Problem::BoundElsewhere,
+        ] {
+            let name = name(problem);
+            assert_eq!(serde_json::to_value(problem).unwrap(), name);
+            assert!(text.contains(&format!("\n### `{name}`\n")), "{name}");
+        }
+    }
+
     /// Every command below `cmd`, by path, with its rendered long help.
     fn long_helps(cmd: &mut ClapCommand, path: &mut Vec<String>, out: &mut Vec<(String, String)>) {
         out.push((path.join(" "), cmd.render_long_help().to_string()));

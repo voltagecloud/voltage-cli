@@ -22,6 +22,12 @@ reviewed project documentation or a source of truth. Keep durable decisions and 
 behavior in tracked docs, code, and tests; create a subfolder per work item and revise or
 remove it as work progresses.
 
+## Documentation
+
+- A user-visible change updates its guide or reference under `docs/` and adds a line under
+  **Unreleased** in `CHANGELOG.md`. CI fails a pull request that changes `src/cli.rs` or
+  `api/commands.json` without `CHANGELOG.md`, unless it has the `no-changelog` label.
+
 ## Agent friction log
 
 The CLI must be easy for AI agents to use. When it is not, record why in

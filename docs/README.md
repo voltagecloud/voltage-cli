@@ -1,6 +1,6 @@
 # Voltage CLI documentation
 
-Start with the [README](../README.md) for install and a quick start.
+Start with the [README](../README.md) for install and a quick start, or follow [getting started](getting-started.md) from install to a settled test payment.
 
 ## Do a task
 
@@ -11,6 +11,7 @@ Start with the [README](../README.md) for install and a quick start.
 - [Requests](guides/requests.md): request bodies, friendly flags, filters, paging
 - [Webhooks](guides/webhooks.md): create with a saved secret, events, deliveries, key rotation
 - [Checkout](guides/checkout.md): session and stream tokens, events
+- [Troubleshooting](guides/troubleshooting.md): what each exit code and error means, and the fix
 - [Scripting](guides/scripting.md): JSON, `VOLTAGE_EXECUTE`, running without a person
 
 ## Look it up
