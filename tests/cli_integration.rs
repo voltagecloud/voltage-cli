@@ -3417,10 +3417,10 @@ fn placeholder(word: &str) -> &str {
     }
 }
 
-/// Every change the docs show with `--execute` also passes as a dry run, offline: flags,
-/// units, and scope still validate as documented, and nothing reaches the API.
-#[tokio::test(flavor = "multi_thread")]
-async fn documented_changes_pass_as_offline_dry_runs() {
+/// Run each example that sends a change as an offline `--dry-run --json` instead, and
+/// require that it succeeds without a request reaching the API: flags, units, and scope
+/// still validate as documented.
+async fn assert_offline_dry_runs(examples: Vec<String>, minimum: usize) {
     let (server, dir) = fixture().await;
     let mut settings = seeded_api_key(dir.path(), "key", ACCOUNT_KEY);
     for name in ["prod", "staging", "test"] {
@@ -3434,13 +3434,13 @@ async fn documented_changes_pass_as_offline_dry_runs() {
         );
     }
     settings.save().unwrap();
-    let changes: Vec<String> = examples::doc_examples()
+    let changes: Vec<String> = examples
         .into_iter()
         .filter(|example| example.split_whitespace().any(|word| word == "--execute"))
-        // `--data` reads a file the docs only name; request body tests cover it.
+        // `--data` reads a file the examples only name; request body tests cover it.
         .filter(|example| !example.contains("--data"))
         .collect();
-    assert!(changes.len() >= 15, "{changes:?}");
+    assert!(changes.len() >= minimum, "{changes:?}");
     for example in &changes {
         let args = example
             .split_whitespace()
@@ -3465,8 +3465,73 @@ async fn documented_changes_pass_as_offline_dry_runs() {
         let body: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(body["outcome"], "dry_run", "{example}");
     }
-    assert!(!dir.path().join("webhook.json").exists());
+    // Dry runs never create an `--output-file`.
+    let created: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".json"))
+        .collect();
+    assert!(created.is_empty(), "{created:?}");
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// The lines of the section of `help` under `heading`, up to the next blank line.
+fn help_section<'a>(help: &'a str, heading: &str) -> Vec<&'a str> {
+    help.split_once(&format!("\n{heading}\n"))
+        .map(|(_, section)| {
+            section
+                .lines()
+                .take_while(|line| !line.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every example in each command's `--help`, found by walking the command lists the binary
+/// prints, as a person or an agent reading help would.
+fn help_examples(dir: &Path) -> Vec<String> {
+    let mut examples = Vec::new();
+    let mut pending = vec![Vec::<String>::new()];
+    while let Some(path) = pending.pop() {
+        let output = human_process_at(dir, "http://127.0.0.1:9")
+            .args(&path)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{path:?}");
+        let help = String::from_utf8(output.stdout).unwrap();
+        for line in help_section(&help, "Commands:") {
+            let name = line.split_whitespace().next().unwrap_or_default();
+            if name != "help" {
+                pending.push(path.iter().cloned().chain([name.to_owned()]).collect());
+            }
+        }
+        examples.extend(
+            help_section(&help, "Examples:")
+                .into_iter()
+                .map(str::trim)
+                .filter(|line| line.starts_with("voltage "))
+                .map(|line| {
+                    line.split(['<', '>', '|'])
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned()
+                }),
+        );
+    }
+    examples
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn documented_changes_pass_as_offline_dry_runs() {
+    assert_offline_dry_runs(examples::doc_examples(), 15).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn help_examples_pass_as_offline_dry_runs() {
+    let dir = private_tempdir();
+    assert_offline_dry_runs(help_examples(dir.path()), 15).await;
 }
 
 // ---------------------------------------------------------------------------------------
