@@ -3400,6 +3400,75 @@ async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
     server.verify().await;
 }
 
+mod examples {
+    include!("support/examples.rs");
+}
+
+/// A documented placeholder as a value the CLI accepts: IDs become a fixed UUID, and an
+/// invoice or address a syntactically plausible stand-in. Dry runs never send them.
+fn placeholder(word: &str) -> &str {
+    match word {
+        "BOLT11_INVOICE" => "lntbs1example",
+        "BITCOIN_ADDRESS" => "tb1qexampleaddress",
+        id if id.ends_with("_ID") && id.chars().all(|c| c.is_ascii_uppercase() || c == '_') => {
+            RESOURCE
+        }
+        word => word,
+    }
+}
+
+/// Every change the docs show with `--execute` also passes as a dry run, offline: flags,
+/// units, and scope still validate as documented, and nothing reaches the API.
+#[tokio::test(flavor = "multi_thread")]
+async fn documented_changes_pass_as_offline_dry_runs() {
+    let (server, dir) = fixture().await;
+    let mut settings = seeded_api_key(dir.path(), "key", ACCOUNT_KEY);
+    for name in ["prod", "staging"] {
+        settings.config.profiles.insert(
+            name.into(),
+            Profile {
+                organization_id: uuid(ORG),
+                environment_id: uuid(ENV),
+                account: "key".into(),
+            },
+        );
+    }
+    settings.save().unwrap();
+    let changes: Vec<String> = examples::doc_examples()
+        .into_iter()
+        .filter(|example| example.split_whitespace().any(|word| word == "--execute"))
+        // `--data` reads a file the docs only name; request body tests cover it.
+        .filter(|example| !example.contains("--data"))
+        .collect();
+    assert!(changes.len() >= 15, "{changes:?}");
+    for example in &changes {
+        let args = example
+            .split_whitespace()
+            .skip(1)
+            .filter(|word| *word != "--execute")
+            .map(placeholder);
+        // Examples without a profile leave the scope to a picker; the variables stand in.
+        let result = cli(dir.path(), &server)
+            .current_dir(dir.path())
+            .env("VOLTAGE_ORGANIZATION_ID", ORG)
+            .env("VOLTAGE_ENVIRONMENT_ID", ENV)
+            .env("VOLTAGE_WALLET_ID", WALLET)
+            .args(args)
+            .arg("--dry-run")
+            .assert();
+        let output = result.get_output();
+        assert!(
+            output.status.success(),
+            "{example}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["outcome"], "dry_run", "{example}");
+    }
+    assert!(!dir.path().join("webhook.json").exists());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------------------
 // Prices and conversions
 // ---------------------------------------------------------------------------------------
