@@ -78,7 +78,7 @@ python3 scripts/check-coverage.py
 Integration tests start mock HTTP servers on port 0 and never contact a real service. They
 cover every operation in the contract, query encoding, complete JSON bodies, credential
 selection, describe-by-default changes, secret output, pagination, payment waits, uncertain submissions,
-checkout tokens and streams, and the credential lifecycle. Live payment tests must use an
+checkout tokens and streams, and the credential lifecycle. Every change the docs show with `--execute` also runs as an offline `--dry-run`, so documented flags, units, and scope keep validating. Live payment tests must use an
 explicitly configured test-network wallet; routine tests never send a live payment.
 
 The manual CRAP risk check is described in [the style guide](quality.md#crap-risk-check).
