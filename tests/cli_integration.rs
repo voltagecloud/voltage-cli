@@ -8,6 +8,8 @@
 use assert_cmd::{Command, assert::Assert};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
+    ffi::OsString,
     path::Path,
     sync::{
         Arc,
@@ -4102,6 +4104,111 @@ async fn device_approval_on_a_terminal_shows_how_long_it_has_waited() {
         run.shown
     );
     server.verify().await;
+}
+
+mod examples {
+    include!("support/examples.rs");
+}
+
+/// A documented placeholder as a value the CLI accepts: IDs become a fixed UUID, and an
+/// invoice or address a syntactically plausible stand-in. Dry runs never send them.
+fn placeholder(word: &str) -> &str {
+    match word {
+        "BOLT11_INVOICE" => "lntbs1example",
+        "BITCOIN_ADDRESS" => "tb1qexampleaddress",
+        id if id.ends_with("_ID") && id.chars().all(|c| c.is_ascii_uppercase() || c == '_') => {
+            RESOURCE
+        }
+        word => word,
+    }
+}
+
+/// Request bodies for the files the documented `--data` examples name, just complete enough
+/// for local validation. A new `@FILE` in the docs needs a body here.
+fn data_stubs() -> [(&'static str, Value); 3] {
+    [
+        (
+            "payment.json",
+            json!({"id": RESOURCE, "wallet_id": WALLET, "currency": "btc", "type": "bolt11",
+                   "data": {"payment_request": "lntbs1example"}}),
+        ),
+        ("policies.json", json!({})),
+        (
+            "test-delivery.json",
+            json!({"delivery_id": RESOURCE, "payload": {}}),
+        ),
+    ]
+}
+
+/// The names in a directory, to show that a run created nothing in it.
+fn file_names(dir: &Path) -> BTreeSet<OsString> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect()
+}
+
+/// Every change the docs show with `--execute` also passes as a dry run, offline: flags,
+/// units, scope, and `--data` bodies still validate as documented, nothing reaches the API,
+/// and no file is created.
+#[tokio::test(flavor = "multi_thread")]
+async fn documented_changes_pass_as_offline_dry_runs() {
+    let (server, dir) = fixture().await;
+    let mut settings = seeded_api_key(dir.path(), "key", ACCOUNT_KEY);
+    for name in ["prod", "staging"] {
+        settings.config.profiles.insert(
+            name.into(),
+            Profile {
+                organization_id: uuid(ORG),
+                environment_id: uuid(ENV),
+                account: "key".into(),
+            },
+        );
+    }
+    settings.save().unwrap();
+    let stubs = data_stubs();
+    for (name, body) in &stubs {
+        std::fs::write(dir.path().join(name), body.to_string()).unwrap();
+    }
+    // `--data -` reads stdin, which the docs fill with `cat payment.json |`.
+    let stdin = stubs[0].1.to_string();
+    let before = file_names(dir.path());
+    let changes: Vec<String> = examples::doc_examples()
+        .into_iter()
+        .filter(|example| example.split_whitespace().any(|word| word == "--execute"))
+        .collect();
+    assert!(changes.len() >= 19, "{changes:?}");
+    for example in &changes {
+        let args = example
+            .split_whitespace()
+            .skip(1)
+            .filter(|word| *word != "--execute")
+            .map(placeholder);
+        // Examples without a profile leave the scope to a picker; the variables stand in.
+        let mut command = cli(dir.path(), &server);
+        command
+            .current_dir(dir.path())
+            .env("VOLTAGE_ORGANIZATION_ID", ORG)
+            .env("VOLTAGE_ENVIRONMENT_ID", ENV)
+            .env("VOLTAGE_WALLET_ID", WALLET)
+            .args(args)
+            .arg("--dry-run");
+        if example.contains("--data -") {
+            command.write_stdin(stdin.clone());
+        }
+        let result = command.assert();
+        let output = result.get_output();
+        assert!(
+            output.status.success(),
+            "{example}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["outcome"], "dry_run", "{example}");
+    }
+    // No `--output-file`, journal, or other file appears.
+    assert_eq!(file_names(dir.path()), before);
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------
