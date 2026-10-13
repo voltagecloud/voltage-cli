@@ -95,6 +95,26 @@ impl Authorization {
             Self::None => Vec::new(),
         }
     }
+
+    /// The next step when the API rejects this credential (401) or what it can reach (403).
+    /// Checkout tokens are never the account credential, so they name their own source.
+    fn rejection_hint(&self, status: u16) -> Option<&'static str> {
+        match (self, status) {
+            (Self::Account(_), 401) => Some(
+                "Check the credential with `voltage auth status`, or sign in again with `voltage login`.",
+            ),
+            (Self::Account(_), 403) => Some(
+                "Check the organization, environment, and credential in use with `voltage context`.",
+            ),
+            (Self::CheckoutSession(_), 401 | 403) => Some(
+                "Check that --token-file or VOLTAGE_CHECKOUT_TOKEN holds this checkout session's token; checkout never uses the account credential.",
+            ),
+            (Self::CheckoutStream(_), 401 | 403) => Some(
+                "Check that --token-file or VOLTAGE_STREAM_TOKEN holds this checkout stream's token; checkout never uses the account credential.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// A checkout credential from `--token-file`, else from `variable`.
@@ -226,15 +246,21 @@ impl Api {
             })?
         };
         if !(200..300).contains(&status) {
-            return Err(Error::new(
+            let rejection = ApiErrorView::deserialize(&body).unwrap_or_default().error;
+            let mut error = Error::new(
                 ErrorKind::for_http_status(status),
-                rejection_message(status, &body),
-            )
-            .with_detail(ErrorDetail::Http {
-                http_status: status,
-                data: body,
-            })
-            .redacted(&self.secrets()));
+                rejection.message(status),
+            );
+            let hint = self.authorization.rejection_hint(status);
+            if let Some(hint) = hint.or_else(|| rejection.hint()) {
+                error = error.with_hint(hint);
+            }
+            return Err(error
+                .with_detail(ErrorDetail::Http {
+                    http_status: status,
+                    data: body,
+                })
+                .redacted(&self.secrets()));
         }
         Ok(Response {
             status,
@@ -311,6 +337,7 @@ pub(crate) enum BodyFailure {
 #[serde(rename_all = "snake_case")]
 enum ApiErrorType {
     FeatureFlagDisabled,
+    QuoteRequired,
     #[default]
     #[serde(other)]
     Other,
@@ -330,19 +357,34 @@ struct ApiErrorView {
     error: ApiErrorBody,
 }
 
-/// The message for a rejected request; a disabled organization feature names the fix.
-fn rejection_message(status: u16, body: &Value) -> String {
-    let rejection = ApiErrorView::deserialize(body).unwrap_or_default();
-    match rejection.error.kind {
-        ApiErrorType::FeatureFlagDisabled => format!(
-            "Voltage API returned HTTP {status}: {}. Ask Voltage to enable this feature for the organization.",
-            rejection
-                .error
-                .detail
-                .as_deref()
-                .unwrap_or("this feature is not enabled for the organization")
-        ),
-        ApiErrorType::Other => format!("Voltage API returned HTTP {status}"),
+impl ApiErrorBody {
+    /// The message for a rejected request: the API's own reason for a client error (4xx),
+    /// and for a disabled organization feature, the fix. A server error's text is not a
+    /// reason to show; it stays in the detail.
+    fn message(&self, status: u16) -> String {
+        let reason = self
+            .detail
+            .as_deref()
+            .filter(|_| (400..500).contains(&status));
+        match (&self.kind, reason) {
+            (ApiErrorType::FeatureFlagDisabled, reason) => format!(
+                "Voltage API returned HTTP {status}: {}. Ask Voltage to enable this feature for the organization.",
+                reason.unwrap_or("this feature is not enabled for the organization")
+            ),
+            (_, Some(reason)) => format!("Voltage API returned HTTP {status}: {reason}"),
+            (_, None) => format!("Voltage API returned HTTP {status}"),
+        }
+    }
+
+    /// The next step an error type names. The CLI has not read the wallet, so a missing
+    /// quote describes the wallets that need one rather than this wallet.
+    fn hint(&self) -> Option<&'static str> {
+        match self.kind {
+            ApiErrorType::QuoteRequired => Some(
+                "A wallet on a USD line of credit needs a quote for each payment. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.",
+            ),
+            ApiErrorType::FeatureFlagDisabled | ApiErrorType::Other => None,
+        }
     }
 }
 
@@ -1407,24 +1449,81 @@ mod tests {
     }
 
     #[test]
-    fn disabled_features_are_explained_and_other_rejections_stay_generic() {
-        let disabled = json!({"error": {
+    fn credential_rejections_name_the_next_step_for_their_own_credential() {
+        let account = Authorization::Account(ApiCredential::ApiKey(Secret::new("key".into())));
+        let hint = |authorization: &Authorization, status| authorization.rejection_hint(status);
+        assert!(hint(&account, 401).unwrap().contains("voltage auth status"));
+        assert!(hint(&account, 403).unwrap().contains("voltage context"));
+        assert_eq!(hint(&account, 404), None);
+        assert_eq!(hint(&account, 500), None);
+        let session = Authorization::CheckoutSession(Secret::new("session".into()));
+        for status in [401, 403] {
+            let next = hint(&session, status).unwrap();
+            assert!(next.contains("VOLTAGE_CHECKOUT_TOKEN"), "{next}");
+            assert!(!next.contains("voltage auth status"), "{next}");
+        }
+        let stream = Authorization::CheckoutStream(Secret::new("stream".into()));
+        assert!(hint(&stream, 401).unwrap().contains("VOLTAGE_STREAM_TOKEN"));
+        assert_eq!(hint(&session, 404), None);
+        assert_eq!(hint(&Authorization::None, 401), None);
+    }
+
+    /// The parsed `error` object of a rejection body.
+    fn rejection(body: Value) -> ApiErrorBody {
+        ApiErrorView::deserialize(body).unwrap_or_default().error
+    }
+
+    #[test]
+    fn rejections_lead_with_the_api_reason_and_explain_known_types() {
+        let disabled = rejection(json!({"error": {
             "type": "feature_flag_disabled", "code": "disabled",
             "detail": "OnChain payments are not enabled for this organization",
             "context": {"feature": "on_chain"}
-        }});
+        }}));
         assert_eq!(
-            rejection_message(400, &disabled),
+            disabled.message(400),
             "Voltage API returned HTTP 400: OnChain payments are not enabled for this organization. Ask Voltage to enable this feature for the organization."
         );
-        let other = json!({"error": {"type": "invalid_amount", "detail": "too small"}});
+        let other = rejection(json!({"error": {"type": "invalid_amount", "detail": "too small"}}));
         assert_eq!(
-            rejection_message(400, &other),
+            other.message(400),
+            "Voltage API returned HTTP 400: too small"
+        );
+        assert_eq!(other.hint(), None);
+        let quote = rejection(json!({"error": {
+            "type": "quote_required", "code": "required",
+            "detail": "Quote is required for payment",
+            "context": {"field": "quote_id", "required": true}
+        }}));
+        assert_eq!(
+            quote.message(400),
+            "Voltage API returned HTTP 400: Quote is required for payment"
+        );
+        let hint = quote.hint().unwrap();
+        assert!(hint.starts_with("A wallet on a USD line of credit needs a quote"));
+        assert!(hint.contains("voltage quotes create"));
+        assert!(hint.contains("BTC line of credit needs no quote"));
+        assert_eq!(
+            rejection(json!({"error": {"type": "invalid_amount"}})).message(400),
             "Voltage API returned HTTP 400"
         );
         assert_eq!(
-            rejection_message(502, &Value::Null),
+            rejection(Value::Null).message(502),
             "Voltage API returned HTTP 502"
+        );
+    }
+
+    #[test]
+    fn server_errors_keep_their_text_out_of_the_message() {
+        let internal =
+            rejection(json!({"error": {"type": "internal", "detail": "db pool exhausted"}}));
+        assert_eq!(internal.message(500), "Voltage API returned HTTP 500");
+        let disabled = rejection(json!({"error": {
+            "type": "feature_flag_disabled", "detail": "internal text"
+        }}));
+        assert_eq!(
+            disabled.message(503),
+            "Voltage API returned HTTP 503: this feature is not enabled for the organization. Ask Voltage to enable this feature for the organization."
         );
     }
 

@@ -61,6 +61,14 @@ pub fn render(out: &mut impl Write, envelope: &Envelope, width: Option<usize>) -
     Ok(())
 }
 
+/// An error's detail as aligned `field  value` lines, or one line when it is not an object.
+pub fn detail(out: &mut impl Write, detail: &Value) -> Result<()> {
+    match detail {
+        Value::Object(map) => fields(out, map, false),
+        other => Ok(writeln!(out, "{}", cell(other))?),
+    }
+}
+
 /// A bare array, or a page's `items` or `entries`.
 fn list_items(data: &Value) -> Option<&[Value]> {
     data.as_array()

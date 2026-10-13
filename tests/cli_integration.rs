@@ -121,7 +121,8 @@ fn human_runtime_errors_have_a_prefix_and_safe_hint() {
         error.starts_with("error: --org is required for wallets list\n"),
         "{error}"
     );
-    assert!(error.contains("hint: Pass --org UUID or select a profile"));
+    // The hint names the command that finds the missing value.
+    assert!(error.contains("hint: Find your organization ID with `voltage organizations list`"));
     assert!(!error.contains("api_key"));
 }
 
@@ -1585,7 +1586,6 @@ async fn interrupt_in_flight(
 }
 
 /// The JSON error report: the last line of stderr, after any recovery notice.
-#[cfg(unix)]
 fn error_report(stderr: &[u8]) -> Value {
     serde_json::from_str(String::from_utf8_lossy(stderr).lines().last().unwrap()).unwrap()
 }
@@ -2571,6 +2571,51 @@ async fn wait_tolerates_projection_delay_and_distinguishes_invoice_from_settleme
 // ---------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn api_rejections_lead_with_the_reason_and_keep_the_response_for_json() {
+    let (server, dir) = fixture().await;
+    let rejection = json!({"error": {
+        "type": "quote_required", "code": "required",
+        "detail": "Quote is required for payment",
+        "context": {"field": "quote_id", "required": true}
+    }});
+    route("POST", payments_path())
+        .respond_with(ResponseTemplate::new(400).set_body_json(rejection.clone()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut human = human_process_at(dir.path(), &server.uri());
+    human.args(receive_args(&[
+        "--wallet", WALLET, "--amount", "1000", "--unit", "sats", "--output", "table",
+    ]));
+    let error = stderr(&Command::from_std(human).assert().code(1));
+    let report = error
+        .split_once("error: ")
+        .map(|(_, report)| report)
+        .unwrap_or_default();
+    assert_eq!(
+        report,
+        "Voltage API returned HTTP 400: Quote is required for payment\n\
+         hint: A wallet on a USD line of credit needs a quote for each payment. Create one with \
+         `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass \
+         --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.\n\
+         details:\n  \
+         code              required\n  \
+         context.field     quote_id\n  \
+         context.required  true\n  \
+         type              quote_required\n",
+        "{error}"
+    );
+
+    let mut machine = process_at(dir.path(), &server.uri());
+    machine.args(receive_args(&[
+        "--wallet", WALLET, "--amount", "1000", "--unit", "sats",
+    ]));
+    let output = Command::from_std(machine).assert().code(1);
+    let report = error_report(&output.get_output().stderr);
+    assert_eq!(report["error"]["detail"]["data"], rejection);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn human_output_fits_the_terminal_and_scrubs_api_text() {
     let (server, dir) = fixture().await;
     let hostile = "evil\u{1b}]52;c;AAAA\u{7}\u{202e}name";
@@ -2823,6 +2868,314 @@ async fn auth_errors_redact_echoed_credentials() {
         .assert()
         .code(3);
     assert!(!stderr(&result).contains(ACCOUNT_KEY));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_reasons_that_echo_the_key_are_redacted_in_json_and_human_output() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": {
+            "type": "invalid_request", "detail": format!("Bad key {ACCOUNT_KEY}")
+        }})))
+        .mount(&server)
+        .await;
+    let machine = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .code(1);
+    let error = json_error(&machine);
+    assert_eq!(
+        error["error"]["message"],
+        "Voltage API returned HTTP 400: Bad key [REDACTED]"
+    );
+    assert_eq!(
+        error["error"]["detail"]["data"]["error"]["detail"],
+        "Bad key [REDACTED]"
+    );
+    assert!(!stderr(&machine).contains(ACCOUNT_KEY));
+
+    let mut human = human_process_at(dir.path(), &server.uri());
+    human.args(["wallets", "list", "--org", ORG, "--output", "table"]);
+    let human = stderr(&Command::from_std(human).assert().code(1));
+    assert!(
+        human.starts_with("error: Voltage API returned HTTP 400: Bad key [REDACTED]\n"),
+        "{human}"
+    );
+    assert!(!human.contains(ACCOUNT_KEY), "{human}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn server_error_text_stays_out_of_the_message_and_is_redacted() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": {
+            "type": "internal", "detail": format!("query failed for {ACCOUNT_KEY}")
+        }})))
+        .mount(&server)
+        .await;
+    let machine = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .failure();
+    let error = json_error(&machine);
+    assert_eq!(error["error"]["message"], "Voltage API returned HTTP 500");
+    assert_eq!(
+        error["error"]["detail"]["data"]["error"]["detail"],
+        "query failed for [REDACTED]"
+    );
+
+    let mut human = human_process_at(dir.path(), &server.uri());
+    human.args(["wallets", "list", "--org", ORG, "--output", "table"]);
+    let human = stderr(&Command::from_std(human).assert().failure());
+    assert!(
+        human.starts_with("error: Voltage API returned HTTP 500\n"),
+        "{human}"
+    );
+    assert!(human.contains("query failed for [REDACTED]"), "{human}");
+    assert!(!human.contains(ACCOUNT_KEY), "{human}");
+}
+
+/// The JSON error report a failed `--json` command writes as its last stderr line.
+fn json_error(assertion: &Assert) -> Value {
+    let stderr = stderr(assertion);
+    serde_json::from_str(stderr.lines().last().unwrap_or_default()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_credentials_name_the_command_that_checks_them() {
+    for (status, next) in [(401, "voltage auth status"), (403, "voltage context")] {
+        let (server, dir) = fixture().await;
+        route("GET", wallets_path(ORG))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let result = cli(dir.path(), &server)
+            .args(["wallets", "list", "--org", ORG])
+            .assert()
+            .code(3);
+        let error = json_error(&result);
+        assert!(
+            error["error"]["hint"].as_str().unwrap().contains(next),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_login_names_the_command_that_renews_it() {
+    let (server, dir) = fixture().await;
+    seeded_login(dir.path(), &server, true);
+    route("POST", "/oauth/token")
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_grant"})))
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "list", "--account", LOGIN_NAME, "--org", ORG])
+        .assert()
+        .code(3);
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["message"],
+        format!("The saved login for {LOGIN_NAME} has expired or was revoked")
+    );
+    assert_eq!(
+        error["error"]["hint"],
+        format!(
+            "Remove it with `voltage logout --local --account {LOGIN_NAME}`, then sign in again with `voltage login --account {LOGIN_NAME}`."
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_and_profile_errors_list_the_saved_names() {
+    let (server, dir) = fixture().await;
+    let mut settings = seeded_api_key(dir.path(), "first", "first-key");
+    settings.config.accounts.insert(
+        "second".into(),
+        Account {
+            store: CredentialStore::File,
+            kind: AccountKind::ApiKey,
+            email: None,
+            organization_id: Some(uuid(ORG)),
+            environment_id: Some(uuid(ENV)),
+            auth_url: config::AUTH_URL.into(),
+        },
+    );
+    settings.save().unwrap();
+    let hint = |args: &[&str], code: i32| {
+        let result = cli(dir.path(), &server)
+            .env_remove("VOLTAGE_API_KEY")
+            .args(["wallets", "list", "--org", ORG])
+            .args(args)
+            .assert()
+            .code(code);
+        json_error(&result)["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(hint(&[], 2).starts_with("Saved credentials: first, second."));
+    assert_eq!(
+        hint(&["--account", "third"], 3),
+        "Saved credentials: first, second."
+    );
+    assert!(hint(&["--profile", "missing"], 2).starts_with("No profiles are saved"));
+    // `first` is bound to ORG, so it cannot reach another organization.
+    let elsewhere = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["wallets", "list", "--org", RESOURCE, "--account", "first"])
+        .assert()
+        .code(2);
+    assert_eq!(
+        json_error(&elsewhere)["error"]["hint"],
+        "Saved credentials: first, second. Select a key for this scope or a browser login with --account NAME."
+    );
+
+    settings.config.profiles.insert(
+        "main".into(),
+        Profile {
+            organization_id: uuid(ORG),
+            environment_id: uuid(ENV),
+            account: "first".into(),
+        },
+    );
+    settings.save().unwrap();
+    assert_eq!(hint(&["--profile", "missing"], 2), "Saved profiles: main.");
+    for verb in ["get", "delete"] {
+        let result = cli(dir.path(), &server)
+            .args(["profiles", verb, "missing"])
+            .assert()
+            .code(2);
+        let error = json_error(&result);
+        assert_eq!(error["error"]["message"], "Unknown profile missing");
+        assert_eq!(error["error"]["hint"], "Saved profiles: main.");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_errors_without_saved_credentials_name_how_to_add_one() {
+    let (server, dir) = fixture().await;
+    let unknown = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["wallets", "list", "--org", ORG, "--account", "missing"])
+        .assert()
+        .code(3);
+    assert_eq!(
+        json_error(&unknown)["error"]["hint"],
+        "No credentials are saved; sign in with `voltage login` or import a key with `voltage auth import-key`."
+    );
+    let empty = cli(dir.path(), &server)
+        .env("VOLTAGE_API_KEY", " ")
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .code(3);
+    assert_eq!(
+        json_error(&empty)["error"]["hint"],
+        "Unset VOLTAGE_API_KEY to use a saved credential, or set it to a key."
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_scope_errors_name_the_command_that_lists_it() {
+    let (server, dir) = fixture().await;
+    let error = |args: &[&str]| {
+        let result = cli(dir.path(), &server).args(args).assert().code(2);
+        json_error(&result)["error"].clone()
+    };
+    let webhook = error(&["webhooks", "deliveries", "list", "--org", ORG, "--env", ENV]);
+    assert_eq!(
+        webhook["message"],
+        "--webhook is required for webhooks deliveries list"
+    );
+    assert_eq!(
+        webhook["hint"],
+        "List webhooks with `voltage webhooks list`, then pass --webhook ID."
+    );
+    for envs in [&[][..], &["--env", ENV, "--env", RESOURCE][..]] {
+        let mut args = vec!["payments", "get", RESOURCE, "--org", ORG];
+        args.extend_from_slice(envs);
+        let environment = error(&args);
+        assert_eq!(
+            environment["message"],
+            "Exactly one --env is required for this operation"
+        );
+        assert!(
+            environment["hint"]
+                .as_str()
+                .unwrap()
+                .starts_with("List environments with `voltage environments list --org ORG_ID`"),
+            "{environment}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn discovery_with_an_api_key_says_which_key_was_used() {
+    let (server, dir) = fixture().await;
+    let result = cli(dir.path(), &server)
+        .args(["organizations", "list"])
+        .assert()
+        .code(3);
+    let error = json_error(&result);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("VOLTAGE_API_KEY from the environment"),
+        "{error}"
+    );
+
+    // A saved API key selected without the ambient one is named instead.
+    seeded_api_key(dir.path(), "saved", "saved-key");
+    for (args, command) in [
+        (&["organizations", "list"][..], "organizations list"),
+        (
+            &["environments", "list", "--org", ORG][..],
+            "environments list",
+        ),
+    ] {
+        let result = cli(dir.path(), &server)
+            .env_remove("VOLTAGE_API_KEY")
+            .args(args)
+            .assert()
+            .code(3);
+        let error = json_error(&result);
+        assert_eq!(
+            error["error"]["message"],
+            format!(
+                "{command} needs a browser login, but the selected credential saved is an API key"
+            )
+        );
+        assert_eq!(
+            error["error"]["hint"],
+            "Select a browser login with --account NAME, or sign in with `voltage login`."
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_checkout_tokens_point_to_the_checkout_token_not_the_account() {
+    let (server, dir) = fixture().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .env("VOLTAGE_CHECKOUT_TOKEN", CHECKOUT_KEY)
+        .args(["checkout", "sessions", "get", RESOURCE])
+        .assert()
+        .code(3);
+    let hint = json_error(&result)["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(hint.contains("VOLTAGE_CHECKOUT_TOKEN"), "{hint}");
+    assert!(!hint.contains("voltage auth status"), "{hint}");
+    assert!(!hint.contains("voltage login"), "{hint}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3230,7 +3583,11 @@ async fn an_api_key_without_an_organization_keeps_the_original_error() {
         "{}",
         run.shown
     );
-    assert!(run.shown.contains("--profile NAME"), "{}", run.shown);
+    assert!(
+        run.shown.contains("voltage organizations list"),
+        "{}",
+        run.shown
+    );
 
     // A payment needs a wallet, listed within an organization the key cannot list, so the
     // person is told why nothing is offered.

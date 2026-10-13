@@ -27,6 +27,6 @@ API fields stay inside `data`. With `--all`, JSON output collects the pages into
 
 Diagnostics, prompts, and progress go to stderr. Interactive stderr shows immediate, cancellable status for network requests and waits; redirected stderr gets no spinner/control codes. `-q, --quiet` suppresses optional status and notices, never requested results, errors, warnings, or recovery IDs.
 
-Human errors start with `error:` and may include a safe `hint:`. `--json` makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
+Human errors start with `error:`, which leads with the API's reason when it rejects a request with a client error (HTTP 4xx), and may include a safe `hint:` and an indented `details:` block of `field  value` lines. `--json` reports the complete API response in `error.detail`, and makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
 
 Related: [scripting](../guides/scripting.md), [safety model](../concepts/safety-model.md#secrets-and-redaction).
