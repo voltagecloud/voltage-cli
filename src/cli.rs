@@ -1685,6 +1685,136 @@ mod tests {
         }
     }
 
+    /// `docs/reference/global-flags.md`, rendered from the flags every command accepts.
+    fn global_flags_reference() -> String {
+        let flags = GlobalFlags::augment_args(ClapCommand::new("voltage"));
+        // Rows by heading, in the order each heading first appears.
+        let mut sections: Vec<(&str, Vec<String>)> = Vec::new();
+        for arg in flags.get_arguments() {
+            let Some(long) = arg.get_long() else { continue };
+            let mut flag = match arg.get_short() {
+                Some(short) => format!("`-{short}`, `--{long}"),
+                None => format!("`--{long}"),
+            };
+            let mut meaning = arg.get_help().map(ToString::to_string).unwrap_or_default();
+            if arg.get_action().takes_values() {
+                let names = arg.get_value_names().unwrap_or_default();
+                let name = names.first().map_or("VALUE", |name| name.as_str());
+                flag.push_str(&format!(" {name}"));
+                let values: Vec<String> = arg
+                    .get_possible_values()
+                    .iter()
+                    .filter(|value| !value.is_hide_set())
+                    .map(|value| format!("`{}`", value.get_name()))
+                    .collect();
+                if !values.is_empty() {
+                    meaning.push_str(&format!(" ({})", values.join(", ")));
+                }
+                if let Some(default) = arg.get_default_values().first() {
+                    meaning.push_str(&format!("; default `{}`", default.to_string_lossy()));
+                }
+            }
+            flag.push('`');
+            let row = format!("| {flag} | {} |", meaning.replace('|', "\\|"));
+            let heading = arg.get_help_heading().unwrap_or("Other");
+            match sections.iter_mut().find(|(name, _)| *name == heading) {
+                Some((_, rows)) => rows.push(row),
+                None => sections.push((heading, vec![row])),
+            }
+        }
+        let mut text = String::from(
+            "# Global flags\n\nGenerated from the command definitions by `VOLTAGE_BLESS=1 cargo test`; do not edit by hand. Every command accepts these flags, before or after its name.\n",
+        );
+        for (heading, rows) in sections {
+            text.push_str(&format!(
+                "\n## {heading}\n\n| Flag | Meaning |\n|---|---|\n{}\n",
+                rows.join("\n")
+            ));
+        }
+        text.push_str("\nRelated: [environment variables](environment.md), [configuration](configuration.md), [output](output.md).\n");
+        text
+    }
+
+    #[test]
+    fn global_flags_reference_matches_the_command_definitions() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/reference/global-flags.md");
+        let expected = global_flags_reference();
+        if std::env::var_os("VOLTAGE_BLESS").is_some() {
+            std::fs::write(&path, &expected).unwrap();
+        }
+        let actual = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            actual == expected,
+            "docs/reference/global-flags.md is stale; run VOLTAGE_BLESS=1 cargo test"
+        );
+    }
+
+    #[test]
+    fn every_variable_and_exit_code_is_documented() {
+        use crate::error::ErrorKind as Kind;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+        let environment = read("docs/reference/environment.md");
+        let mut variables = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(root.join("src")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = std::fs::read_to_string(path).unwrap();
+                for (start, _) in source.match_indices("\"VOLTAGE_") {
+                    let name: String = source[start + 1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+                        .collect();
+                    // A bare `VOLTAGE_` is a prefix check, not a variable.
+                    if !name.ends_with('_') {
+                        variables.insert(name);
+                    }
+                }
+            }
+        }
+        // Set by build.rs at compile time, and the contributors' switch for this test file;
+        // neither is read from a user's environment.
+        variables.remove("VOLTAGE_VERSION");
+        variables.remove("VOLTAGE_BLESS");
+        assert!(variables.len() >= 8, "{variables:?}");
+        for name in variables
+            .iter()
+            .map(String::as_str)
+            .chain(["COLUMNS", "XDG_CONFIG_HOME"])
+        {
+            assert!(
+                environment.contains(&format!("`{name}`")),
+                "{name} is undocumented"
+            );
+        }
+        let exit_codes = read("docs/reference/exit-codes.md");
+        // A new kind fails to compile here until it is added to the list below.
+        let _listed = |kind: Kind| match kind {
+            Kind::Api
+            | Kind::Usage
+            | Kind::Auth
+            | Kind::Transport
+            | Kind::Timeout
+            | Kind::NotExecuted
+            | Kind::Interrupted => (),
+        };
+        for kind in [
+            Kind::Api,
+            Kind::Usage,
+            Kind::Auth,
+            Kind::Transport,
+            Kind::Timeout,
+            Kind::NotExecuted,
+            Kind::Interrupted,
+        ] {
+            let code = kind.exit_code();
+            assert!(
+                exit_codes.contains(&format!("| {code} |")),
+                "exit code {code} is undocumented"
+            );
+        }
+    }
+
     /// Every command below `cmd`, by path, with its rendered long help.
     fn long_helps(cmd: &mut ClapCommand, path: &mut Vec<String>, out: &mut Vec<(String, String)>) {
         out.push((path.join(" "), cmd.render_long_help().to_string()));

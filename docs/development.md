@@ -81,6 +81,8 @@ selection, describe-by-default changes, secret output, pagination, payment waits
 checkout tokens and streams, and the credential lifecycle. Every change the docs show with `--execute` also runs as an offline `--dry-run`, so documented flags, units, and scope keep validating. Live payment tests must use an
 explicitly configured test-network wallet; routine tests never send a live payment.
 
+`docs/reference/global-flags.md` is rendered from the command definitions; after changing a global flag, run `VOLTAGE_BLESS=1 cargo test` to regenerate it, since plain `cargo test` fails on a stale copy. Tests also require every `VOLTAGE_*` variable read in `src/` to appear in `docs/reference/environment.md`, and every exit code in `docs/reference/exit-codes.md`.
+
 The manual CRAP risk check is described in [the style guide](quality.md#crap-risk-check).
 
 ## Continuous integration and releases
