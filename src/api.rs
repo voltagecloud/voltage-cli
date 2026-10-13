@@ -226,15 +226,19 @@ impl Api {
             })?
         };
         if !(200..300).contains(&status) {
-            return Err(Error::new(
+            let mut error = Error::new(
                 ErrorKind::for_http_status(status),
                 rejection_message(status, &body),
-            )
-            .with_detail(ErrorDetail::Http {
-                http_status: status,
-                data: body,
-            })
-            .redacted(&self.secrets()));
+            );
+            if let Some(hint) = rejection_hint(status) {
+                error = error.with_hint(hint);
+            }
+            return Err(error
+                .with_detail(ErrorDetail::Http {
+                    http_status: status,
+                    data: body,
+                })
+                .redacted(&self.secrets()));
         }
         Ok(Response {
             status,
@@ -343,6 +347,20 @@ fn rejection_message(status: u16, body: &Value) -> String {
                 .unwrap_or("this feature is not enabled for the organization")
         ),
         ApiErrorType::Other => format!("Voltage API returned HTTP {status}"),
+    }
+}
+
+/// The next step for a rejected credential: 401 means the API did not accept it, and 403
+/// means it was accepted but cannot reach the selected organization or environment.
+fn rejection_hint(status: u16) -> Option<&'static str> {
+    match status {
+        401 => Some(
+            "Check the credential with `voltage auth status`, or sign in again with `voltage login`.",
+        ),
+        403 => Some(
+            "Check the organization, environment, and credential in use with `voltage context`.",
+        ),
+        _ => None,
     }
 }
 
@@ -1329,6 +1347,14 @@ fn next_page(body: &Value, request: &Request) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_credential_rejections_carry_a_next_step() {
+        assert!(rejection_hint(401).unwrap().contains("voltage auth status"));
+        assert!(rejection_hint(403).unwrap().contains("voltage context"));
+        assert_eq!(rejection_hint(404), None);
+        assert_eq!(rejection_hint(500), None);
+    }
     use crate::{
         cli::{Command, Invocation},
         config::Config,

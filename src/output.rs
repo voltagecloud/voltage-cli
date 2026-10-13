@@ -288,7 +288,7 @@ struct ErrorBody<'a> {
     message: &'a str,
     exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hint: Option<&'static str>,
+    hint: Option<&'a str>,
     detail: Option<&'a ErrorDetail>,
 }
 
@@ -298,7 +298,7 @@ pub fn report_error(error: &Error, format: OutputFormat) {
         error: ErrorBody {
             message: &error.message,
             exit_code: error.kind.exit_code(),
-            hint: error.hint,
+            hint: error.hint.as_deref(),
             detail: error.detail.as_ref(),
         },
     };
@@ -310,8 +310,8 @@ pub fn report_error(error: &Error, format: OutputFormat) {
     } else {
         // Messages can interpolate untrusted input; keep control characters off the terminal.
         eprintln!("error: {}", scrub_line(&error.message));
-        if let Some(hint) = error.hint {
-            // Hints are static today; scrub defensively if they ever become dynamic.
+        if let Some(hint) = &error.hint {
+            // Hints can name saved credentials and profiles, so they are scrubbed like messages.
             eprintln!("hint: {}", scrub_line(hint));
         }
         if let Some(detail) = body["error"]["detail"].as_object() {
