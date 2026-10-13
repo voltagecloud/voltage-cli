@@ -6,6 +6,7 @@ use inquire::{InquireError, Select};
 use std::{
     fmt::{self, Display},
     io::{ErrorKind, IsTerminal, Write},
+    time::Duration,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -30,7 +31,7 @@ impl Terminal {
 
     /// Optional status for a human, cleared when the guard drops; no control codes on
     /// redirected stderr.
-    pub fn progress(self, label: &'static str) -> Progress {
+    pub fn progress(self, label: impl Display) -> Progress {
         let active = !self.quiet && std::io::stderr().is_terminal();
         if active {
             eprint!("{label}");
@@ -41,7 +42,7 @@ impl Terminal {
 
     /// Show `label` while `work` runs. The status cannot outlive the work: it clears on
     /// completion, error, or cancellation.
-    pub async fn during<T>(self, label: &'static str, work: impl Future<Output = T>) -> T {
+    pub async fn during<T>(self, label: impl Display, work: impl Future<Output = T>) -> T {
         let _progress = self.progress(label);
         work.await
     }
@@ -254,6 +255,17 @@ impl Drop for TerminalModes {
 
 /// Clears its status line when dropped, including when Ctrl-C cancels the owning future.
 #[must_use = "progress is cleared as soon as the guard is dropped"]
+/// How long a wait has run, for a status line that would otherwise look stuck: `42s`, or
+/// `3m 05s` from a minute on.
+pub fn elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
+
 pub struct Progress {
     active: bool,
 }
@@ -270,6 +282,14 @@ impl Drop for Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elapsed_time_reads_in_seconds_then_minutes() {
+        assert_eq!(elapsed(Duration::from_millis(900)), "0s");
+        assert_eq!(elapsed(Duration::from_secs(59)), "59s");
+        assert_eq!(elapsed(Duration::from_secs(60)), "1m 00s");
+        assert_eq!(elapsed(Duration::from_secs(185)), "3m 05s");
+    }
 
     #[test]
     fn scrubbing_removes_controls_and_bidirectional_marks() {

@@ -913,6 +913,11 @@ async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
     assert_eq!(data["wallet_id"], setting(json!(WALLET), "flag"));
     assert_eq!(data["webhook_id"], setting(Value::Null, "unset"));
     assert_eq!(data["api_url"], setting(json!(server.uri()), "flag"));
+    // The profile's saved key carries the auth URL it was saved with.
+    assert_eq!(
+        data["auth_url"],
+        setting(json!(config::AUTH_URL), "profile")
+    );
     assert_eq!(
         data["config_dir"],
         setting(json!(dir.path().display().to_string()), "flag")
@@ -3354,6 +3359,45 @@ async fn an_api_key_without_an_organization_keeps_the_original_error() {
         run.shown
     );
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": "sending"})),
+            ok(json!({"id": RESOURCE, "status": "completed"})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &[
+            "payments",
+            "get",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wait",
+            "completed",
+        ],
+        None,
+        b"",
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown.contains("Waiting for completed... 0s"),
+        "{}",
+        run.shown
+    );
+    server.verify().await;
 }
 
 // ---------------------------------------------------------------------------------------
