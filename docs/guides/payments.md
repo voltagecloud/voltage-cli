@@ -29,12 +29,19 @@ For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--cop
 
 ## Quotes and lines of credit
 
-Quotes apply to USD lines of credit: a USD payment requires `--quote` with a quote for that line of credit.
+A wallet on a USD line of credit needs a quote for every payment; without one, the API rejects the payment with `quote_required`. `voltage wallets get WALLET_ID` shows the wallet's `line_of_credit_id`, network, and balance currency.
+
+To receive into a USD wallet, quote the USD amount to BTC, wait until `quotes get` shows a `quote` with no `error`, then receive the same USD amount with that quote:
 
 ```sh
 voltage quotes create --profile prod --credit-line CREDIT_LINE_ID \
   --network mutinynet --amount 10 --unit usd --to btc --execute
+voltage quotes get QUOTE_ID --profile prod
+voltage payments receive --profile prod --wallet WALLET_ID \
+  --currency usd --kind bolt11 --amount 10 --unit usd --quote QUOTE_ID --wait ready --execute
 ```
+
+A quote is single-use and expires; a quoted receive's expiration is capped by the quote's remaining life.
 
 On-chain and BIP21 payments and treasury movements are features Voltage enables per organization; the API rejects them with `feature_flag_disabled` until then, and the CLI says so.
 

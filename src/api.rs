@@ -226,15 +226,19 @@ impl Api {
             })?
         };
         if !(200..300).contains(&status) {
-            return Err(Error::new(
+            let mut error = Error::new(
                 ErrorKind::for_http_status(status),
                 rejection_message(status, &body),
-            )
-            .with_detail(ErrorDetail::Http {
-                http_status: status,
-                data: body,
-            })
-            .redacted(&self.secrets()));
+            );
+            if let Some(hint) = rejection_hint(status, &body) {
+                error = error.with_hint(hint);
+            }
+            return Err(error
+                .with_detail(ErrorDetail::Http {
+                    http_status: status,
+                    data: body,
+                })
+                .redacted(&self.secrets()));
         }
         Ok(Response {
             status,
@@ -311,6 +315,7 @@ pub(crate) enum BodyFailure {
 #[serde(rename_all = "snake_case")]
 enum ApiErrorType {
     FeatureFlagDisabled,
+    QuoteRequired,
     #[default]
     #[serde(other)]
     Other,
@@ -330,19 +335,41 @@ struct ApiErrorView {
     error: ApiErrorBody,
 }
 
-/// The message for a rejected request; a disabled organization feature names the fix.
+/// The message for a rejected request: the API's own reason when it gives one, and for a
+/// disabled organization feature, the fix.
 fn rejection_message(status: u16, body: &Value) -> String {
     let rejection = ApiErrorView::deserialize(body).unwrap_or_default();
-    match rejection.error.kind {
-        ApiErrorType::FeatureFlagDisabled => format!(
+    let reason = rejection.error.detail.as_deref();
+    match (rejection.error.kind, reason) {
+        (ApiErrorType::FeatureFlagDisabled, reason) => format!(
             "Voltage API returned HTTP {status}: {}. Ask Voltage to enable this feature for the organization.",
-            rejection
-                .error
-                .detail
-                .as_deref()
-                .unwrap_or("this feature is not enabled for the organization")
+            reason.unwrap_or("this feature is not enabled for the organization")
         ),
-        ApiErrorType::Other => format!("Voltage API returned HTTP {status}"),
+        (_, Some(reason)) => format!("Voltage API returned HTTP {status}: {reason}"),
+        (_, None) => format!("Voltage API returned HTTP {status}"),
+    }
+}
+
+/// The next step for a rejected request. 401 means the API did not accept the credential,
+/// and 403 means it was accepted but cannot reach the selected organization or environment.
+fn rejection_hint(status: u16, body: &Value) -> Option<&'static str> {
+    match status {
+        401 => Some(
+            "Check the credential with `voltage auth status`, or sign in again with `voltage login`.",
+        ),
+        403 => Some(
+            "Check the organization, environment, and credential in use with `voltage context`.",
+        ),
+        _ => match ApiErrorView::deserialize(body)
+            .unwrap_or_default()
+            .error
+            .kind
+        {
+            ApiErrorType::QuoteRequired => Some(
+                "This wallet is on a USD line of credit, so each payment needs a quote. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.",
+            ),
+            ApiErrorType::FeatureFlagDisabled | ApiErrorType::Other => None,
+        },
     }
 }
 
@@ -1329,6 +1356,22 @@ fn next_page(body: &Value, request: &Request) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_rejections_carry_a_next_step() {
+        assert!(
+            rejection_hint(401, &Value::Null)
+                .unwrap()
+                .contains("voltage auth status")
+        );
+        assert!(
+            rejection_hint(403, &Value::Null)
+                .unwrap()
+                .contains("voltage context")
+        );
+        assert_eq!(rejection_hint(404, &Value::Null), None);
+        assert_eq!(rejection_hint(500, &Value::Null), None);
+    }
     use crate::{
         cli::{Command, Invocation},
         config::Config,
@@ -1408,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_features_are_explained_and_other_rejections_stay_generic() {
+    fn rejections_lead_with_the_api_reason_and_explain_known_types() {
         let disabled = json!({"error": {
             "type": "feature_flag_disabled", "code": "disabled",
             "detail": "OnChain payments are not enabled for this organization",
@@ -1421,6 +1464,23 @@ mod tests {
         let other = json!({"error": {"type": "invalid_amount", "detail": "too small"}});
         assert_eq!(
             rejection_message(400, &other),
+            "Voltage API returned HTTP 400: too small"
+        );
+        assert_eq!(rejection_hint(400, &other), None);
+        let quote = json!({"error": {
+            "type": "quote_required", "code": "required",
+            "detail": "Quote is required for payment",
+            "context": {"field": "quote_id", "required": true}
+        }});
+        assert_eq!(
+            rejection_message(400, &quote),
+            "Voltage API returned HTTP 400: Quote is required for payment"
+        );
+        let hint = rejection_hint(400, &quote).unwrap();
+        assert!(hint.contains("voltage quotes create"));
+        assert!(hint.contains("BTC line of credit needs no quote"));
+        assert_eq!(
+            rejection_message(400, &json!({"error": {"type": "invalid_amount"}})),
             "Voltage API returned HTTP 400"
         );
         assert_eq!(
