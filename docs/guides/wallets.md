@@ -32,11 +32,11 @@ The ledger lists every credit, hold, capture, and release on the wallet. `--all`
 
 ```sh
 voltage wallets update WALLET_ID --profile prod --name operations --execute
-voltage wallets policies get WALLET_ID --profile prod
+voltage wallets policies get WALLET_ID --profile prod --json | jq .data > policies.json
 voltage wallets policies update WALLET_ID --profile prod --data @policies.json --execute
 ```
 
-Policies have no friendly flags: read the current policies, edit the JSON, and send the complete object with `--data`. Deleting a wallet cannot be undone, so check the request with a dry run first:
+Policies have no friendly flags: save the current policies, edit the file, and send the complete object with `--data`. Save only `.data`: `--json` and `--output-file` wrap the response in an envelope, which is not a policy body. Deleting a wallet cannot be undone, so check the request with a dry run first:
 
 ```sh
 voltage wallets delete WALLET_ID --profile prod --dry-run
