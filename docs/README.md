@@ -18,6 +18,9 @@ Start with the [README](../README.md) for install and a quick start.
 - [Command reference](commands.md): every command and its API route
 - [Output](reference/output.md): tables, the JSON envelope, stdout and stderr
 - [Exit codes](reference/exit-codes.md)
+- [Global flags](reference/global-flags.md): flags every command accepts
+- [Environment variables](reference/environment.md): every `VOLTAGE_*` variable and what beats it
+- [Configuration](reference/configuration.md): the configuration directory, credential stores, and the request journal
 
 ## Understand
 
