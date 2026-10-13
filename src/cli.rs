@@ -1247,6 +1247,7 @@ fn leaf(matches: &ArgMatches) -> (Vec<String>, &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CredentialProblem as Problem;
     use crate::error::ErrorKind as Kind;
     use std::path::Path;
 
@@ -1847,6 +1848,44 @@ mod tests {
                 exit_codes.contains(&format!("| {code} |")),
                 "exit code {code} is undocumented"
             );
+        }
+    }
+
+    #[test]
+    fn troubleshooting_covers_every_exit_code_and_credential_problem() {
+        let text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/guides/troubleshooting.md"),
+        )
+        .unwrap()
+        // Git may check the file out with CRLF line endings, as on Windows.
+        .replace("\r\n", "\n");
+        for code in error_kinds().map(Kind::exit_code) {
+            assert!(
+                text.contains(&format!("\n### Exit code {code}\n")),
+                "exit code {code}"
+            );
+        }
+        // A new problem fails to compile here until it has a name, but its entry is checked
+        // only once it is also added to the list below.
+        let name = |problem: Problem| match problem {
+            Problem::EmptyApiKey => "empty_api_key",
+            Problem::NoCredential => "no_credential",
+            Problem::MultipleCredentials => "multiple_credentials",
+            Problem::UnknownCredential => "unknown_credential",
+            Problem::BoundElsewhere => "bound_elsewhere",
+            Problem::AuthUrlMismatch => "auth_url_mismatch",
+        };
+        for problem in [
+            Problem::EmptyApiKey,
+            Problem::NoCredential,
+            Problem::MultipleCredentials,
+            Problem::UnknownCredential,
+            Problem::BoundElsewhere,
+            Problem::AuthUrlMismatch,
+        ] {
+            let name = name(problem);
+            assert_eq!(serde_json::to_value(problem).unwrap(), name);
+            assert!(text.contains(&format!("\n### `{name}`\n")), "{name}");
         }
     }
 
