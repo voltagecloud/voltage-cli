@@ -172,7 +172,7 @@ the same way you would against production.
    voltage profiles create staging --account me --org ORG_ID --env ENV_ID
    voltage wallets list --profile staging
    voltage payments receive --profile staging --wallet WALLET_ID \
-     --currency btc --kind bolt11 --amount 1000 --unit sats --qr
+     --currency btc --kind bolt11 --amount 1000 --unit sats --qr --execute
    ```
 
    Once the profile exists, fold it into the alias to drop the flag as well:
