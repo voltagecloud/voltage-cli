@@ -5,7 +5,8 @@
 //! operation without a mapping, a mapping without an operation, or a mapping whose target is
 //! not a placeholder in the operation's path, so the two files cannot drift apart silently.
 //!
-//! It also stamps `voltage --version` with the git build it came from.
+//! It also stamps `voltage --version` with the git build it came from, and picks the docs
+//! ref that help links to.
 
 use serde_json::{Value, json};
 use std::{
@@ -134,30 +135,45 @@ fn operation_record(
     })
 }
 
-/// The Cargo version, then the git build it came from. A clean build of its own `vX.Y.Z`
-/// tag shows the commit and date, as `rustc --version` does. Any other build shows
-/// `git describe`, such as `v0.1.0-14-g0e6078b-dirty`, or a bare commit when no tag is
-/// reachable, so it cannot be mistaken for the release. Without a git checkout the version
-/// stands alone and the build still succeeds.
-fn version() -> String {
+/// What `voltage --version` prints and which docs its help links to.
+struct Build {
+    /// The Cargo version, then the git build it came from. A clean build of its own
+    /// `vX.Y.Z` tag shows the commit and date, as `rustc --version` does. Any other build
+    /// shows `git describe`, such as `v0.1.0-14-g0e6078b-dirty`, or a bare commit when no
+    /// tag is reachable, so it cannot be mistaken for the release. Without a git checkout
+    /// the version stands alone and the build still succeeds.
+    version: String,
+    /// The git ref of the docs that match this binary: the release tag for a clean build
+    /// of it, else `master`, because an unreleased page exists only there.
+    docs_ref: String,
+}
+
+fn build() -> Build {
     let package = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let tag = format!("v{package}");
+    let unreleased = |version| Build {
+        version,
+        docs_ref: "master".to_owned(),
+    };
     // A non-empty prefix means this package is a subdirectory of some other repository.
     if git(&["rev-parse", "--show-prefix"]).is_some_and(|prefix| !prefix.is_empty()) {
-        return package;
+        return unreleased(package);
     }
     watch_git_state();
     let describe = [
         "describe", "--tags", "--match", "v[0-9]*", "--dirty", "--always",
     ];
     let Some(build) = git(&describe) else {
-        return package;
+        return unreleased(package);
     };
-    let build = if build == format!("v{package}") {
-        git(&["log", "-1", "--format=%h %cs"]).unwrap_or(build)
-    } else {
-        build
-    };
-    format!("{package} ({build})")
+    if build != tag {
+        return unreleased(format!("{package} ({build})"));
+    }
+    let commit = git(&["log", "-1", "--format=%h %cs"]).unwrap_or(build);
+    Build {
+        version: format!("{package} ({commit})"),
+        docs_ref: tag,
+    }
 }
 
 /// Trimmed stdout of a successful, non-empty git command. Optional locks are off so that
@@ -199,7 +215,9 @@ fn watch_git_state() {
 }
 
 fn main() {
-    println!("cargo:rustc-env=VOLTAGE_VERSION={}", version());
+    let build = build();
+    println!("cargo:rustc-env=VOLTAGE_VERSION={}", build.version);
+    println!("cargo:rustc-env=VOLTAGE_DOCS_REF={}", build.docs_ref);
     println!("cargo:rerun-if-changed={SNAPSHOT}");
     println!("cargo:rerun-if-changed={MAPPING}");
     let spec = read_json(SNAPSHOT);
