@@ -11,7 +11,7 @@ voltage payments send --profile prod --wallet WALLET_ID \
   --currency btc --address BITCOIN_ADDRESS --amount 1000 --unit sats --execute
 ```
 
-Amounts are decimals in the unit you name (`msats`, `sats`, `btc`, `cents`, `usd`) and are converted to the API's integer base units exactly; a value with more precision than the unit allows is rejected. `--currency` is the wallet currency for sends and the receive currency for open-amount receives. Fee limits cover network and provider fees only. A send notes on stderr that its fee limit excludes processing fees.
+Amounts are decimals in the unit you name with `--unit` (`msats`, `sats`, `btc`, `cents`, `usd`) and are converted to the API's integer base units exactly; a value with more precision than the unit allows is rejected. Without `--unit`, an amount is in the currency's base unit: msats for BTC and cents for USD, so `--amount 1000` is 1 sat. `--max-fee` without `--fee-unit` is in msats. `--currency` is the wallet currency for sends and the receive currency for open-amount receives. Without it, a receive with `--unit` uses that unit's currency, and any other payment reads the wallet and uses its line of credit's currency. That read needs a credential, also when the change is only described, and stderr says which currency was used. Fee limits cover network and provider fees only. A send notes on stderr that its fee limit excludes processing fees.
 
 Run a change without `--execute` to see exactly what it would send, then add `--execute` to send it. There is no confirmation prompt. See the [safety model](../concepts/safety-model.md).
 

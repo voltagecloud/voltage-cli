@@ -5,8 +5,8 @@ use crate::{
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery},
     cli::{
-        self, AuthCommand, Command, GlobalFlags, Invocation, LocalCommand, ParseFailure,
-        ProfileCommand,
+        self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
+        ParseFailure, PriceFlags, ProfileCommand,
     },
     config::{self, Profile, Scope, Settings},
     context,
@@ -14,6 +14,7 @@ use crate::{
     pick,
     price::{PRICE_URL, PriceService},
     terminal::Terminal,
+    wallet_currency,
 };
 use serde::Serialize;
 use std::process::ExitCode;
@@ -94,7 +95,6 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         clap_complete::generate(shell, &mut cli::command(), BINARY_NAME, &mut script);
         return write_stdout(&script);
     }
-    let terminal = global.terminal();
     // `reserve` is false for a description, which goes to stdout and never reserves the file.
     let output = |reserve: bool| {
         Output::new(
@@ -104,37 +104,22 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         )
     };
     // Price commands need neither configuration nor credentials.
-    if let Command::Local(LocalCommand::Price(_) | LocalCommand::Convert(_)) = &command {
-        let mut out = output(true)?;
-        let service = PriceService::new(
-            global.price_url.as_deref().unwrap_or(PRICE_URL),
-            global.timeout,
-        )?;
-        const WAITING: &str = "Waiting for price service...";
-        let envelope = match command {
-            Command::Local(LocalCommand::Price(flags)) => Envelope::local(
-                terminal
-                    .during(WAITING, service.report(flags.at.as_deref()))
-                    .await?,
-            )?,
-            Command::Local(LocalCommand::Convert(flags)) => Envelope::local(
-                terminal
-                    .during(
-                        WAITING,
-                        service.convert(&flags.request(), flags.at.as_deref()),
-                    )
-                    .await?,
-            )?,
-            _ => unreachable!("matched above"),
-        };
-        return out.write(envelope, &[]);
-    }
+    let command = match PriceQuery::try_from(command) {
+        Ok(query) => {
+            let mut out = output(true)?;
+            let envelope = query.run(&global).await?;
+            return out.write(envelope, &[]);
+        }
+        Err(command) => command,
+    };
     let mut settings = Settings::open(config::directory(global.config_dir.clone())?)?;
     let mut scope = settings.scope(global.scope_selection())?;
     pick::fill(&command, &global, &settings, &mut scope, submission).await?;
     match command {
-        Command::Api(api) => {
+        Command::Api(mut api) => {
+            // `VOLTAGE_EXECUTE` and every local check run before the wallet is read.
             let execution = Execution::resolve(&api, config::execute_variable()?);
+            wallet_currency::fill(&mut api, &global, &settings, &scope, submission).await?;
             let mut out = output(!execution.describes())?;
             api::execute(
                 &api, execution, &global, &settings, &scope, &mut out, submission,
@@ -145,6 +130,52 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             let mut out = output(true)?;
             let envelope = local_command(local, &global, &mut settings, &scope, submission).await?;
             out.write(envelope, &[])
+        }
+    }
+}
+
+/// A command that reads only the price service.
+enum PriceQuery {
+    Report(PriceFlags),
+    Convert(ConvertFlags),
+}
+
+/// Every other command is handed back unchanged.
+impl TryFrom<Command> for PriceQuery {
+    type Error = Command;
+
+    fn try_from(command: Command) -> std::result::Result<Self, Command> {
+        match command {
+            Command::Local(LocalCommand::Price(flags)) => Ok(Self::Report(flags)),
+            Command::Local(LocalCommand::Convert(flags)) => Ok(Self::Convert(flags)),
+            other => Err(other),
+        }
+    }
+}
+
+impl PriceQuery {
+    /// Read the price service for `price` or `convert`.
+    async fn run(self, global: &GlobalFlags) -> Result<Envelope> {
+        let service = PriceService::new(
+            global.price_url.as_deref().unwrap_or(PRICE_URL),
+            global.timeout,
+        )?;
+        let terminal = global.terminal();
+        const WAITING: &str = "Waiting for price service...";
+        match self {
+            Self::Report(flags) => Envelope::local(
+                terminal
+                    .during(WAITING, service.report(flags.at.as_deref()))
+                    .await?,
+            ),
+            Self::Convert(flags) => Envelope::local(
+                terminal
+                    .during(
+                        WAITING,
+                        service.convert(&flags.request(), flags.at.as_deref()),
+                    )
+                    .await?,
+            ),
         }
     }
 }
@@ -246,5 +277,40 @@ async fn profiles(
                 deleted: true,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(args: &[&str]) -> Command {
+        Invocation::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn only_price_and_convert_are_price_queries() {
+        assert!(matches!(
+            PriceQuery::try_from(command(&[
+                "voltage",
+                "price",
+                "--at",
+                "2026-09-18T17:30:00Z"
+            ])),
+            Ok(PriceQuery::Report(PriceFlags { at: Some(_) }))
+        ));
+        assert!(matches!(
+            PriceQuery::try_from(command(&["voltage", "convert", "10", "usd", "--to", "btc"])),
+            Ok(PriceQuery::Convert(_))
+        ));
+        // Any other command comes back unchanged, so `execute` can go on with it.
+        assert!(matches!(
+            PriceQuery::try_from(command(&["voltage", "context"])),
+            Err(Command::Local(LocalCommand::Context))
+        ));
+        assert!(matches!(
+            PriceQuery::try_from(command(&["voltage", "wallets", "list"])),
+            Err(Command::Api(_))
+        ));
     }
 }

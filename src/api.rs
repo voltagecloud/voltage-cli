@@ -18,7 +18,9 @@ use crate::{
     error::{ErrorDetail, ErrorKind},
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output},
-    payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
+    payment::{
+        Currency, PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget,
+    },
     registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
     terminal::{self, Terminal},
@@ -581,6 +583,35 @@ pub async fn wallets(
         .send(operation.method, &request.path, &request.query, None)
         .await?
         .body)
+}
+
+/// The currency of a wallet's line of credit, which decides how its payments are
+/// denominated and whether they need a quote. A wallet has no currency field of its own, so
+/// this reads the wallet for its line of credit, then the line of credit's summary.
+pub async fn wallet_currency(
+    global: &GlobalFlags,
+    credential: ApiCredential,
+    org: Uuid,
+    wallet: Uuid,
+) -> Result<Currency> {
+    let api = Api::new(global, None, Authorization::Account(credential))?;
+    let path = format!("/organizations/{org}/wallets/{wallet}");
+    let read = api.send(Method::Get, &path, &[], None).await?.body;
+    let unknown = || {
+        Error::usage("Cannot tell this wallet's currency")
+            .with_hint("Pass --currency btc or --currency usd.")
+    };
+    let line = read
+        .get("line_of_credit_id")
+        .and_then(Value::as_str)
+        .ok_or_else(unknown)?;
+    let path = format!("/organizations/{org}/lines_of_credit/{line}/summary");
+    let summary = api.send(Method::Get, &path, &[], None).await?.body;
+    summary
+        .get("currency")
+        .cloned()
+        .and_then(|currency| serde_json::from_value(currency).ok())
+        .ok_or_else(unknown)
 }
 
 /// Whether an API command sends its request, and what decided it.
