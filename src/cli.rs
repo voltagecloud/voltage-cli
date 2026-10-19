@@ -426,7 +426,8 @@ pub struct PaymentFlags {
     /// Optional payment UUID
     #[arg(long)]
     pub id: Option<Uuid>,
-    /// Wallet currency for sends, receive currency for any-amount receives
+    /// Wallet currency for sends, receive currency for any-amount receives. Defaults to the
+    /// receive's --unit currency, else the wallet's line of credit currency (reads the wallet)
     #[arg(long, value_enum)]
     pub currency: Option<Currency>,
     /// BOLT11 invoice to pay
@@ -438,16 +439,16 @@ pub struct PaymentFlags {
     /// Receive kind; onchain and bip21 need the on_chain and bip21 features enabled by Voltage
     #[arg(long, value_enum)]
     pub kind: Option<ReceiveKind>,
-    /// Exact decimal amount; pair with --unit
+    /// Exact decimal amount, in --unit
     #[arg(long)]
     pub amount: Option<String>,
-    /// Unit of --amount
+    /// Unit of --amount. Defaults to the currency's base unit: msats or cents
     #[arg(long, value_enum)]
     pub unit: Option<AmountUnit>,
     /// Maximum network/provider fee; processing fees are additional
     #[arg(long)]
     pub max_fee: Option<String>,
-    /// Unit of --max-fee: msats, sats, or btc
+    /// Unit of --max-fee: msats, sats, or btc. Defaults to msats
     #[arg(long, value_enum)]
     pub fee_unit: Option<AmountUnit>,
     /// Quote UUID required by USD payment flows

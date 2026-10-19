@@ -157,6 +157,15 @@ impl Error {
         self
     }
 
+    /// Add a sentence after the hint the error already has, so neither is lost.
+    pub fn and_hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(match self.hint.take() {
+            Some(existing) => format!("{existing} {hint}").into(),
+            None => hint.into(),
+        });
+        self
+    }
+
     pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
         self.detail = Some(detail);
         self
@@ -226,6 +235,19 @@ mod tests {
         assert_eq!(ErrorKind::Interrupted.exit_code(), 130);
         assert_eq!(ErrorKind::for_http_status(403), ErrorKind::Auth);
         assert_eq!(ErrorKind::for_http_status(500), ErrorKind::Api);
+    }
+
+    #[test]
+    fn and_hint_adds_a_hint_or_appends_to_the_existing_one() {
+        let alone = Error::usage("failed").and_hint("Or pass --currency.");
+        assert_eq!(alone.hint.as_deref(), Some("Or pass --currency."));
+        let appended = Error::usage("failed")
+            .with_hint("Sign in.")
+            .and_hint("Or pass --currency.");
+        assert_eq!(
+            appended.hint.as_deref(),
+            Some("Sign in. Or pass --currency.")
+        );
     }
 
     #[test]

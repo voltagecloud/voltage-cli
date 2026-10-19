@@ -2382,6 +2382,279 @@ async fn a_described_change_reads_raw_bodies_and_shows_them_only_with_show_secre
 }
 
 #[tokio::test]
+async fn a_payment_without_currency_takes_its_wallets_line_of_credit_currency() {
+    let (server, dir) = fixture().await;
+    const LINE: &str = "55555555-5555-4555-8555-555555555555";
+    respond_once(
+        &server,
+        route("GET", format!("/organizations/{ORG}/wallets/{WALLET}")),
+        ok(json!({"id": WALLET, "line_of_credit_id": LINE})),
+    )
+    .await;
+    respond_once(
+        &server,
+        route(
+            "GET",
+            format!("/organizations/{ORG}/lines_of_credit/{LINE}/summary"),
+        ),
+        ok(json!({"id": LINE, "currency": "btc"})),
+    )
+    .await;
+    let send = [
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--wallet",
+        WALLET,
+        "--address",
+        "bc1qexample",
+        "--amount",
+        "1500",
+    ];
+    // A description reads the wallet as a real run would, so both send the same body; the
+    // amount without --unit is in the currency's base unit.
+    let described = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(send)
+        .assert()
+        .code(6);
+    let body = json_stdout(&described)["data"]["body"].clone();
+    assert_eq!(body["currency"], "btc");
+    assert_eq!(
+        body["data"]["amount"],
+        json!({"currency": "btc", "amount": 1500})
+    );
+    assert!(stderr(&described).contains("Using the wallet's currency, btc"));
+    server.verify().await;
+    let read = server.received_requests().await.unwrap().len();
+    assert_eq!(read, 2);
+
+    // A receive's --unit names its currency, and an explicit --currency is kept: no reads.
+    for args in [
+        &[
+            "payments", "receive", "--org", ORG, "--env", ENV, "--wallet", WALLET, "--kind",
+            "bolt11", "--amount", "2", "--unit", "sats",
+        ][..],
+        &[
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wallet",
+            WALLET,
+            "--currency",
+            "btc",
+            "--invoice",
+            "lnbc1",
+        ],
+    ] {
+        let described = cli(dir.path(), &server)
+            .env_remove("VOLTAGE_EXECUTE")
+            .args(args)
+            .assert()
+            .code(6);
+        // A receive with an amount carries its currency in the amount.
+        let body = json_stdout(&described)["data"]["body"].clone();
+        let currency = body["currency"]
+            .as_str()
+            .or(body["amount"]["currency"].as_str());
+        assert_eq!(currency, Some("btc"), "{args:?}");
+        assert!(
+            !stderr(&described).contains("wallet's currency"),
+            "{args:?}"
+        );
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), read);
+
+    // Without a credential there is nothing to read the wallet with; the hint says both fixes.
+    let missing = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .env_remove("VOLTAGE_API_KEY")
+        .args(send)
+        .assert()
+        .code(3);
+    assert!(stderr(&missing).contains("Or pass --currency to skip reading the wallet."));
+    assert_eq!(server.received_requests().await.unwrap().len(), read);
+
+    // Without a wallet there is nothing to read; the payment reports the missing wallet.
+    let unscoped: Vec<&str> = send
+        .iter()
+        .copied()
+        .filter(|arg| !matches!(*arg, "--wallet" | WALLET))
+        .collect();
+    let error = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(&unscoped)
+        .assert()
+        .code(2);
+    assert!(stderr(&error).contains("--wallet is required"));
+    assert_eq!(server.received_requests().await.unwrap().len(), read);
+
+    // A wallet without a line of credit has no currency to take, so the hint names the flag.
+    respond_once(
+        &server,
+        route("GET", format!("/organizations/{ORG}/wallets/{RESOURCE}")),
+        ok(json!({"id": RESOURCE})),
+    )
+    .await;
+    let mut other = send;
+    other[7] = RESOURCE;
+    let error = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(other)
+        .assert()
+        .code(2);
+    assert!(stderr(&error).contains("Cannot tell this wallet's currency"));
+    assert!(stderr(&error).contains("Pass --currency btc or --currency usd."));
+}
+
+/// A described send without `--currency` from `wallet`, which reads that wallet.
+fn currency_from_wallet(wallet: &str) -> Vec<&str> {
+    vec![
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--wallet",
+        wallet,
+        "--invoice",
+        "lnbc1",
+        "--amount",
+        "250",
+    ]
+}
+
+/// Serve `wallet` with the line of credit `line`, and that line's summary as `summary`.
+async fn serve_line_of_credit(
+    server: &MockServer,
+    wallet: &str,
+    line: &str,
+    summary: ResponseTemplate,
+    times: u64,
+) {
+    let wallet_read = ok(json!({"id": wallet, "line_of_credit_id": line}));
+    let wallet_path = format!("/organizations/{ORG}/wallets/{wallet}");
+    respond(server, route("GET", wallet_path), wallet_read, times).await;
+    let summary_path = format!("/organizations/{ORG}/lines_of_credit/{line}/summary");
+    respond(server, route("GET", summary_path), summary, times).await;
+}
+
+#[tokio::test]
+async fn a_wallet_whose_currency_cannot_be_read_fails_and_names_the_flag() {
+    let (server, dir) = fixture().await;
+    let unknown = "55555555-5555-4555-8555-555555555551";
+    let missing = "55555555-5555-4555-8555-555555555552";
+    let forbidden = "55555555-5555-4555-8555-555555555553";
+    let absent = "55555555-5555-4555-8555-555555555554";
+    serve_line_of_credit(
+        &server,
+        unknown,
+        RESOURCE,
+        ok(json!({"currency": "eur"})),
+        1,
+    )
+    .await;
+    serve_line_of_credit(&server, missing, ENV, ok(json!({"id": ENV})), 1).await;
+    let denied = ResponseTemplate::new(403).set_body_json(json!({"error": "forbidden"}));
+    serve_line_of_credit(&server, forbidden, ORG, denied, 1).await;
+    respond_once(
+        &server,
+        route("GET", format!("/organizations/{ORG}/wallets/{absent}")),
+        ResponseTemplate::new(404).set_body_json(json!({"error": "not_found"})),
+    )
+    .await;
+    // A summary with an unknown or no currency is not guessed at.
+    for wallet in [unknown, missing] {
+        let error = cli(dir.path(), &server)
+            .env_remove("VOLTAGE_EXECUTE")
+            .args(currency_from_wallet(wallet))
+            .assert()
+            .code(2);
+        assert!(stderr(&error).contains("Cannot tell this wallet's currency"));
+        assert!(stderr(&error).contains("Pass --currency btc or --currency usd."));
+    }
+    // A summary or wallet the API refuses reports the API's status, as any read does.
+    for (wallet, code, status) in [(forbidden, 3, 403), (absent, 1, 404)] {
+        let error = cli(dir.path(), &server)
+            .env_remove("VOLTAGE_EXECUTE")
+            .args(currency_from_wallet(wallet))
+            .assert()
+            .code(code);
+        let report: Value = serde_json::from_str(&stderr(&error)).unwrap();
+        assert_eq!(report["error"]["detail"]["http_status"], status, "{report}");
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_usd_wallet_denominates_its_payment_in_cents_and_needs_a_quote() {
+    let (server, dir) = fixture().await;
+    serve_line_of_credit(&server, WALLET, RESOURCE, ok(json!({"currency": "usd"})), 2).await;
+    let mut send = currency_from_wallet(WALLET);
+    send.extend(["--quote", RESOURCE]);
+    let described = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(&send)
+        .assert()
+        .code(6);
+    let body = json_stdout(&described)["data"]["body"].clone();
+    assert_eq!(body["currency"], "usd");
+    assert_eq!(
+        body["data"]["amount"],
+        json!({"currency": "usd", "amount": 250})
+    );
+    assert!(stderr(&described).contains("Using the wallet's currency, usd"));
+    // Without a quote the CLI refuses the USD payment itself, before any write.
+    let error = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(currency_from_wallet(WALLET))
+        .assert()
+        .code(2);
+    assert!(stderr(&error).contains("USD payment flows require an explicit quote_id"));
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn local_mistakes_fail_before_the_wallet_is_read_for_its_currency() {
+    let (server, dir) = fixture().await;
+    // No credential either: a local mistake must not need one.
+    let local = |args: &[&str], execute: Option<&str>| {
+        let mut cmd = cli(dir.path(), &server);
+        cmd.env_remove("VOLTAGE_API_KEY")
+            .env_remove("VOLTAGE_EXECUTE");
+        if let Some(value) = execute {
+            cmd.env("VOLTAGE_EXECUTE", value);
+        }
+        stderr(&cmd.args(args).assert().code(2))
+    };
+    let mut receive_flag = currency_from_wallet(WALLET);
+    receive_flag.extend(["--kind", "bolt11"]);
+    assert!(local(&receive_flag, None).contains("Send commands do not accept receive flags"));
+    let mut fee_unit = currency_from_wallet(WALLET);
+    fee_unit.extend(["--fee-unit", "sats"]);
+    assert!(local(&fee_unit, None).contains("--fee-unit requires --max-fee"));
+    let receive = [
+        "payments", "receive", "--org", ORG, "--env", ENV, "--wallet", WALLET, "--amount", "2",
+    ];
+    assert!(local(&receive, None).contains("--kind is required"));
+    let misspelled = local(&currency_from_wallet(WALLET), Some("yes"));
+    assert!(misspelled.contains("VOLTAGE_EXECUTE must be 1, true, 0, or false"));
+    let unscoped: Vec<&str> = currency_from_wallet(WALLET)
+        .into_iter()
+        .filter(|arg| !matches!(*arg, "--org" | ORG))
+        .collect();
+    assert!(local(&unscoped, None).contains("--org is required"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn checkout_session_reads_send_the_requested_origin() {
     let (server, dir) = fixture().await;
     // The Origin header decides whether a browser-bound session accepts the request.

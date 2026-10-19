@@ -366,24 +366,104 @@ fn create_wallet(flags: &WalletFlags, scope: &Scope) -> Result<CreateWalletBody>
     })
 }
 
-fn amount_with_unit(
+/// An amount in its `--unit`, or in `default` when none is given.
+fn amount_in(
     amount: Option<&str>,
     unit: Option<AmountUnit>,
-    unit_flag: &str,
+    default: AmountUnit,
 ) -> Result<Option<Amount>> {
     amount
-        .map(|value| Amount::parse(value, require(unit, unit_flag)?))
+        .map(|value| Amount::parse(value, unit.unwrap_or(default)))
         .transpose()
 }
 
-fn receive(flags: &PaymentFlags, wallet: Uuid, currency: Currency) -> Result<ReceiveBody> {
+/// A friendly payment whose flags passed every check that does not depend on its currency.
+enum CheckedPayment {
+    Receive(ReceiveKind),
+    Send(SendTarget),
+}
+
+/// Where a send pays to, and its fee limit, which is always in BTC.
+struct SendTarget {
+    destination: SendDestination,
+    max_fee: Option<Amount>,
+}
+
+/// Check the payment flags that do not depend on its currency, so a mistake in them fails
+/// before the CLI reads the wallet for its currency.
+pub fn check_payment(flags: &PaymentFlags, alias: Option<PaymentDirection>) -> Result<()> {
+    checked_payment(flags, alias).map(drop)
+}
+
+fn checked_payment(
+    flags: &PaymentFlags,
+    alias: Option<PaymentDirection>,
+) -> Result<CheckedPayment> {
+    if flags.unit.is_some() && flags.amount.is_none() {
+        return Err(Error::usage("--unit requires --amount"));
+    }
+    if flags.fee_unit.is_some() && flags.max_fee.is_none() {
+        return Err(Error::usage("--fee-unit requires --max-fee"));
+    }
+    metadata(&flags.metadata)?;
+    Ok(match alias {
+        Some(PaymentDirection::Receive) => CheckedPayment::Receive(receive_kind(flags)?),
+        Some(PaymentDirection::Send) | None => CheckedPayment::Send(send_target(flags)?),
+    })
+}
+
+/// A receive's kind, once the flags that only a send takes are ruled out.
+fn receive_kind(flags: &PaymentFlags) -> Result<ReceiveKind> {
     let kind = require(flags.kind, "kind")?;
     if flags.invoice.is_some() || flags.address.is_some() || flags.max_fee.is_some() {
         return Err(Error::usage(
             "Receive commands do not accept send destination or fee flags",
         ));
     }
-    let amount = amount_with_unit(flags.amount.as_deref(), flags.unit, "unit")?;
+    Ok(kind)
+}
+
+fn send_target(flags: &PaymentFlags) -> Result<SendTarget> {
+    let destination = match (&flags.invoice, &flags.address) {
+        (Some(invoice), None) => SendDestination::Bolt11 {
+            payment_request: invoice.clone(),
+        },
+        (None, Some(address)) => SendDestination::Onchain {
+            address: address.clone(),
+        },
+        _ => {
+            return Err(Error::usage(
+                "Provide exactly one of --invoice or --address; use payments receive for receiving",
+            ));
+        }
+    };
+    if flags.kind.is_some() || flags.expiration.is_some() {
+        return Err(Error::usage("Send commands do not accept receive flags"));
+    }
+    if matches!(destination, SendDestination::Onchain { .. }) && flags.amount.is_none() {
+        return Err(Error::usage("On-chain sends require --amount"));
+    }
+    // Network fees are always in BTC, so their base unit needs no currency.
+    let max_fee = amount_in(flags.max_fee.as_deref(), flags.fee_unit, AmountUnit::Msats)?;
+    if max_fee.is_some_and(|fee| fee.currency != Currency::Btc) {
+        return Err(Error::usage("Network fees must use BTC units"));
+    }
+    if flags.description.is_some() && matches!(destination, SendDestination::Bolt11 { .. }) {
+        return Err(Error::usage("BOLT11 sends do not accept --description"));
+    }
+    Ok(SendTarget {
+        destination,
+        max_fee,
+    })
+}
+
+fn receive(
+    flags: &PaymentFlags,
+    wallet: Uuid,
+    kind: ReceiveKind,
+    currency: Currency,
+) -> Result<ReceiveBody> {
+    let amount = amount_in(flags.amount.as_deref(), flags.unit, currency.base_unit())?;
     if amount.is_some_and(|amount| amount.currency != currency) {
         return Err(Error::usage("Receive currency must match the amount unit"));
     }
@@ -401,39 +481,18 @@ fn receive(flags: &PaymentFlags, wallet: Uuid, currency: Currency) -> Result<Rec
     })
 }
 
-fn send_body(flags: &PaymentFlags, wallet: Uuid, currency: Currency) -> Result<Value> {
-    let destination = match (&flags.invoice, &flags.address) {
-        (Some(invoice), None) => SendDestination::Bolt11 {
-            payment_request: invoice.clone(),
-        },
-        (None, Some(address)) => SendDestination::Onchain {
-            address: address.clone(),
-        },
-        _ => {
-            return Err(Error::usage(
-                "Provide exactly one of --invoice or --address; use payments receive for receiving",
-            ));
-        }
-    };
-    if flags.kind.is_some() || flags.expiration.is_some() {
-        return Err(Error::usage("Send commands do not accept receive flags"));
-    }
-    let amount = amount_with_unit(flags.amount.as_deref(), flags.unit, "unit")?;
+fn send_body(
+    flags: &PaymentFlags,
+    wallet: Uuid,
+    target: SendTarget,
+    currency: Currency,
+) -> Result<Value> {
+    let amount = amount_in(flags.amount.as_deref(), flags.unit, currency.base_unit())?;
     if amount.is_some_and(|amount| amount.amount == 0) {
         return Err(Error::usage("Send amount must be greater than zero"));
     }
-    if matches!(destination, SendDestination::Onchain { .. }) && amount.is_none() {
-        return Err(Error::usage("On-chain sends require --amount and --unit"));
-    }
-    let max_fee = amount_with_unit(flags.max_fee.as_deref(), flags.fee_unit, "fee-unit")?;
-    if max_fee.is_some_and(|fee| fee.currency != Currency::Btc) {
-        return Err(Error::usage("Network fees must use BTC units"));
-    }
-    if flags.description.is_some() && matches!(destination, SendDestination::Bolt11 { .. }) {
-        return Err(Error::usage("BOLT11 sends do not accept --description"));
-    }
     let metadata = metadata(&flags.metadata)?;
-    let (kind, payment_request, address) = match &destination {
+    let (kind, payment_request, address) = match &target.destination {
         SendDestination::Bolt11 { payment_request } => {
             (SendKind::Bolt11, Some(payment_request.as_str()), None)
         }
@@ -448,7 +507,7 @@ fn send_body(flags: &PaymentFlags, wallet: Uuid, currency: Currency) -> Result<V
             payment_request,
             address,
             amount,
-            max_fee,
+            max_fee: target.max_fee,
             description: flags.description.as_deref(),
         },
         quote_id: flags.quote,
@@ -460,18 +519,13 @@ fn payment(flags: &PaymentFlags, alias: Option<PaymentDirection>, scope: &Scope)
     let wallet = scope.wallet.ok_or_else(|| {
         Error::usage("--wallet is required for payment creation").with_hint(WALLET_HINT)
     })?;
+    let checked = checked_payment(flags, alias)?;
     let currency = require(flags.currency, "currency")?;
-    if flags.unit.is_some() && flags.amount.is_none() {
-        return Err(Error::usage("--unit requires --amount"));
-    }
-    if flags.fee_unit.is_some() && flags.max_fee.is_none() {
-        return Err(Error::usage("--fee-unit requires --max-fee"));
-    }
-    match alias {
-        Some(PaymentDirection::Receive) => {
-            Ok(serde_json::to_value(receive(flags, wallet, currency)?)?)
-        }
-        Some(PaymentDirection::Send) | None => send_body(flags, wallet, currency),
+    match checked {
+        CheckedPayment::Receive(kind) => Ok(serde_json::to_value(receive(
+            flags, wallet, kind, currency,
+        )?)?),
+        CheckedPayment::Send(target) => send_body(flags, wallet, target, currency),
     }
 }
 
@@ -889,7 +943,7 @@ mod tests {
         ]);
         assert_eq!(error, "Send commands do not accept receive flags");
         let error = request_error(&["payments", "send", "--currency", "btc", "--address", "bc1"]);
-        assert_eq!(error, "On-chain sends require --amount and --unit");
+        assert_eq!(error, "On-chain sends require --amount");
         let error = request_error(&[
             "payments",
             "send",
@@ -920,6 +974,87 @@ mod tests {
         assert_eq!(
             error,
             "--kind is required (or supply the complete --data payload)"
+        );
+    }
+
+    #[test]
+    fn amounts_without_a_unit_use_the_currency_base_unit_and_fees_use_msats() {
+        let amount = |args: &[&str]| build(args).unwrap().body.unwrap();
+        let send = amount(&[
+            "payments",
+            "send",
+            "--currency",
+            "btc",
+            "--address",
+            "bc1",
+            "--amount",
+            "1500",
+            "--max-fee",
+            "20",
+        ]);
+        assert_eq!(
+            send["data"]["amount"],
+            json!({"currency": "btc", "amount": 1500})
+        );
+        assert_eq!(
+            send["data"]["max_fee"],
+            json!({"currency": "btc", "amount": 20})
+        );
+        let receive = amount(&[
+            "payments",
+            "receive",
+            "--currency",
+            "usd",
+            "--kind",
+            "bolt11",
+            "--amount",
+            "250",
+            "--quote",
+            WALLET,
+        ]);
+        assert_eq!(receive["amount"], json!({"currency": "usd", "amount": 250}));
+        // An explicit unit still wins over the default.
+        let sats = amount(&[
+            "payments",
+            "receive",
+            "--currency",
+            "btc",
+            "--kind",
+            "bolt11",
+            "--amount",
+            "2",
+            "--unit",
+            "sats",
+        ]);
+        assert_eq!(sats["amount"], json!({"currency": "btc", "amount": 2000}));
+    }
+
+    #[test]
+    fn payment_flags_are_checked_without_a_currency() {
+        let check = |args: &[&str]| {
+            let mut full = vec!["voltage"];
+            full.extend_from_slice(args);
+            let Command::Api(api) = Invocation::try_parse_from(full).unwrap().command else {
+                panic!("expected an API command");
+            };
+            let Some(BodySource::Friendly(FriendlyFlags::Payment(flags))) = &api.body else {
+                panic!("expected payment flags");
+            };
+            check_payment(flags, api.alias).map_err(|error| error.message)
+        };
+        assert_eq!(check(&["payments", "send", "--invoice", "lnbc1"]), Ok(()));
+        assert_eq!(
+            check(&["payments", "receive", "--kind", "bolt11", "--amount", "5"]),
+            Ok(())
+        );
+        let error = check(&["payments", "send", "--invoice", "lnbc1", "--unit", "sats"]);
+        assert_eq!(error.unwrap_err(), "--unit requires --amount");
+        let error = check(&["payments", "send", "--address", "bc1"]);
+        assert_eq!(error.unwrap_err(), "On-chain sends require --amount");
+        let error = check(&["payments", "receive", "--kind", "bolt11", "--invoice", "x"]);
+        assert_eq!(
+            error.unwrap_err(),
+            "Receive commands do not accept send destination or fee flags"
         );
     }
 

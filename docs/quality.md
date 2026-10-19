@@ -56,7 +56,9 @@ not precedent. Reviews must approve and document exceptions.
   table layout in `output::human`, in `output`. Keep prompts, pickers, progress,
   notices, the terminal's width, and scrubbing of untrusted text bound for the
   terminal in `terminal`. Keep which commands ask for missing scope, and in what
-  order, in `pick`. Keep exit-code categories and typed error detail in `error`.
+  order, in `pick`. Keep the default `--currency` of a payment, read from its
+  wallet's line of credit, in `wallet_currency`. Keep exit-code categories and
+  typed error detail in `error`.
 - Name each module for the operation that it performs. Do not give two modules
   the same capability name. For example, keep private-file mechanics in
   `config` and redaction in `output`.

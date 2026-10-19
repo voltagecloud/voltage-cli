@@ -44,6 +44,27 @@ pub enum Currency {
     Usd,
 }
 
+/// The `--currency` spelling, as in a notice that names the currency in use.
+impl std::fmt::Display for Currency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Btc => "btc",
+            Self::Usd => "usd",
+        })
+    }
+}
+
+impl Currency {
+    /// The API's integer unit, which an amount without `--unit` uses: the smallest unit, so a
+    /// misread amount errs toward too little rather than too much.
+    pub fn base_unit(self) -> AmountUnit {
+        match self {
+            Self::Btc => AmountUnit::Msats,
+            Self::Usd => AmountUnit::Cents,
+        }
+    }
+}
+
 /// Unit of a decimal `--amount` or `--max-fee`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum AmountUnit {

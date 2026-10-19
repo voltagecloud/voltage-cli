@@ -20,6 +20,7 @@ pub mod registry;
 pub mod secret;
 mod startup;
 mod terminal;
+mod wallet_currency;
 
 pub(crate) use error::{Error, Result};
 pub use startup::run;
