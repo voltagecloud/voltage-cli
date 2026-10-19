@@ -37,6 +37,14 @@ so a pull request is not ready until each one is done and reported.
 A reviewer runs the CRAP report on the pull request's head and reports each violation as a
 finding, together with the review from step 1.
 
+## Work plans
+
+Agent work plans live in `docs/plans/<work-item>/` as Markdown files. This directory is
+gitignored on purpose: plans are local, disposable handoff notes for chunks of work, not
+reviewed project documentation or a source of truth. Keep durable decisions and user-facing
+behavior in tracked docs, code, and tests; create a subfolder per work item and revise or
+remove it as work progresses.
+
 ## Agent friction log
 
 The CLI must be easy for AI agents to use. When it is not, record why in
