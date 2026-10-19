@@ -43,7 +43,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # v1.23.0
+        uses: cargo-bins/cargo-binstall@3be4ad2b146f3302f92e5956c54fedbb6ae8cccc # v1.25.3
 
       - name: Install cargo-machete
         # --force: the Cargo cache can restore the install marker without the
@@ -95,7 +95,7 @@ jobs:
         run: bash scripts/package.sh '${{ matrix.target }}'
 
       - name: Upload package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: voltage-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -129,7 +129,7 @@ jobs:
         run: bash scripts/package.sh x86_64-pc-windows-msvc
 
       - name: Upload package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: voltage-x86_64-pc-windows-msvc
           path: dist/*.zip
