@@ -426,7 +426,8 @@ pub struct PaymentFlags {
     /// Optional payment UUID
     #[arg(long)]
     pub id: Option<Uuid>,
-    /// Wallet currency for sends, receive currency for any-amount receives
+    /// Wallet currency for sends, receive currency for any-amount receives. Defaults to the
+    /// wallet's line of credit currency (reads the wallet)
     #[arg(long, value_enum)]
     pub currency: Option<Currency>,
     /// BOLT11 invoice to pay
@@ -438,16 +439,16 @@ pub struct PaymentFlags {
     /// Receive kind; onchain and bip21 need the on_chain and bip21 features enabled by Voltage
     #[arg(long, value_enum)]
     pub kind: Option<ReceiveKind>,
-    /// Exact decimal amount; pair with --unit
+    /// Exact decimal amount, in --unit
     #[arg(long)]
     pub amount: Option<String>,
-    /// Unit of --amount
+    /// Unit of --amount. Defaults to the currency's base unit: msats or cents
     #[arg(long, value_enum)]
     pub unit: Option<AmountUnit>,
     /// Maximum network/provider fee; processing fees are additional
     #[arg(long)]
     pub max_fee: Option<String>,
-    /// Unit of --max-fee: msats, sats, or btc
+    /// Unit of --max-fee: msats, sats, or btc. Defaults to msats
     #[arg(long, value_enum)]
     pub fee_unit: Option<AmountUnit>,
     /// Quote UUID required by USD payment flows
@@ -989,10 +990,10 @@ fn group_about(path: &[String]) -> &'static str {
 fn friendly_requirements(id: OperationId, command_name: &str) -> Option<&'static str> {
     match (id, command_name) {
         (OperationId::CreatePayment, "send") => Some(
-            "Pass --wallet and --currency, plus exactly one of --invoice or --address. Pair --amount with --unit and --max-fee with --fee-unit; on-chain sends require amount and unit.",
+            "Pass --wallet and exactly one of --invoice or --address; on-chain sends also need --amount. Without --currency, the wallet's currency is read. --amount is in the currency's base unit (msats or cents) unless --unit is set, and a USD wallet read this way needs --unit. --max-fee is in msats unless --fee-unit is set.",
         ),
         (OperationId::CreatePayment, "receive") => Some(
-            "Pass --wallet, --currency, and --kind. If an amount is set, pass both --amount and --unit.",
+            "Pass --wallet and --kind. Without --currency, the wallet's currency is read, and --unit must be in it. --amount is in the currency's base unit (msats or cents) unless --unit is set, and a USD wallet read this way needs --unit.",
         ),
         (OperationId::CreateWallet, "create") => Some(
             "Select one environment with --env or --profile, then pass --name, --credit-line, --network, and --limit.",
