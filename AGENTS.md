@@ -14,6 +14,14 @@ Rules for coding agents working in this repository. Engineering conventions live
   change would exceed that, split the rest onto a new branch based on the one you changed
   and open it as a stacked pull request.
 
+## Work plans
+
+Agent work plans live in `docs/plans/<work-item>/` as Markdown files. This directory is
+gitignored on purpose: plans are local, disposable handoff notes for chunks of work, not
+reviewed project documentation or a source of truth. Keep durable decisions and user-facing
+behavior in tracked docs, code, and tests; create a subfolder per work item and revise or
+remove it as work progresses.
+
 ## Agent friction log
 
 The CLI must be easy for AI agents to use. When it is not, record why in
