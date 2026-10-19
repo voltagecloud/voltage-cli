@@ -491,12 +491,6 @@ pub async fn execute(
     check_invoice_flags(invocation, &request)?;
     let run = Run::plan(invocation, &request, scope);
     match execution {
-        Execution::DryRun => {
-            global
-                .terminal()
-                .notice("Dry run: nothing was authenticated, confirmed, recorded, or sent.");
-            return out.write(dry_run::describe(invocation, global, &request, run)?, &[]);
-        }
         Execution::DescribeChange => {
             out.write(dry_run::describe(invocation, global, &request, run)?, &[])?;
             return Err(Error::new(
@@ -560,8 +554,6 @@ pub async fn wallets(
 /// Whether an API command sends its request, and what decided it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Execution {
-    /// `--dry-run`: describe the command and succeed.
-    DryRun,
     /// A change with neither `--execute` nor `VOLTAGE_EXECUTE`: describe it, then fail, so
     /// a script that forgot `--execute` does not pass silently.
     DescribeChange,
@@ -576,7 +568,6 @@ impl Execution {
     /// changes are described.
     pub fn resolve(invocation: &ApiInvocation, execute_variable: Option<bool>) -> Self {
         match invocation.requested {
-            Requested::DryRun => Self::DryRun,
             Requested::Execute => Self::Send,
             Requested::Unspecified if invocation.operation.method == Method::Get => Self::Send,
             Requested::Unspecified if execute_variable == Some(true) => Self::SendFromEnvironment,
@@ -586,7 +577,7 @@ impl Execution {
 
     /// The command describes its request instead of sending it.
     pub fn describes(self) -> bool {
-        matches!(self, Self::DryRun | Self::DescribeChange)
+        self == Self::DescribeChange
     }
 }
 
@@ -594,7 +585,7 @@ pub const OFFSET_PAGINATION_DEPRECATED: &str =
     "Offset pagination is deprecated by the API; omit --offset and --pagination to page by cursor.";
 
 /// What a validated API command does, decided once after local validation. `execute`
-/// follows it and `--dry-run` reports it, so the two cannot disagree.
+/// follows it and a described change reports it, so the two cannot disagree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Run {
@@ -1785,17 +1776,15 @@ mod tests {
     fn the_flag_decides_then_voltage_execute_then_reads_send_and_changes_are_described() {
         let resolve = |args: &[&str], variable| Execution::resolve(&invocation(args), variable);
         let change = ["wallets", "delete", WALLET];
-        let dry_run = ["wallets", "delete", WALLET, "--dry-run"];
         let execute = ["wallets", "delete", WALLET, "--execute"];
         for variable in [None, Some(false), Some(true)] {
-            assert_eq!(resolve(&dry_run, variable), Execution::DryRun);
             assert_eq!(resolve(&execute, variable), Execution::Send);
             assert_eq!(resolve(&["wallets", "list"], variable), Execution::Send);
         }
         assert_eq!(resolve(&change, None), Execution::DescribeChange);
         assert_eq!(resolve(&change, Some(false)), Execution::DescribeChange);
         assert_eq!(resolve(&change, Some(true)), Execution::SendFromEnvironment);
-        assert!(Execution::DescribeChange.describes() && Execution::DryRun.describes());
+        assert!(Execution::DescribeChange.describes());
         assert!(!Execution::SendFromEnvironment.describes());
     }
 

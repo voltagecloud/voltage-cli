@@ -1,5 +1,5 @@
 // Documentation examples, shared by the unit test that parses them and the integration
-// test that runs every documented change offline with `--dry-run`. Included with
+// test that describes every documented change offline, without `--execute`. Included with
 // `include!`, so it names its own imports.
 
 use std::path::PathBuf;

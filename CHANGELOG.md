@@ -8,7 +8,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 - Pick a missing organization, environment, or wallet from a list on a terminal.
 - `voltage context` shows the effective profile, scope, credential, API and auth URLs, and where each came from.
-- `--dry-run` describes any API request offline; changes are only described unless `--execute` or `VOLTAGE_EXECUTE=1` asks to send them.
+- Changes are only described (exit code 6) unless `--execute` or `VOLTAGE_EXECUTE=1` asks to send them; the description is built offline and sends nothing.
 - `--no-input` and `--quiet`, with interrupt-safe progress and the time waited so far on payment waits and device approval.
 - `voltage --version` shows the git build.
 - Every command that changes something has examples in `--help`, and every command links its guide.

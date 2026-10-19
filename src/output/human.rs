@@ -284,7 +284,7 @@ struct Line {
 }
 
 /// Nested objects flatten to dotted field names; amounts stay whole. A list of strings, such
-/// as a dry run's notes, puts each item on its own line under the first. In a local result, a
+/// as a described change's notes, puts each item on its own line under the first. In a local result, a
 /// `{value, source}` setting reads `name  value  (source)`.
 fn fields(out: &mut impl Write, map: &Map<String, Value>, local: bool) -> Result<()> {
     let mut lines = Vec::new();
