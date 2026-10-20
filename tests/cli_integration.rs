@@ -3009,7 +3009,8 @@ struct TerminalRun {
 }
 
 /// Run a command with stdin and stderr on a pseudo-terminal and stdout piped. For each step,
-/// once the terminal shows its prompt after the previous step's, type its keys.
+/// once the terminal shows its prompt after the previous step's, type its keys. A step with
+/// no keys sends SIGINT instead, as the terminal does to its foreground process.
 #[cfg(unix)]
 async fn on_a_terminal(
     dir: &Path,
@@ -3071,7 +3072,11 @@ async fn on_a_terminal(
             .await
             .unwrap()
             .unwrap();
-        (&observer).write_all(keys).unwrap();
+        if keys.is_empty() {
+            interrupt(&child);
+        } else {
+            (&observer).write_all(keys).unwrap();
+        }
     }
     let pid = child.id().to_string();
     let Ok(output) = tokio::time::timeout(
@@ -3362,6 +3367,215 @@ async fn a_login_picks_an_organization_then_an_environment() {
     assert_eq!(run.code, Some(0), "{}", run.shown);
     assert!(!run.shown.contains("Environment:"), "{}", run.shown);
     auth.verify().await;
+}
+
+/// `profiles create` with a login, which asks for an organization and then an environment.
+#[cfg(unix)]
+const CREATE_PROFILE: [&str; 7] = [
+    "profiles",
+    "create",
+    "prod",
+    "--account",
+    LOGIN_NAME,
+    "--output",
+    "table",
+];
+
+/// A listing or exchange that fails during a pick exits with its own error, not the missing
+/// scope error the pick would have left, and suggests no flags.
+#[cfg(unix)]
+fn assert_failed_pick(run: &TerminalRun, error: &str) {
+    assert_eq!(run.code, Some(3), "{}", run.shown);
+    assert!(run.shown.contains(error), "{}", run.shown);
+    assert!(!run.shown.contains("is required"), "{}", run.shown);
+    assert!(!run.shown.contains("Next time"), "{}", run.shown);
+    assert_eq!(run.modes.0, run.modes.1);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_listing_or_exchange_ends_the_pick_with_its_own_error() {
+    let (api, dir) = fixture().await;
+    let organizations = || ok(json!({"organizations": [{"id": ORG, "name": "Acme"}]}));
+    let environments = format!("/organizations/{ORG}/environments");
+
+    // The auth service fails to list organizations: nothing is offered.
+    let auth = MockServer::start().await;
+    seeded_login(dir.path(), &auth, false);
+    respond_once(
+        &auth,
+        route("GET", "/users/current"),
+        ResponseTemplate::new(500),
+    )
+    .await;
+    let run = on_a_terminal(dir.path(), &api, &CREATE_PROFILE, &[]).await;
+    assert_failed_pick(&run, "Authentication failed (HTTP 500");
+    assert!(!run.shown.contains("Organization:"), "{}", run.shown);
+    auth.verify().await;
+
+    // The organization token exchange is rejected after the pick.
+    let auth = MockServer::start().await;
+    seeded_login(dir.path(), &auth, false);
+    respond_once(&auth, route("GET", "/users/current"), organizations()).await;
+    respond_once(
+        &auth,
+        route("POST", "/oauth/token"),
+        ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"})),
+    )
+    .await;
+    let run = on_a_terminal(
+        dir.path(),
+        &api,
+        &CREATE_PROFILE,
+        &[("Organization:", b"\r")],
+    )
+    .await;
+    assert_failed_pick(&run, "Authentication failed (HTTP 400, invalid_grant)");
+    auth.verify().await;
+
+    // The auth service fails to list environments in the picked organization.
+    let auth = MockServer::start().await;
+    seeded_login(dir.path(), &auth, false);
+    respond_once(&auth, route("GET", "/users/current"), organizations()).await;
+    organization_exchange(&auth, LOGIN_ACCESS, ORG, "picker-access", 1).await;
+    respond_once(
+        &auth,
+        route("GET", environments.as_str()),
+        ResponseTemplate::new(500),
+    )
+    .await;
+    let run = on_a_terminal(
+        dir.path(),
+        &api,
+        &CREATE_PROFILE,
+        &[("Organization:", b"\r")],
+    )
+    .await;
+    assert_failed_pick(&run, "Authentication failed (HTTP 500");
+    assert!(!run.shown.contains("Environment:"), "{}", run.shown);
+    auth.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn esc_at_the_organization_or_environment_picker_keeps_the_missing_scope_error() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    let organizations = json!({"organizations": [{"id": ORG, "name": "Acme"}]});
+    respond(&auth, route("GET", "/users/current"), ok(organizations), 2).await;
+    organization_exchange(&auth, LOGIN_ACCESS, ORG, "picker-access", 1).await;
+    respond_once(
+        &auth,
+        route("GET", format!("/organizations/{ORG}/environments")),
+        ok(json!([{"id": ENV, "name": "prod"}])),
+    )
+    .await;
+
+    let run = on_a_terminal(
+        dir.path(),
+        &api,
+        &CREATE_PROFILE,
+        &[("Organization:", b"\x1b")],
+    )
+    .await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(run.shown.contains("--org is required"), "{}", run.shown);
+    assert!(!run.shown.contains("Environment:"), "{}", run.shown);
+    assert!(!run.shown.contains("Next time"), "{}", run.shown);
+    assert_eq!(run.modes.0, run.modes.1);
+
+    let steps: &[(&str, &[u8])] = &[("Organization:", b"\r"), ("Environment:", b"\x1b")];
+    let run = on_a_terminal(dir.path(), &api, &CREATE_PROFILE, steps).await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("Exactly one --env is required for this operation"),
+        "{}",
+        run.shown
+    );
+    // The organization picked before Esc is still suggested.
+    assert!(
+        run.shown.contains(&format!("Next time, pass --org {ORG}.")),
+        "{}",
+        run.shown
+    );
+    assert_eq!(run.modes.0, run.modes.1);
+    auth.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_wallet_listing_or_two_environments_end_the_pick_with_their_own_error() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)).and(query_param("environment_id", ENV)),
+        ResponseTemplate::new(403).set_body_json(json!({"message": "forbidden"})),
+    )
+    .await;
+    let mut send = vec![
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--currency",
+        "btc",
+        "--invoice",
+        "lnbc1",
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &send, &[]).await;
+    assert_failed_pick(&run, "Voltage API returned HTTP 403");
+    server.verify().await;
+
+    send.extend(["--env", RESOURCE]);
+    let run = on_a_terminal(dir.path(), &server, &send, &[]).await;
+    // Two environments are refused before any listing, as `wallets list` refuses them.
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("This operation accepts only one environment filter"),
+        "{}",
+        run.shown
+    );
+    assert!(!run.shown.contains("Wallet:"), "{}", run.shown);
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signal_at_the_picker_restores_the_terminal() {
+    let (server, dir) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path(wallets_path(ORG)))
+        .respond_with(ok(json!([{"id": WALLET, "name": "Payroll"}])))
+        .mount(&server)
+        .await;
+    let send = [
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--currency",
+        "btc",
+        "--invoice",
+        "lnbc1",
+        "--output",
+        "table",
+    ];
+    // SIGINT ends the command while the picker's read is still blocked, so the picker cannot
+    // turn bracketed paste off itself; the guard does.
+    let run = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"")]).await;
+    assert_eq!(run.code, Some(130), "{}", run.shown);
+    let (_, after) = run.shown.split_once("Wallet:").unwrap();
+    assert!(after.contains("\x1b[?2004l\x1b[?25h"), "{after:?}");
+    assert_eq!(run.modes.0, run.modes.1);
 }
 
 // ---------------------------------------------------------------------------------------
