@@ -69,7 +69,7 @@ voltage profiles delete staging
 
 ## See the effective scope
 
-`voltage context` shows the effective profile, account, organization, environments, wallet, API URL, and configuration directory, and where each came from (`flag`, `profile`, `environment`, `default`, or `unset`). It reports why commands would reject the credential selection as `credential_problem` (`empty_api_key`, `no_credential`, `multiple_credentials`, `unknown_credential`, or `bound_elsewhere` for an API key used outside its organization or environment), using the same selection commands use. It also lists `VOLTAGE_*` variables that are set but ignored because a flag or the selected profile takes precedence. It reads no saved secret, makes no network request, and creates no files:
+`voltage context` shows the effective profile, account, organization, environments, wallet, API and auth URLs, and configuration directory, and where each came from (`flag`, `profile`, `environment`, `default`, or `unset`). It reports why commands would reject the credential selection as `credential_problem` (`empty_api_key`, `no_credential`, `multiple_credentials`, `unknown_credential`, `bound_elsewhere` for an API key used outside its organization or environment, or `auth_url_mismatch` for a browser login used with a different `--auth-url`), using the same selection commands use. It also lists `VOLTAGE_*` variables that are set but ignored because a flag or the selected profile takes precedence. It reads no saved secret, makes no network request, and creates no files:
 
 ```sh
 voltage context --profile staging

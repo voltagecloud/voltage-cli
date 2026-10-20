@@ -913,6 +913,11 @@ async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
     assert_eq!(data["wallet_id"], setting(json!(WALLET), "flag"));
     assert_eq!(data["webhook_id"], setting(Value::Null, "unset"));
     assert_eq!(data["api_url"], setting(json!(server.uri()), "flag"));
+    // A saved key never uses the auth service, so its URL is the default, not the profile's.
+    assert_eq!(
+        data["auth_url"],
+        setting(json!(config::AUTH_URL), "default")
+    );
     assert_eq!(
         data["config_dir"],
         setting(json!(dir.path().display().to_string()), "flag")
@@ -1010,6 +1015,89 @@ async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
     assert_eq!(data["account"], setting(Value::Null, "unset"));
     assert_eq!(data["credential_problem"], "multiple_credentials");
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn context_reports_the_auth_url_commands_would_use() {
+    let (server, dir) = fixture().await;
+    let auth = MockServer::start().await;
+    seeded_login(dir.path(), &auth, false);
+    let setting = |value: &str, source: &str| json!({"value": value, "source": source});
+    let context = |args: &[&str], ambient: bool| {
+        let mut command = cli(dir.path(), &server);
+        if !ambient {
+            command.env_remove("VOLTAGE_API_KEY");
+        }
+        json_stdout(&command.arg("context").args(args).assert().success())["data"].clone()
+    };
+
+    // The ambient key uses no auth service: the built-in default, or the normalized flag.
+    let data = context(&[], true);
+    assert_eq!(data["auth_url"], setting(config::AUTH_URL, "default"));
+    let data = context(&["--auth-url", "https://auth.example.com/api/v1/"], true);
+    assert_eq!(
+        data["auth_url"],
+        setting("https://auth.example.com/api/v1", "flag")
+    );
+    assert_eq!(data["credential_problem"], Value::Null);
+
+    // A browser login reports the URL it was saved with, sourced like the credential. A flag
+    // that normalizes to it is no problem.
+    let saved = auth.uri();
+    let data = context(&[], false);
+    assert_eq!(data["auth_url"], setting(&saved, "default"));
+    let data = context(
+        &["--account", LOGIN_NAME, "--auth-url", &format!("{saved}/")],
+        false,
+    );
+    assert_eq!(data["auth_url"], setting(&saved, "flag"));
+    assert_eq!(data["credential_problem"], Value::Null);
+
+    // A different flag is reported the way commands reject it.
+    let other = ["--auth-url", "https://auth.example.com/api/v1"];
+    let data = context(&other, false);
+    assert_eq!(data["auth_url"], setting(&saved, "default"));
+    assert_eq!(
+        data["credential"],
+        json!({"kind": "user", "location": "file"})
+    );
+    assert_eq!(data["credential_problem"], "auth_url_mismatch");
+    let rejected = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["wallets", "list", "--org", ORG, "--env", ENV])
+        .args(other)
+        .assert()
+        .code(2);
+    let shown = stderr(&rejected);
+    assert!(
+        shown.contains("Saved credentials cannot be refreshed at a different auth URL"),
+        "{shown}"
+    );
+    assert!(shown.contains("Omit --auth-url"), "{shown}");
+    // `login` refuses a saved name, so moving the login names a revoking logout first.
+    assert!(
+        shown.contains(
+            "run `voltage logout --account NAME`, then `voltage login --account NAME --auth-url URL`"
+        ),
+        "{shown}"
+    );
+
+    // An invalid flag is an invalid URL, for context and commands alike.
+    let invalid = ["--auth-url", "http://auth.example.com"];
+    for command in [
+        &["context"][..],
+        &["wallets", "list", "--org", ORG, "--env", ENV],
+    ] {
+        let failed = cli(dir.path(), &server)
+            .env_remove("VOLTAGE_API_KEY")
+            .args(command)
+            .args(invalid)
+            .assert()
+            .code(2);
+        assert!(stderr(&failed).contains("Service URLs require HTTPS"));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(auth.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -4015,6 +4103,94 @@ async fn a_signal_at_the_picker_restores_the_terminal() {
     let (_, after) = run.shown.split_once("Wallet:").unwrap();
     assert!(after.contains("\x1b[?2004l\x1b[?25h"), "{after:?}");
     assert_eq!(run.modes.0, run.modes.1);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": "sending"})),
+            ok(json!({"id": RESOURCE, "status": "completed"})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &[
+            "payments",
+            "get",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wait",
+            "completed",
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("Waiting for the payment to be completed... 0s"),
+        "{}",
+        run.shown
+    );
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn device_approval_on_a_terminal_shows_how_long_it_has_waited() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/device_authorization"),
+        ok(json!({
+            "device_code":"device-secret","user_code":"ABCD-EFGH",
+            "verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/token"),
+        ok(json!({
+            "access_token":"login-access-secret","refresh_token":"login-refresh-secret",
+            "token_type":"Bearer","expires_in":600
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", "/users/current"),
+        ok(json!({"id":RESOURCE,"email":LOGIN_EMAIL})),
+    )
+    .await;
+    let uri = server.uri();
+    let args = [
+        "login",
+        "--auth-url",
+        &uri,
+        "--no-browser",
+        "--account",
+        LOGIN_NAME,
+        "--credential-store",
+        "file",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown.contains("Waiting for device approval... 0s"),
+        "{}",
+        run.shown
+    );
+    server.verify().await;
 }
 
 // ---------------------------------------------------------------------------------------

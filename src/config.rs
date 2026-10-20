@@ -107,6 +107,9 @@ pub(crate) enum CredentialProblem {
     UnknownCredential,
     /// The saved API key is bound to a different organization or environment.
     BoundElsewhere,
+    /// `--auth-url` names a different auth service than the one the browser login was saved
+    /// with, and a login refreshes only at its recorded origin.
+    AuthUrlMismatch,
 }
 
 impl CredentialProblem {
@@ -139,6 +142,12 @@ impl CredentialProblem {
                 "Saved credentials: {}. Select a key for this scope or a browser login with --account NAME.",
                 saved.unwrap_or_default()
             )),
+            Self::AuthUrlMismatch => Error::usage(
+                "Saved credentials cannot be refreshed at a different auth URL",
+            )
+            .with_hint(
+                "Omit --auth-url to use the URL the login was saved with (`voltage context` shows it). To move the login to this URL, run `voltage logout --account NAME`, then `voltage login --account NAME --auth-url URL`.",
+            ),
         }
     }
 }

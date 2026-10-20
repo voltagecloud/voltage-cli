@@ -8,7 +8,9 @@ use crate::{
     Result,
     auth::{self, Rejected, Selected},
     cli::GlobalFlags,
-    config::{self, API_URL, AccountKind, CredentialProblem, CredentialStore, Settings, Source},
+    config::{
+        self, API_URL, AUTH_URL, AccountKind, CredentialProblem, CredentialStore, Settings, Source,
+    },
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -81,6 +83,11 @@ pub struct Context {
     wallet_id: Setting<Option<Uuid>>,
     webhook_id: Setting<Option<Uuid>>,
     api_url: Setting<String>,
+    /// Where a browser login signs in and refreshes. A selected browser login always uses the
+    /// URL it was saved with (sourced like the credential); a different `--auth-url` is the
+    /// `auth_url_mismatch` credential problem. An API key never uses the auth service, so
+    /// otherwise it is the normalized flag, else the built-in default.
+    auth_url: Setting<String>,
     config_dir: Setting<String>,
     config_file: ConfigFile,
     /// Whether changes are sent without `--execute`, from `VOLTAGE_EXECUTE`, so an exported
@@ -123,6 +130,23 @@ pub fn inspect(settings: &Settings, global: &GlobalFlags) -> Result<Context> {
         },
     };
     let credential = selected.as_ref().map(CredentialSummary::from);
+    let flag = global.auth_url.as_deref().map(auth::base_url).transpose()?;
+    let auth_url = match (&selected, flag) {
+        (Some(Selected::Saved { account: saved, .. }), _) if saved.kind == AccountKind::User => {
+            Setting {
+                value: saved.auth_url.clone(),
+                source: account.source,
+            }
+        }
+        (_, Some(url)) => Setting {
+            value: url,
+            source: Source::Flag,
+        },
+        (_, None) => Setting {
+            value: AUTH_URL.to_owned(),
+            source: Source::Default,
+        },
+    };
     let config_file = settings.config_file();
     Ok(Context {
         profile: Setting {
@@ -162,6 +186,7 @@ pub fn inspect(settings: &Settings, global: &GlobalFlags) -> Result<Context> {
                 source: Source::Default,
             },
         },
+        auth_url,
         config_dir: Setting {
             value: settings.dir.display().to_string(),
             source: config_dir_source,
