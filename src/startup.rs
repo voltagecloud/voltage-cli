@@ -112,26 +112,107 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         }
         Err(command) => command,
     };
-    let mut settings = Settings::open(config::directory(global.config_dir.clone())?)?;
-    let mut scope = settings.scope(global.scope_selection())?;
-    let resolver = Resolver {
-        settings: &settings,
-        flags: &global,
-        submission,
-    };
-    pick::fill(&command, &global, resolver, &mut scope).await?;
+    let mut session = Session::open(&command, &global, submission).await?;
     match command {
         Command::Api(mut api) => {
             // `VOLTAGE_EXECUTE` and every local check run before the wallet is read.
             let execution = Execution::resolve(&api, config::execute_variable()?);
-            wallet_currency::fill(&mut api, &global, resolver, &scope).await?;
+            let resolver = session.resolver();
+            wallet_currency::fill(&mut api, &global, resolver, &session.scope).await?;
             let mut out = output(!execution.describes())?;
-            api::execute(&api, execution, &global, resolver, &scope, &mut out).await
+            api::execute(&api, execution, &global, resolver, &session.scope, &mut out).await
         }
         Command::Local(local) => {
             let mut out = output(true)?;
-            let envelope = local_command(local, &global, &mut settings, &scope, submission).await?;
+            let envelope = session.local(local).await?;
             out.write(envelope, &[])
+        }
+    }
+}
+
+/// One command once its configuration is read and its scope is complete: what the flags
+/// asked for, the saved settings, the scope, and what the command may have changed.
+/// Commands run from here; what they call receives only the parts it uses.
+struct Session<'a> {
+    global: &'a GlobalFlags,
+    settings: Settings,
+    scope: Scope,
+    submission: &'a SubmissionState,
+}
+
+impl<'a> Session<'a> {
+    /// Read the configuration and select the scope, then ask for any scope the command needs
+    /// and lacks. The scope does not change after this.
+    async fn open(
+        command: &Command,
+        global: &'a GlobalFlags,
+        submission: &'a SubmissionState,
+    ) -> Result<Self> {
+        let settings = Settings::open(config::directory(global.config_dir.clone())?)?;
+        let mut scope = settings.scope(global.scope_selection())?;
+        let resolver = Resolver {
+            settings: &settings,
+            flags: global,
+            submission,
+        };
+        pick::fill(command, global, resolver, &mut scope).await?;
+        Ok(Self {
+            global,
+            settings,
+            scope,
+            submission,
+        })
+    }
+
+    fn resolver(&self) -> Resolver<'_> {
+        Resolver {
+            settings: &self.settings,
+            flags: self.global,
+            submission: self.submission,
+        }
+    }
+
+    async fn local(&mut self, command: LocalCommand) -> Result<Envelope> {
+        let (global, scope, submission) = (self.global, &self.scope, self.submission);
+        match command {
+            LocalCommand::Login(flags) => {
+                Envelope::local(auth::login(&mut self.settings, &flags, global, submission).await?)
+            }
+            LocalCommand::Logout(flags) => Envelope::local(
+                auth::logout(
+                    &mut self.settings,
+                    scope,
+                    flags.local,
+                    global.terminal(),
+                    submission,
+                )
+                .await?,
+            ),
+            LocalCommand::Auth {
+                command: AuthCommand::Status,
+            } => Envelope::local(auth::status(&self.settings, scope, global)?),
+            LocalCommand::Auth {
+                command: AuthCommand::ImportKey(flags),
+            } => {
+                Envelope::local(auth::import_key(&mut self.settings, scope, &flags, global).await?)
+            }
+            LocalCommand::Organizations { .. } => Envelope::local(
+                self.resolver()
+                    .discover(scope, Discovery::Organizations)
+                    .await?,
+            ),
+            LocalCommand::Environments { .. } => Envelope::local(
+                self.resolver()
+                    .discover(scope, Discovery::Environments)
+                    .await?,
+            ),
+            LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?),
+            LocalCommand::Profiles { command } => {
+                profiles(command, &mut self.settings, scope, global.terminal()).await
+            }
+            LocalCommand::Completions { .. }
+            | LocalCommand::Price(_)
+            | LocalCommand::Convert(_) => Err(Error::usage("This command needs no configuration")),
         }
     }
 }
@@ -178,54 +259,6 @@ impl PriceQuery {
                     )
                     .await?,
             ),
-        }
-    }
-}
-
-async fn local_command(
-    command: LocalCommand,
-    global: &GlobalFlags,
-    settings: &mut Settings,
-    scope: &Scope,
-    submission: &SubmissionState,
-) -> Result<Envelope> {
-    match command {
-        LocalCommand::Login(flags) => {
-            Envelope::local(auth::login(settings, &flags, global, submission).await?)
-        }
-        LocalCommand::Logout(flags) => Envelope::local(
-            auth::logout(settings, scope, flags.local, global.terminal(), submission).await?,
-        ),
-        LocalCommand::Auth {
-            command: AuthCommand::Status,
-        } => Envelope::local(auth::status(settings, scope, global)?),
-        LocalCommand::Auth {
-            command: AuthCommand::ImportKey(flags),
-        } => Envelope::local(auth::import_key(settings, scope, &flags, global).await?),
-        LocalCommand::Organizations { .. } => Envelope::local(
-            Resolver {
-                settings,
-                flags: global,
-                submission,
-            }
-            .discover(scope, Discovery::Organizations)
-            .await?,
-        ),
-        LocalCommand::Environments { .. } => Envelope::local(
-            Resolver {
-                settings,
-                flags: global,
-                submission,
-            }
-            .discover(scope, Discovery::Environments)
-            .await?,
-        ),
-        LocalCommand::Context => Envelope::settings(context::inspect(settings, global)?),
-        LocalCommand::Profiles { command } => {
-            profiles(command, settings, scope, global.terminal()).await
-        }
-        LocalCommand::Completions { .. } | LocalCommand::Price(_) | LocalCommand::Convert(_) => {
-            Err(Error::usage("This command needs no configuration"))
         }
     }
 }
