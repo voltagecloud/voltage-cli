@@ -16,6 +16,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - Guides for wallets, webhooks, troubleshooting, and getting started, and references for global flags, environment variables, and configuration.
 - A command that takes a resource ID as an argument also accepts `--id ID`, so the flag that `quotes create` and `payments send` take works there too. It takes one of the two, and its usage line shows both, as in `voltage quotes get <QUOTE_ID|--id <ID>>`.
 - In human output, an accepted `payments receive` or `quotes create` names the command that shows the invoice, address, or quote, with the organization, environment, and account that the command used.
+- A 403 to `VOLTAGE_API_KEY` says that the key came from that variable and where the organization came from, and suggests `--account NAME` or unsetting the variable. `--json` reports both as `error.detail.credential_sources`.
 - The wallet picker shows a wallet's currency when its balances report one, and typing a currency filters on it. A wallet with no balance yet shows no currency.
 
 ### Changed

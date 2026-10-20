@@ -83,7 +83,13 @@ A checkout command presents its session or stream token, not the account credent
 
 The credential is valid but cannot reach the selected organization or environment. `voltage context` shows which scope and credential the command used.
 
-If `voltage context` shows the credential's location as `environment`, the command used `VOLTAGE_API_KEY` instead of a saved login. Check that the key belongs to the selected organization, or unset `VOLTAGE_API_KEY` (or pass `--account NAME`) to use a saved login.
+When the command used `VOLTAGE_API_KEY` instead of a saved login, the hint says so, and names where the organization came from:
+
+```text
+hint: The API key came from VOLTAGE_API_KEY and the organization from VOLTAGE_ORGANIZATION_ID. Check that the key can reach the organization, environment, and wallet in use, which `voltage context` shows, or pass --account NAME or unset VOLTAGE_API_KEY to use a saved login.
+```
+
+With `--json`, `error.detail.credential_sources` holds the same sources, as `{"credential": "environment", "organization": "environment"}`. The credential is always `environment`. The organization is `environment` for `VOLTAGE_ORGANIZATION_ID`, `flag` for `--org`, and `unset` when neither supplies it.
 
 ### Cannot read OS credential store
 

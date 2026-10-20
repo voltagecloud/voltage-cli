@@ -154,7 +154,7 @@ async fn ask(
         picked.push(format!("--env {env}"));
     }
     if missing.wallet {
-        let listed = api::wallets(global, credential, scope).await?;
+        let listed = api::wallets(global, credential, resolver.credential_sources, scope).await?;
         let Some(wallet) = choose(terminal, "Wallet:", "wallets", &listed).await? else {
             return Ok(picked);
         };

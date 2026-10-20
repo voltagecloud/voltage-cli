@@ -39,7 +39,8 @@ pub async fn fill(
         .resolve_organization(scope)
         .await
         .map_err(|error| error.and_hint("Or pass --currency to skip reading the wallet."))?;
-    let currency = api::wallet_currency(global, credential, org, wallet).await?;
+    let currency =
+        api::wallet_currency(global, credential, resolver.credential_sources, org, wallet).await?;
     check_unit(flags, currency)?;
     global.terminal().notice(format!(
         "Using the wallet's currency, {currency}; pass --currency to choose another."

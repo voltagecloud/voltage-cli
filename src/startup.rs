@@ -10,6 +10,7 @@ use crate::{
     },
     config::{self, Profile, Scope, Settings},
     context,
+    error::CredentialSources,
     output::{Envelope, Output, OutputFormat, report_error, write_stdout},
     pick,
     price::{PRICE_URL, PriceService},
@@ -138,6 +139,7 @@ struct Session<'a> {
     settings: Settings,
     scope: Scope,
     submission: &'a SubmissionState,
+    credential_sources: Option<CredentialSources>,
 }
 
 impl<'a> Session<'a> {
@@ -149,11 +151,13 @@ impl<'a> Session<'a> {
         submission: &'a SubmissionState,
     ) -> Result<Self> {
         let settings = Settings::open(config::directory(global.config_dir.clone())?)?;
-        let mut scope = settings.scope(global.scope_selection())?;
+        let (mut scope, sources) = settings.sourced_scope(global.scope_selection())?;
+        let credential_sources = auth::environment_key_sources(global, &sources);
         let resolver = Resolver {
             settings: &settings,
             flags: global,
             submission,
+            credential_sources,
         };
         pick::fill(command, global, resolver, &mut scope).await?;
         Ok(Self {
@@ -161,6 +165,7 @@ impl<'a> Session<'a> {
             settings,
             scope,
             submission,
+            credential_sources,
         })
     }
 
@@ -169,6 +174,7 @@ impl<'a> Session<'a> {
             settings: &self.settings,
             flags: self.global,
             submission: self.submission,
+            credential_sources: self.credential_sources,
         }
     }
 
