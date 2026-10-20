@@ -7,7 +7,7 @@
 
 use crate::{
     Error, Result,
-    auth::{self, ApiCredential},
+    auth::{self, ApiCredential, Resolver},
     backoff::{Backoff, POLL_CEILING},
     cli::{ApiInvocation, GlobalFlags, Origin, Requested},
     config::{
@@ -67,16 +67,12 @@ impl Authorization {
     /// fall back to the account credential.
     async fn resolve(
         invocation: &ApiInvocation,
-        global: &GlobalFlags,
-        settings: &Settings,
+        resolver: Resolver<'_>,
         scope: &Scope,
-        submission: &SubmissionState,
     ) -> Result<Self> {
         let scheme = invocation.operation.auth;
         Ok(match scheme {
-            AuthScheme::Account => Self::Account(
-                auth::resolve_organization(settings, scope, global, submission).await?,
-            ),
+            AuthScheme::Account => Self::Account(resolver.resolve_organization(scope).await?),
             AuthScheme::CheckoutSession => {
                 Self::CheckoutSession(checkout_token(invocation, "VOLTAGE_CHECKOUT_TOKEN").await?)
             }
@@ -498,10 +494,9 @@ pub async fn execute(
     invocation: &ApiInvocation,
     execution: Execution,
     global: &GlobalFlags,
-    settings: &Settings,
+    resolver: Resolver<'_>,
     scope: &Scope,
     out: &mut Output,
-    submission: &SubmissionState,
 ) -> Result<()> {
     let operation = invocation.operation;
     let mut request = Request::read(invocation, scope).await?;
@@ -527,8 +522,7 @@ pub async fn execute(
             "This operation returns a one-time secret; supply --output-file PATH or --show-secrets before executing",
         ));
     }
-    let authorization =
-        Authorization::resolve(invocation, global, settings, scope, submission).await?;
+    let authorization = Authorization::resolve(invocation, resolver, scope).await?;
     let api = Api::new(global, invocation.origin.clone(), authorization)?;
     let steps = Steps {
         api: &api,
@@ -544,7 +538,13 @@ pub async fn execute(
         Run::Read(read) => read.execute(&steps, &mut request, out).await,
         Run::Mutation(mutation) => {
             mutation
-                .execute(&steps, &mut request, settings, submission, out)
+                .execute(
+                    &steps,
+                    &mut request,
+                    resolver.settings,
+                    resolver.submission,
+                    out,
+                )
                 .await
         }
     }

@@ -3,7 +3,7 @@
 use crate::{
     Error, Result,
     api::{self, Execution, SubmissionState},
-    auth::{self, Discovery},
+    auth::{self, Discovery, Resolver},
     cli::{
         self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
         ParseFailure, PriceFlags, ProfileCommand,
@@ -114,17 +114,19 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
     };
     let mut settings = Settings::open(config::directory(global.config_dir.clone())?)?;
     let mut scope = settings.scope(global.scope_selection())?;
-    pick::fill(&command, &global, &settings, &mut scope, submission).await?;
+    let resolver = Resolver {
+        settings: &settings,
+        flags: &global,
+        submission,
+    };
+    pick::fill(&command, &global, resolver, &mut scope).await?;
     match command {
         Command::Api(mut api) => {
             // `VOLTAGE_EXECUTE` and every local check run before the wallet is read.
             let execution = Execution::resolve(&api, config::execute_variable()?);
-            wallet_currency::fill(&mut api, &global, &settings, &scope, submission).await?;
+            wallet_currency::fill(&mut api, &global, resolver, &scope).await?;
             let mut out = output(!execution.describes())?;
-            api::execute(
-                &api, execution, &global, &settings, &scope, &mut out, submission,
-            )
-            .await
+            api::execute(&api, execution, &global, resolver, &scope, &mut out).await
         }
         Command::Local(local) => {
             let mut out = output(true)?;
@@ -201,17 +203,22 @@ async fn local_command(
             command: AuthCommand::ImportKey(flags),
         } => Envelope::local(auth::import_key(settings, scope, &flags, global).await?),
         LocalCommand::Organizations { .. } => Envelope::local(
-            auth::discover(
+            Resolver {
                 settings,
-                scope,
-                global,
-                Discovery::Organizations,
+                flags: global,
                 submission,
-            )
+            }
+            .discover(scope, Discovery::Organizations)
             .await?,
         ),
         LocalCommand::Environments { .. } => Envelope::local(
-            auth::discover(settings, scope, global, Discovery::Environments, submission).await?,
+            Resolver {
+                settings,
+                flags: global,
+                submission,
+            }
+            .discover(scope, Discovery::Environments)
+            .await?,
         ),
         LocalCommand::Context => Envelope::settings(context::inspect(settings, global)?),
         LocalCommand::Profiles { command } => {
