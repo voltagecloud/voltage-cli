@@ -54,7 +54,7 @@ The invoice prints as a QR code as soon as it is ready. Leave out `--execute` to
 ```sh
 voltage payments list --profile prod --json | jq '.data.items[].status'
 voltage payments send --profile prod --wallet WALLET_ID \
-  --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --dry-run
+  --currency btc --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats   # exits 6: described, not sent
 VOLTAGE_EXECUTE=1 ./pay-invoices.sh
 ```
 
@@ -77,7 +77,7 @@ All codes are in the [exit code reference](docs/reference/exit-codes.md).
 | [Requests](docs/guides/requests.md) | Request bodies, filters, paging |
 | [Checkout](docs/guides/checkout.md) | Session and stream tokens, events |
 | [Scripting](docs/guides/scripting.md) | JSON, `--execute` in scripts, quiet output |
-| [Safety model](docs/concepts/safety-model.md) | Describe-by-default, dry runs, payment IDs, Ctrl-C, redaction |
+| [Safety model](docs/concepts/safety-model.md) | Describe-by-default, payment IDs, Ctrl-C, redaction |
 | [Output reference](docs/reference/output.md) | Tables, the JSON envelope, streams |
 | [Command reference](docs/commands.md) | Every command and its API route |
 

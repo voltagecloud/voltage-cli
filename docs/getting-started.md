@@ -31,12 +31,12 @@ voltage wallets list --profile test
 
 Use a wallet on a BTC line of credit. A wallet on a USD line of credit needs a quote for every payment, so step 4 would fail with [`quote_required`](guides/troubleshooting.md#quote_required).
 
-If there is no such wallet, create one on a BTC line of credit from `credit-lines list`. Check the request with a dry run first, then send it with `--execute`:
+If there is no such wallet, create one on a BTC line of credit from `credit-lines list`. Run it without `--execute` first to see the request, then send it with `--execute`:
 
 ```sh
 voltage credit-lines list --profile test
 voltage wallets create --profile test --name tutorial \
-  --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000 --dry-run
+  --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000
 voltage wallets create --profile test --name tutorial \
   --credit-line CREDIT_LINE_ID --network mutinynet --limit 100000 --execute
 ```

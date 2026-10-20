@@ -25,11 +25,11 @@ Start with the [README](../README.md) for install and a quick start, or follow [
 
 ## Understand
 
-- [Safety model](concepts/safety-model.md): `--execute`, dry runs, payment IDs, Ctrl-C, redaction
+- [Safety model](concepts/safety-model.md): `--execute`, described changes, payment IDs, Ctrl-C, redaction
 
 ## For AI agents
 
-Use `--json` and branch on exit codes. Describe a change with `--dry-run` before you send it with `--execute`. Never pass `--show-secrets`. For product concepts, see the [Voltage API docs](https://voltageapi.com/v1/docs).
+Use `--json` and branch on exit codes. Run a change without `--execute` to describe it (exit code 6), then send it with `--execute`. Never pass `--show-secrets`. For product concepts, see the [Voltage API docs](https://voltageapi.com/v1/docs).
 
 ## For contributors
 
