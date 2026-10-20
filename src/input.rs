@@ -6,6 +6,7 @@
 
 use crate::{
     Error, Result,
+    api::USD_PAYMENT_HINT,
     cli::{
         ApiInvocation, BodySource, Filter, FriendlyFlags, PaymentFlags, QueryOverride, QuoteFlags,
         UpdateWalletFlags, UpdateWebhookFlags, WalletFlags, WebhookFlags,
@@ -531,12 +532,28 @@ fn payment(flags: &PaymentFlags, alias: Option<PaymentDirection>, scope: &Scope)
 
 fn quote(flags: &QuoteFlags) -> Result<QuoteBody> {
     let amount = require_text(flags.amount.as_deref(), "amount")?;
+    let line_of_credit_id = require(flags.credit_line, "credit-line")?;
+    let network = require(flags.network, "network")?;
+    let unit = require(flags.unit, "unit")?;
+    let to = require(flags.to, "to")?;
+    // A quote converts between BTC and USD, and the line of credit must be one of the two.
+    // With both sides in one currency there is nothing to convert, and a line in the other
+    // currency rejects it with `mismatch_currency`.
+    if unit.currency() == to {
+        return Err(Error::usage(format!(
+            "--unit {} is already in the --to currency, {to}; a quote converts between btc and usd",
+            unit.name()
+        ))
+        .with_hint(
+            "Give --amount in one currency and --to in the other. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount: --unit sats --to usd. To receive a USD amount, quote it: --unit cents --to btc.",
+        ));
+    }
     Ok(QuoteBody {
         id: new_id(flags.id),
-        line_of_credit_id: require(flags.credit_line, "credit-line")?,
-        network: require(flags.network, "network")?,
-        amount: Amount::parse(&amount, require(flags.unit, "unit")?)?,
-        to: require(flags.to, "to")?,
+        line_of_credit_id,
+        network,
+        amount: Amount::parse(&amount, unit)?,
+        to,
     })
 }
 
@@ -651,9 +668,10 @@ fn check_payload(
             ));
         }
         if payload.is_usd() && !payload.has("quote_id") {
-            return Err(Error::usage(
-                "USD payment flows require an explicit quote_id",
-            ));
+            return Err(
+                Error::usage("A USD payment needs --quote QUOTE_ID (quote_id in --data)")
+                    .with_hint(USD_PAYMENT_HINT),
+            );
         }
         match alias {
             Some(PaymentDirection::Send) if payload.has("payment_kind") => {
@@ -1213,6 +1231,32 @@ mod tests {
                 format!("--{missing} is required (or supply the complete --data payload)")
             );
         }
+        for (unit, to) in [("sats", "btc"), ("cents", "usd")] {
+            let args = [
+                "quotes",
+                "create",
+                "--credit-line",
+                WALLET,
+                "--network",
+                "mutinynet",
+                "--amount",
+                "1",
+                "--unit",
+                unit,
+                "--to",
+                to,
+            ];
+            let error = build(&args).expect_err("same-currency quote");
+            assert_eq!(
+                error.message,
+                format!(
+                    "--unit {unit} is already in the --to currency, {to}; a quote converts between btc and usd"
+                )
+            );
+            let hint = error.hint.unwrap();
+            assert!(hint.contains("--unit sats --to usd"));
+            assert!(hint.contains("--unit cents --to btc"));
+        }
         assert_eq!(
             request_error(&["webhooks", "test", WALLET]),
             "This operation requires --data @file or --data -"
@@ -1261,7 +1305,7 @@ mod tests {
                 None,
                 json!({"id": ORG, "wallet_id": WALLET, "amount": {"currency": "usd"}})
             ),
-            Some("USD payment flows require an explicit quote_id".into())
+            Some("A USD payment needs --quote QUOTE_ID (quote_id in --data)".into())
         );
         assert_eq!(
             check(

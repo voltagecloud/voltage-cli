@@ -479,13 +479,13 @@ pub struct QuoteFlags {
     /// Explicit network
     #[arg(long, value_enum)]
     pub network: Option<Network>,
-    /// Exact decimal amount
+    /// Exact decimal amount to convert
     #[arg(long)]
     pub amount: Option<String>,
-    /// Unit of --amount
+    /// Unit of --amount; its currency is the one converted from
     #[arg(long, value_enum)]
     pub unit: Option<AmountUnit>,
-    /// Target currency
+    /// Currency to convert into: the other of btc and usd
     #[arg(long, value_enum)]
     pub to: Option<Currency>,
 }

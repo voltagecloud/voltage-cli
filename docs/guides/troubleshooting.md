@@ -97,6 +97,12 @@ On-chain and BIP21 payments and treasury movements are enabled per organization.
 
 ### `quote_required`
 
-A wallet on a USD line of credit needs a quote for every payment. Create a quote with `voltage quotes create`, then pass `--quote QUOTE_ID` and the same USD amount to the payment. See [quotes and lines of credit](payments.md#quotes-and-lines-of-credit).
+A wallet on a USD line of credit needs a quote for every payment. Create a quote with `voltage quotes create`, then pass `--quote QUOTE_ID` and the same amount you quoted to the payment: the invoice's BTC amount to pay, or the USD amount to receive. See [quotes and lines of credit](payments.md#quotes-and-lines-of-credit).
+
+The CLI refuses a USD payment without `--quote` itself, with `A USD payment needs --quote QUOTE_ID`, before it sends anything. A wallet on a BTC line of credit cannot pay or receive in USD; use `--currency btc`.
+
+### `invalid_currency` with a quoted amount
+
+When the detail names a quoted amount, the quote does not convert to exactly the payment's amount. Check what it converts to with `voltage quotes get QUOTE_ID`. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount with `--unit sats --to usd`. See [quotes and lines of credit](payments.md#quotes-and-lines-of-credit).
 
 Related: [exit codes](../reference/exit-codes.md), [environment variables](../reference/environment.md), [log in and use profiles](login-and-profiles.md).

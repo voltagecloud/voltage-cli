@@ -2663,7 +2663,10 @@ async fn a_usd_wallet_needs_its_amount_unit_named_and_a_quote() {
         .args(&cents)
         .assert()
         .code(2);
-    assert!(stderr(&error).contains("USD payment flows require an explicit quote_id"));
+    let error = stderr(&error);
+    assert!(error.contains("A USD payment needs --quote QUOTE_ID (quote_id in --data)"));
+    assert!(error.contains("A USD payment needs a wallet on a USD line of credit and a quote"));
+    assert!(error.contains("use --currency btc"));
     server.verify().await;
 }
 

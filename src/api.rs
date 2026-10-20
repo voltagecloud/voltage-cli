@@ -343,6 +343,15 @@ pub(crate) enum BodyFailure {
     Interrupted,
 }
 
+/// How to get the quote that each payment from a wallet on a USD line of credit needs.
+const QUOTE_HINT: &str = "A wallet on a USD line of credit needs a quote for each payment. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.";
+
+/// How to get the quote a USD payment needs, before the CLI knows the wallet's line of credit.
+pub(crate) const USD_PAYMENT_HINT: &str = "A USD payment needs a wallet on a USD line of credit and a quote for the payment. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. A wallet on a BTC line of credit pays and receives in BTC: use --currency btc.";
+
+/// How to quote a payment so that the API accepts the quoted amount.
+const QUOTE_MISMATCH_HINT: &str = "A quote must convert to exactly the payment's amount; `voltage quotes get QUOTE_ID` shows what it converts to. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount: --unit sats --to usd. To receive a USD amount, quote it: --unit cents --to btc.";
+
 /// Error types the CLI explains specially; the API's other types are shown as detail.
 #[derive(Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -351,6 +360,9 @@ enum ApiErrorType {
     /// Staging and production answer a key they do not recognize this way, not with 401.
     MissingCredentials,
     QuoteRequired,
+    /// A quote that does not convert to exactly the payment's amount, among other currency
+    /// mismatches; only the quote mismatch gets a hint.
+    InvalidCurrency,
     #[default]
     #[serde(other)]
     Other,
@@ -390,12 +402,17 @@ impl ApiErrorBody {
     }
 
     /// The next step an error type names. The CLI has not read the wallet, so a missing
-    /// quote describes the wallets that need one rather than this wallet.
+    /// quote describes the wallets that need one rather than this wallet. The API also
+    /// returns `invalid_currency` for currency mismatches that are not about a quote, so only
+    /// a detail about the quoted amount gets the quote hint.
     fn hint(&self) -> Option<&'static str> {
         match self.kind {
-            ApiErrorType::QuoteRequired => Some(
-                "A wallet on a USD line of credit needs a quote for each payment. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.",
-            ),
+            ApiErrorType::QuoteRequired => Some(QUOTE_HINT),
+            ApiErrorType::InvalidCurrency => self
+                .detail
+                .as_deref()
+                .filter(|detail| detail.contains("quoted amount "))
+                .map(|_| QUOTE_MISMATCH_HINT),
             ApiErrorType::FeatureFlagDisabled
             | ApiErrorType::MissingCredentials
             | ApiErrorType::Other => None,
@@ -1554,6 +1571,25 @@ mod tests {
         assert!(hint.starts_with("A wallet on a USD line of credit needs a quote"));
         assert!(hint.contains("voltage quotes create"));
         assert!(hint.contains("BTC line of credit needs no quote"));
+        let mismatch = rejection(json!({"error": {
+            "type": "invalid_currency",
+            "detail": "Payment currency must be valid: quoted amount $0.01 does not match requested amount 1 sats (converted: 12.232 sats)"
+        }}));
+        assert_eq!(mismatch.hint(), Some(QUOTE_MISMATCH_HINT));
+        let unvalidated = rejection(json!({"error": {
+            "type": "invalid_currency",
+            "detail": "Payment currency must be valid: cannot validate quoted amount 1 sats against requested amount $0.01: overflow"
+        }}));
+        assert_eq!(unvalidated.hint(), Some(QUOTE_MISMATCH_HINT));
+        for detail in [
+            Some(
+                "Payment currency must be valid: USD payment currency must be on a USD line of credit",
+            ),
+            None,
+        ] {
+            let other = rejection(json!({"error": {"type": "invalid_currency", "detail": detail}}));
+            assert_eq!(other.hint(), None);
+        }
         assert_eq!(
             rejection(json!({"error": {"type": "invalid_amount"}})).message(400),
             "Voltage API returned HTTP 400"
