@@ -3457,12 +3457,13 @@ fn json_error(assertion: &Assert) -> Value {
 async fn rejected_credentials_name_the_command_that_checks_them() {
     for (status, next) in [(401, "voltage auth status"), (403, "voltage context")] {
         let (server, dir) = fixture().await;
+        seeded_api_key(dir.path(), "saved", ACCOUNT_KEY);
         route("GET", wallets_path(ORG))
             .respond_with(ResponseTemplate::new(status))
             .mount(&server)
             .await;
         let result = cli(dir.path(), &server)
-            .args(["wallets", "list", "--org", ORG])
+            .args(["wallets", "list", "--account", "saved", "--org", ORG])
             .assert()
             .code(3);
         let error = json_error(&result);
@@ -3470,7 +3471,117 @@ async fn rejected_credentials_name_the_command_that_checks_them() {
             error["error"]["hint"].as_str().unwrap().contains(next),
             "{error}"
         );
+        // A saved credential is the one the user chose, so no sources are reported.
+        assert!(error["error"]["detail"].get("credential_sources").is_none());
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forbidden_environment_key_names_where_it_and_the_organization_came_from() {
+    for (from_flag, organization, named) in [
+        (true, "flag", " and the organization from --org"),
+        (
+            false,
+            "environment",
+            " and the organization from VOLTAGE_ORGANIZATION_ID",
+        ),
+    ] {
+        let (server, dir) = fixture().await;
+        route("GET", wallets_path(ORG))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+                "type": "access_rights", "detail": "No Access"
+            }})))
+            .mount(&server)
+            .await;
+        let mut command = cli(dir.path(), &server);
+        command.args(["wallets", "list"]);
+        if from_flag {
+            command.args(["--org", ORG]);
+        } else {
+            command.env("VOLTAGE_ORGANIZATION_ID", ORG);
+        }
+        let error = json_error(&command.assert().code(3));
+        assert_eq!(
+            error["error"]["hint"],
+            format!(
+                "The API key came from VOLTAGE_API_KEY{named}. Check that the key can reach the organization, environment, and wallet in use, which `voltage context` shows, or pass --account NAME or unset VOLTAGE_API_KEY to use a saved login."
+            )
+        );
+        assert_eq!(
+            error["error"]["detail"]["credential_sources"],
+            json!({"credential": "environment", "organization": organization})
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unauthorized_environment_key_reports_no_sources() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .code(3);
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["hint"],
+        "Check the key with `voltage auth status`; the API does not accept it."
+    );
+    assert!(error["error"]["detail"].get("credential_sources").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forbidden_environment_key_without_a_json_body_still_names_its_sources() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ResponseTemplate::new(403).set_body_raw("<html>denied</html>", "text/html"))
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .code(3);
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["message"],
+        "HTTP 403: non-JSON response omitted"
+    );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("The API key came from VOLTAGE_API_KEY and the organization from --org."),
+        "{error}"
+    );
+    assert_eq!(
+        error["error"]["detail"]["credential_sources"],
+        json!({"credential": "environment", "organization": "flag"})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrecognized_environment_key_on_a_403_reports_no_sources() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+            "type": "missing_credentials", "detail": "Missing credential"
+        }})))
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .code(3);
+    let error = json_error(&result);
+    // The rejection is about the key itself, so the hint and the sources agree with a 401.
+    assert_eq!(
+        error["error"]["hint"],
+        "Check the key with `voltage auth status`; the API does not accept it."
+    );
+    assert!(error["error"]["detail"].get("credential_sources").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

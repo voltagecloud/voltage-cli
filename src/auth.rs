@@ -10,8 +10,9 @@ use crate::{
     cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
         AUTH_URL, Account, AccountKind, Credential, CredentialProblem, InputSource, LOCK_TIMEOUT,
-        Login, Scope, Settings, name_in_use, read_secret,
+        Login, Scope, ScopeSources, Settings, Source, name_in_use, read_secret,
     },
+    error::CredentialSources,
     secret::Secret,
     terminal::{self, Terminal},
 };
@@ -546,6 +547,18 @@ fn ambient_api_key(flags: &GlobalFlags) -> Option<Secret> {
     std::env::var("VOLTAGE_API_KEY").ok().map(Secret::new)
 }
 
+/// Where `VOLTAGE_API_KEY` and the organization came from, when this command sends that key.
+/// A saved credential returns `None`.
+pub(crate) fn environment_key_sources(
+    flags: &GlobalFlags,
+    sources: &ScopeSources,
+) -> Option<CredentialSources> {
+    ambient_api_key(flags).map(|_| CredentialSources {
+        credential: Source::Environment,
+        organization: sources.org,
+    })
+}
+
 /// `VOLTAGE_API_KEY` is set, but a profile or account selection takes precedence over it.
 pub(crate) fn ignores_ambient_api_key(flags: &GlobalFlags) -> bool {
     std::env::var_os("VOLTAGE_API_KEY").is_some() && ambient_api_key(flags).is_none()
@@ -763,6 +776,9 @@ pub struct Resolver<'a> {
     pub flags: &'a GlobalFlags,
     /// Records a refresh in flight, so an interruption can report it.
     pub submission: &'a SubmissionState,
+    /// Where `VOLTAGE_API_KEY` and the organization came from, when this command sends that
+    /// key, from [`environment_key_sources`].
+    pub credential_sources: Option<CredentialSources>,
 }
 
 impl Resolver<'_> {
@@ -772,6 +788,7 @@ impl Resolver<'_> {
             settings,
             flags,
             submission,
+            ..
         } = self;
         let (name, account) = match select(settings, scope, flags)
             .map_err(|rejected| rejected.problem.error(scope, settings))?
