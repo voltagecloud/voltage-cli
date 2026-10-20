@@ -11,6 +11,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - Changes are only described (exit code 6) unless `--execute` or `VOLTAGE_EXECUTE=1` asks to send them; the description is built offline and sends nothing.
 - `--no-input` and `--quiet`, with interrupt-safe progress and the time waited so far on payment waits and device approval.
 - `voltage --version` shows the git build.
+- A payment without `--currency` uses its wallet's line of credit currency, and its `--unit` must be in that currency. An amount without `--unit` is in the currency's base unit (msats or cents), except on a USD wallet read this way, which needs `--unit`. `--max-fee` without `--fee-unit` is in msats.
 - Every command that changes something has examples in `--help`, and every command links its guide.
 - Guides for wallets, webhooks, troubleshooting, and getting started, and references for global flags, environment variables, and configuration.
 
