@@ -10,7 +10,7 @@ use crate::{
         ApiInvocation, BodySource, Filter, FriendlyFlags, PaymentFlags, QueryOverride, QuoteFlags,
         UpdateWalletFlags, UpdateWebhookFlags, WalletFlags, WebhookFlags,
     },
-    config::{InputSource, Scope},
+    config::{InputSource, ORGANIZATION_HINT, Scope, WALLET_HINT, WEBHOOK_HINT},
     payment::{Amount, AmountUnit, Currency, Network, PaymentDirection, ReceiveKind},
     registry::{Method, Operation, OperationId, Parameter, ParameterLocation, ScopeParameter},
     terminal::read_detached,
@@ -457,9 +457,9 @@ fn send_body(flags: &PaymentFlags, wallet: Uuid, currency: Currency) -> Result<V
 }
 
 fn payment(flags: &PaymentFlags, alias: Option<PaymentDirection>, scope: &Scope) -> Result<Value> {
-    let wallet = scope
-        .wallet
-        .ok_or_else(|| Error::usage("--wallet is required for payment creation"))?;
+    let wallet = scope.wallet.ok_or_else(|| {
+        Error::usage("--wallet is required for payment creation").with_hint(WALLET_HINT)
+    })?;
     let currency = require(flags.currency, "currency")?;
     if flags.unit.is_some() && flags.amount.is_none() {
         return Err(Error::usage("--unit requires --amount"));
@@ -643,14 +643,17 @@ fn path(operation: &Operation, resource_id: Option<Uuid>, scope: &Scope) -> Resu
             match parameter.scope() {
                 Some(ScopeParameter::Organization) => {
                     Error::usage(format!("--org is required for {command}"))
-                        .with_hint("Pass --org UUID or select a profile with --profile NAME.")
+                        .with_hint(ORGANIZATION_HINT)
                 }
                 Some(ScopeParameter::Wallet) => {
                     Error::usage(format!("--wallet is required for {command}"))
+                        .with_hint(WALLET_HINT)
                 }
                 Some(ScopeParameter::Webhook) => {
                     Error::usage(format!("--webhook is required for {command}"))
+                        .with_hint(WEBHOOK_HINT)
                 }
+                // `single_env` above already reports a missing or ambiguous --env.
                 Some(ScopeParameter::Environment | ScopeParameter::Environments) | None => {
                     Error::usage(format!("Missing {} for {command}", parameter.name))
                 }

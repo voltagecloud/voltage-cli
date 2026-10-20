@@ -110,20 +110,35 @@ pub(crate) enum CredentialProblem {
 }
 
 impl CredentialProblem {
-    pub(crate) fn error(self, scope: &Scope) -> Error {
+    pub(crate) fn error(self, scope: &Scope, settings: &Settings) -> Error {
+        let saved = joined(settings.config.accounts.keys());
         match self {
-            Self::EmptyApiKey => Error::auth("VOLTAGE_API_KEY is empty"),
-            Self::NoCredential => Error::auth("No credential is available")
-                .with_hint("Run voltage login, select --account, or provide VOLTAGE_API_KEY."),
-            Self::MultipleCredentials => Error::usage("Multiple credentials are saved")
-                .with_hint("Select one with --account NAME or --profile NAME."),
+            Self::EmptyApiKey => Error::auth("VOLTAGE_API_KEY is empty")
+                .with_hint("Unset VOLTAGE_API_KEY to use a saved credential, or set it to a key."),
+            Self::NoCredential => Error::auth("No credential is available").with_hint(
+                "Sign in with `voltage login`, select one with --account NAME, or provide VOLTAGE_API_KEY.",
+            ),
+            Self::MultipleCredentials => Error::usage("Multiple credentials are saved").with_hint(
+                format!(
+                    "Saved credentials: {}. Select one with --account NAME or --profile NAME.",
+                    saved.unwrap_or_default()
+                ),
+            ),
             Self::UnknownCredential => Error::auth(format!(
                 "Unknown credential {}",
                 scope.account.as_deref().unwrap_or_default()
-            )),
+            ))
+            .with_hint(match saved {
+                Some(saved) => format!("Saved credentials: {saved}."),
+                None => "No credentials are saved; sign in with `voltage login` or import a key with `voltage auth import-key`.".into(),
+            }),
             Self::BoundElsewhere => Error::usage(
                 "API key is bound to a different organization or environment; select a matching credential",
-            ),
+            )
+            .with_hint(format!(
+                "Saved credentials: {}. Select a key for this scope or a browser login with --account NAME.",
+                saved.unwrap_or_default()
+            )),
         }
     }
 }
@@ -233,12 +248,17 @@ pub struct Scope {
     pub account: Option<String>,
 }
 
+/// How to find and supply each scope value a command can require.
+pub(crate) const ORGANIZATION_HINT: &str = "Find your organization ID with `voltage organizations list` (browser login only), then pass --org ID, set VOLTAGE_ORGANIZATION_ID, or save it in a profile with `voltage profiles create`.";
+pub(crate) const ENVIRONMENT_HINT: &str = "List environments with `voltage environments list --org ORG_ID` (browser login only), then pass one --env ID, set VOLTAGE_ENVIRONMENT_ID, or save it in a profile with `voltage profiles create`.";
+pub(crate) const WALLET_HINT: &str = "List wallets with `voltage wallets list`, or create one with `voltage wallets create`, then pass --wallet ID. VOLTAGE_WALLET_ID is read only when no --profile is selected.";
+pub(crate) const WEBHOOK_HINT: &str =
+    "List webhooks with `voltage webhooks list`, then pass --webhook ID.";
+
 impl Scope {
     pub fn require_org(&self) -> Result<Uuid> {
-        self.org.ok_or_else(|| {
-            Error::usage("--org is required")
-                .with_hint("Pass --org UUID or select a profile with --profile NAME.")
-        })
+        self.org
+            .ok_or_else(|| Error::usage("--org is required").with_hint(ORGANIZATION_HINT))
     }
 
     /// Operations bound to one environment refuse an ambiguous list.
@@ -247,7 +267,7 @@ impl Scope {
             [env] => Ok(*env),
             _ => Err(
                 Error::usage("Exactly one --env is required for this operation")
-                    .with_hint("Pass one --env UUID or select a profile with --profile NAME."),
+                    .with_hint(ENVIRONMENT_HINT),
             ),
         }
     }
@@ -363,7 +383,7 @@ impl Settings {
                 self.config
                     .profiles
                     .get(name)
-                    .ok_or_else(|| Error::usage(format!("Unknown profile {name}")))
+                    .ok_or_else(|| self.unknown_profile(name))
             })
             .transpose()?;
         let ambient = |name: &str| -> Result<(Option<Uuid>, Source)> {
@@ -430,7 +450,7 @@ impl Settings {
     /// The saved credential a command uses: the selected one, or the only one.
     pub fn account_name(&self, scope: &Scope) -> Result<String> {
         self.select_account(scope)
-            .map_err(|problem| problem.error(scope))
+            .map_err(|problem| problem.error(scope, self))
     }
 
     /// The saved credential a scope selects: the named one, or the only one saved.
@@ -450,6 +470,16 @@ impl Settings {
             (Some(name), None) => Ok(name.clone()),
             (Some(_), Some(_)) => Err(CredentialProblem::MultipleCredentials),
         }
+    }
+
+    /// An unknown profile name, with the saved names so the next attempt can pick one.
+    pub(crate) fn unknown_profile(&self, name: &str) -> Error {
+        Error::usage(format!("Unknown profile {name}")).with_hint(
+            match joined(self.config.profiles.keys()) {
+                Some(saved) => format!("Saved profiles: {saved}."),
+                None => "No profiles are saved; create one with `voltage profiles create NAME --org ID --env ID`.".into(),
+            },
+        )
     }
 
     pub fn account(&self, name: &str) -> Result<&Account> {
@@ -592,6 +622,12 @@ fn sourced<T>(value: Option<T>, source: Source) -> (Option<T>, Source) {
         Source::Unset
     };
     (value, source)
+}
+
+/// Saved names, comma-separated, or `None` when there are none.
+fn joined<'a>(names: impl Iterator<Item = &'a String>) -> Option<String> {
+    let names: Vec<&str> = names.map(String::as_str).collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 fn read_config(dir: &Path) -> Result<Config> {

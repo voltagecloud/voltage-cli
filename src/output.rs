@@ -269,12 +269,15 @@ pub fn redact(value: &mut Value, secrets: &[&str]) {
                 redact(value, secrets);
             }
         }
-        Value::String(text) => {
-            for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
-                *text = text.replace(secret, REDACTED);
-            }
-        }
+        Value::String(text) => redact_text(text, secrets),
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+/// Replace any presented credential text in free text, such as a message quoting the API.
+pub fn redact_text(text: &mut String, secrets: &[&str]) {
+    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+        *text = text.replace(secret, REDACTED);
     }
 }
 
@@ -288,7 +291,7 @@ struct ErrorBody<'a> {
     message: &'a str,
     exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hint: Option<&'static str>,
+    hint: Option<&'a str>,
     detail: Option<&'a ErrorDetail>,
 }
 
@@ -298,7 +301,7 @@ pub fn report_error(error: &Error, format: OutputFormat) {
         error: ErrorBody {
             message: &error.message,
             exit_code: error.kind.exit_code(),
-            hint: error.hint,
+            hint: error.hint.as_deref(),
             detail: error.detail.as_ref(),
         },
     };
@@ -310,19 +313,110 @@ pub fn report_error(error: &Error, format: OutputFormat) {
     } else {
         // Messages can interpolate untrusted input; keep control characters off the terminal.
         eprintln!("error: {}", scrub_line(&error.message));
-        if let Some(hint) = error.hint {
-            // Hints are static today; scrub defensively if they ever become dynamic.
+        if let Some(hint) = &error.hint {
+            // Hints can name saved credentials and profiles, so they are scrubbed like messages.
             eprintln!("hint: {}", scrub_line(hint));
         }
-        if let Some(detail) = body["error"]["detail"].as_object() {
-            eprintln!("details: {}", scrub_line(&json!(detail).to_string()));
+        if let Some(detail) = human_detail(&body["error"]["detail"], &error.message) {
+            let mut lines = Vec::new();
+            if human::detail(&mut lines, &detail).is_ok() {
+                eprintln!("details:");
+                for line in String::from_utf8_lossy(&lines).lines() {
+                    eprintln!("  {line}");
+                }
+            }
         }
+    }
+}
+
+/// The part of an error's detail a person needs. A client error (4xx) shows the API's error
+/// without the reason `message` already gives; `--json` keeps the whole response.
+fn human_detail(detail: &Value, message: &str) -> Option<Value> {
+    let status = detail.get("http_status").and_then(Value::as_u64);
+    let detail = match (status, detail.get("data")) {
+        (Some(status), Some(data)) => match data.get("error") {
+            Some(Value::Object(error)) => {
+                let mut error = error.clone();
+                if (400..500).contains(&status)
+                    && error
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .is_some_and(|reason| message.contains(reason))
+                {
+                    error.remove("detail");
+                }
+                // Keep the response's other fields, such as a request ID, beside the error's.
+                for (key, value) in data.as_object().into_iter().flatten() {
+                    if key != "error" {
+                        error.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
+                }
+                Value::Object(error)
+            }
+            _ => data.clone(),
+        },
+        _ => detail.clone(),
+    };
+    match &detail {
+        Value::Null => None,
+        Value::Object(map) if map.is_empty() => None,
+        _ => Some(detail),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_details_drop_the_reason_the_message_already_gives() {
+        let message = "Voltage API returned HTTP 400: Quote is required for payment";
+        let rejection = json!({"http_status": 400, "data": {"error": {
+            "type": "quote_required", "code": "required",
+            "detail": "Quote is required for payment",
+            "context": {"field": "quote_id", "required": true}
+        }}});
+        assert_eq!(
+            human_detail(&rejection, message),
+            Some(json!({"type": "quote_required", "code": "required",
+                "context": {"field": "quote_id", "required": true}}))
+        );
+        let reason_only = json!({"http_status": 400, "data": {"error": {"detail": "too small"}}});
+        assert_eq!(
+            human_detail(&reason_only, "Voltage API returned HTTP 400: too small"),
+            None
+        );
+        // A reason the message does not carry stays, so human output never loses it.
+        let untyped = json!({"http_status": 400, "data": {"error": {
+            "type": null, "detail": "Wallet is frozen"
+        }}});
+        assert_eq!(
+            human_detail(&untyped, "Voltage API returned HTTP 400"),
+            Some(json!({"type": null, "detail": "Wallet is frozen"}))
+        );
+        // Fields beside the error, such as a request ID, are kept.
+        let traced = json!({"http_status": 400, "data": {
+            "error": {"detail": "too small"}, "request_id": "req-1"
+        }});
+        assert_eq!(
+            human_detail(&traced, "Voltage API returned HTTP 400: too small"),
+            Some(json!({"request_id": "req-1"}))
+        );
+        let server = json!({"http_status": 500, "data": {"error": {"detail": "db down"}}});
+        assert_eq!(
+            human_detail(&server, "Voltage API returned HTTP 500: db down"),
+            Some(json!({"detail": "db down"}))
+        );
+        let unstructured = json!({"http_status": 502, "data": "bad gateway"});
+        assert_eq!(human_detail(&unstructured, ""), Some(json!("bad gateway")));
+        assert_eq!(
+            human_detail(&json!({"http_status": 502, "data": null}), ""),
+            None
+        );
+        let pending = json!({"resource_id": "id", "outcome": "pending"});
+        assert_eq!(human_detail(&pending, ""), Some(pending.clone()));
+        assert_eq!(human_detail(&Value::Null, ""), None);
+    }
 
     #[test]
     fn secrets_are_redacted_recursively() {

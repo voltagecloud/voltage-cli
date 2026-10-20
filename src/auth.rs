@@ -114,17 +114,32 @@ impl AuthResponse {
         (200..300).contains(&self.status)
     }
 
-    /// Fail with the server's error code when it is a plain identifier, never its free text.
-    fn require_success(&self) -> Result<()> {
-        if self.is_success() {
-            return Ok(());
-        }
-        let error = serde_json::from_slice::<OAuthErrorBody>(&self.body)
+    /// The server's OAuth error code when it is a plain identifier, never its free text.
+    fn error_code(&self) -> Option<String> {
+        serde_json::from_slice::<OAuthErrorBody>(&self.body)
             .ok()
             .and_then(|body| body.error)
             .filter(|code| {
                 code.len() < 80 && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             })
+    }
+
+    /// `require_success` for a request made with a saved login: OAuth reports an expired,
+    /// revoked, or already spent grant as `invalid_grant`, so the error names the fix.
+    fn require_login(&self, account: &str, url: &str) -> Result<()> {
+        if !self.is_success() && self.error_code().as_deref() == Some("invalid_grant") {
+            return Err(expired_login(account, url));
+        }
+        self.require_success()
+    }
+
+    /// Fail with the server's error code when it is a plain identifier, never its free text.
+    fn require_success(&self) -> Result<()> {
+        if self.is_success() {
+            return Ok(());
+        }
+        let error = self
+            .error_code()
             .unwrap_or_else(|| "authentication_failed".into());
         Err(Error::auth(format!(
             "Authentication failed (HTTP {}, {error})",
@@ -610,11 +625,12 @@ pub async fn resolve(
     flags: &GlobalFlags,
     submission: &SubmissionState,
 ) -> Result<Credential> {
-    let (name, account) =
-        match select(settings, scope, flags).map_err(|rejected| rejected.problem.error(scope))? {
-            Selected::Ambient(key) => return Ok(Credential::ApiKey(key)),
-            Selected::Saved { name, account } => (name, account),
-        };
+    let (name, account) = match select(settings, scope, flags)
+        .map_err(|rejected| rejected.problem.error(scope, settings))?
+    {
+        Selected::Ambient(key) => return Ok(Credential::ApiKey(key)),
+        Selected::Saved { name, account } => (name, account),
+    };
     match account.kind {
         AccountKind::ApiKey => settings.read_credential(&name),
         AccountKind::User => {
@@ -640,7 +656,7 @@ pub async fn resolve(
             submission.session_changing(SessionChange::Refresh {
                 account: name.clone(),
             });
-            let refreshed = Credential::Login(refresh(&url, login, flags.terminal()).await?);
+            let refreshed = Credential::Login(refresh(&url, login, &name, flags.terminal()).await?);
             settings.write_credential(&name, account.store, &refreshed)?;
             submission.session_settled();
             Ok(refreshed)
@@ -657,7 +673,7 @@ fn saved_login(settings: &Settings, name: &str) -> Result<Login> {
 
 /// Rotate an expiring login; the refresh token is single use, so the result is saved
 /// before any caller sees it.
-async fn refresh(url: &str, login: Login, terminal: Terminal) -> Result<Login> {
+async fn refresh(url: &str, login: Login, account: &str, terminal: Terminal) -> Result<Login> {
     let response = auth_request(
         client(AUTH_TIMEOUT)?
             .post(format!("{url}/oauth/token"))
@@ -669,9 +685,40 @@ async fn refresh(url: &str, login: Login, terminal: Terminal) -> Result<Login> {
         terminal,
     )
     .await?;
-    response.require_success()?;
+    response.require_login(account, url)?;
     let token: TokenResponse = response.json("Invalid token response")?;
     token.into_login(login.user_id, login.email)
+}
+
+/// A saved login the auth service no longer accepts, with the commands that replace it.
+fn expired_login(account: &str, url: &str) -> Error {
+    let account = shell_word(account);
+    // `--auth-url` is never saved, so a login against another auth service names it again.
+    let auth_url = if base_url(AUTH_URL).is_ok_and(|default| default == url) {
+        String::new()
+    } else {
+        format!(" --auth-url {}", shell_word(url))
+    };
+    Error::auth(format!(
+        "The saved login for {account} has expired or was revoked"
+    ))
+    // `login` refuses to replace a saved credential, so the stale one goes first.
+    .with_hint(format!(
+        "Remove it with `voltage logout --local --account {account}`, then sign in again with `voltage login --account {account}{auth_url}`."
+    ))
+}
+
+/// `value` as one word a POSIX shell reads back unchanged, for a hint's copyable command.
+fn shell_word(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@%+,-./:=_".contains(c));
+    if plain {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
 }
 
 /// The credential for organization API calls: the API key as is, or the login exchanged
@@ -715,7 +762,8 @@ pub async fn exchange(
         flags.terminal(),
     )
     .await?;
-    response.require_success()?;
+    // A session revoked before its access token expires fails here, not at refresh.
+    response.require_login(&name, &url)?;
     let token: OrganizationTokenResponse = response.json("Invalid organization token response")?;
     if token.access_token.expose().is_empty()
         || token.issued_token_type != ACCESS_TOKEN_TYPE
@@ -827,7 +875,26 @@ pub async fn discover(
     what: Discovery,
     submission: &SubmissionState,
 ) -> Result<Value> {
-    let requires_login = || Error::auth("Organization/environment discovery requires a user login");
+    // An API key cannot list organizations or environments; say which key was used.
+    let requires_login = || {
+        let command = match what {
+            Discovery::Organizations => "organizations list",
+            Discovery::Environments => "environments list",
+        };
+        if ambient_api_key(flags).is_some() {
+            return Error::auth(format!(
+                "{command} needs a browser login, but this command used VOLTAGE_API_KEY from the environment"
+            ))
+            .with_hint(
+                "Pass --account NAME to use a saved browser login (`voltage login` creates one), or unset VOLTAGE_API_KEY.",
+            );
+        }
+        let used = settings.account_name(scope).unwrap_or_default();
+        Error::auth(format!(
+            "{command} needs a browser login, but the selected credential {used} is an API key"
+        ))
+        .with_hint("Select a browser login with --account NAME, or sign in with `voltage login`.")
+    };
     let token = match what {
         Discovery::Organizations => match resolve(settings, scope, flags, submission).await? {
             Credential::Login(login) => login.access_token,
@@ -964,6 +1031,24 @@ mod tests {
         let body: DeviceGrantErrorBody =
             serde_json::from_str(r#"{"error":"server_error"}"#).unwrap();
         assert_eq!(body.error, Some(DeviceGrantError::Other));
+    }
+
+    #[test]
+    fn expired_logins_name_commands_that_can_be_pasted() {
+        let hint = |account, url| expired_login(account, url).hint.unwrap();
+        let default = base_url(AUTH_URL).unwrap();
+        assert_eq!(
+            hint("me@example.com", &default),
+            "Remove it with `voltage logout --local --account me@example.com`, then sign in again with `voltage login --account me@example.com`."
+        );
+        // `--auth-url` is never saved, so another auth service is named again.
+        assert!(hint("me", "https://auth.staging.example.test").ends_with(
+            "`voltage login --account me --auth-url https://auth.staging.example.test`."
+        ));
+        assert!(hint("my team", &default).contains("--account 'my team'`"));
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(shell_word("$(id)"), "'$(id)'");
     }
 
     #[test]
