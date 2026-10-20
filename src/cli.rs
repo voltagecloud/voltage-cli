@@ -310,11 +310,22 @@ fn parse_query_override(value: &str) -> std::result::Result<QueryOverride, Strin
         .ok_or_else(|| "--query requires NAME=VALUE".into())
 }
 
-/// Positional resource identifier for operations with a target.
+/// Positional resource identifier for operations with a target. `--id` names the same
+/// identifier, because `quotes create --id` and `payments send --id` take it as a flag.
 #[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
 struct TargetFlags {
     #[arg(help_heading = "Arguments")]
-    resource_id: Uuid,
+    resource_id: Option<Uuid>,
+    /// The same ID as the argument, given as a flag
+    #[arg(long = "id", id = "target_id", value_name = "ID")]
+    target_id: Option<Uuid>,
+}
+
+impl TargetFlags {
+    fn id(&self) -> Option<Uuid> {
+        self.resource_id.or(self.target_id)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -737,7 +748,7 @@ fn api_invocation(
     Ok(ApiInvocation {
         operation,
         alias,
-        resource_id: target.map(|target| target.resource_id),
+        resource_id: target.and_then(|target| target.id()),
         filters,
         query: query.query,
         all: pagination.is_some_and(|flags| flags.all),

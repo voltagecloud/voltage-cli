@@ -870,10 +870,31 @@ impl Call<'_> {
                 } else {
                     Outcome::Succeeded
                 };
-                self.write_pages(response, settled, false).await
+                let accepted = response.status == 202;
+                self.write_pages(response, settled, false).await?;
+                if accepted
+                    && self.out.is_human()
+                    && let Some(step) = next_step(self.invocation, self.request.resource_id)
+                {
+                    self.api.terminal.notice(step);
+                }
+                Ok(())
             }
         }
     }
+}
+
+/// How to see what an accepted request creates once it exists: the invoice or address of a
+/// receive, or a quote. Their 202 response carries no body.
+fn next_step(invocation: &ApiInvocation, id: Option<Uuid>) -> Option<String> {
+    let id = id?;
+    if invocation.alias == Some(PaymentDirection::Receive) {
+        return Some(format!(
+            "hint: Show the invoice or address with `voltage payments get {id}`, or pass --wait ready next time (--qr or --copy for a BOLT11 invoice)."
+        ));
+    }
+    (invocation.operation.id == OperationId::RequestAQuote)
+        .then(|| format!("hint: Show the quote with `voltage quotes get {id}` once it is ready."))
 }
 
 /// A transport failure after a mutation may have been sent leaves its outcome unknown.

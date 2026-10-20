@@ -14,6 +14,8 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - A payment without `--currency` uses its wallet's line of credit currency, and its `--unit` must be in that currency. An amount without `--unit` is in the currency's base unit (msats or cents), except on a USD wallet read this way, which needs `--unit`. `--max-fee` without `--fee-unit` is in msats.
 - Every command that changes something has examples in `--help`, and every command links its guide.
 - Guides for wallets, webhooks, troubleshooting, and getting started, and references for global flags, environment variables, and configuration.
+- A command that takes a resource ID as an argument also accepts `--id ID`, so the flag that `quotes create` and `payments send` take works there too. It takes one of the two, and its usage line shows both, as in `voltage quotes get <QUOTE_ID|--id <ID>>`.
+- In human output, an accepted `payments receive` or `quotes create` names the command that shows the invoice, address, or quote.
 
 ### Changed
 
