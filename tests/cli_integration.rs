@@ -2208,10 +2208,11 @@ async fn interrupt_during_another_write_reports_an_uncertain_submission() {
 }
 
 #[tokio::test]
-async fn dry_run_sends_nothing_records_nothing_and_omits_private_values() {
+async fn a_described_change_sends_nothing_records_nothing_and_omits_private_values() {
     let (server, dir) = fixture().await;
     let output_file = dir.path().join("result.json");
     let planned = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
         .args([
             "payments",
             "send",
@@ -2233,12 +2234,11 @@ async fn dry_run_sends_nothing_records_nothing_and_omits_private_values() {
             "sats",
             "--metadata",
             "order=private-order",
-            "--dry-run",
         ])
         .arg("--output-file")
         .arg(&output_file)
         .assert()
-        .success();
+        .code(6);
     let envelope = json_stdout(&planned);
     assert_eq!(envelope["outcome"], "dry_run");
     assert_eq!(envelope["http_status"], Value::Null);
@@ -2274,26 +2274,13 @@ async fn dry_run_sends_nothing_records_nothing_and_omits_private_values() {
 
     // Wallet preflight reads are skipped when describing a delete.
     let delete = cli(dir.path(), &server)
-        .args([
-            "wallets", "delete", WALLET, "--org", ORG, "--env", ENV, "-n",
-        ])
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(["wallets", "delete", WALLET, "--org", ORG, "--env", ENV])
         .assert()
-        .success();
+        .code(6);
     let data = json_stdout(&delete)["data"].clone();
     assert_eq!(data["method"], "DELETE");
     assert_eq!(data["run"]["verify_wallet_environment"], true);
-    let read = cli(dir.path(), &server)
-        .args(["wallets", "list", "--org", ORG, "-n"])
-        .assert()
-        .success();
-    assert_eq!(
-        json_stdout(&read)["data"]["run"],
-        json!({
-            "kind": "read",
-            "check_wallet_environment": false,
-            "then": {"kind": "pages", "follow": false}
-        })
-    );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -2322,12 +2309,12 @@ async fn changes_are_described_unless_execute_or_voltage_execute_asks_to_send_th
         .assert()
         .code(2);
     assert!(stderr(&unclear).contains("VOLTAGE_EXECUTE must be 1, true, 0, or false"));
-    // An explicit --dry-run describes and succeeds, even when the environment says to send.
+    // VOLTAGE_EXECUTE=0 describes one command even when a script exported it as 1.
     cli(dir.path(), &server)
+        .env("VOLTAGE_EXECUTE", "0")
         .args(delete)
-        .arg("--dry-run")
         .assert()
-        .success();
+        .code(6);
     assert!(server.received_requests().await.unwrap().is_empty());
 
     // Reads are unaffected by the default.
@@ -2362,25 +2349,18 @@ async fn changes_are_described_unless_execute_or_voltage_execute_asks_to_send_th
 }
 
 #[tokio::test]
-async fn dry_run_reads_raw_bodies_and_shows_them_only_with_show_secrets() {
+async fn a_described_change_reads_raw_bodies_and_shows_them_only_with_show_secrets() {
     let (server, dir) = fixture().await;
     let body = json!({"id":RESOURCE,"wallet_id":WALLET,"currency":"btc","type":"bolt11","data":{"payment_request":"lnbc1raw"},"extension":{"note":"x"}});
     let args = [
-        "payments",
-        "create",
-        "--org",
-        ORG,
-        "--env",
-        ENV,
-        "--data",
-        "-",
-        "--dry-run",
+        "payments", "create", "--org", ORG, "--env", ENV, "--data", "-",
     ];
     let hidden = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
         .args(args)
         .write_stdin(body.to_string())
         .assert()
-        .success();
+        .code(6);
     let data = json_stdout(&hidden)["data"].clone();
     assert_eq!(data["body"]["data"]["payment_request"], "[OMITTED]");
     assert_eq!(data["body"]["extension"], "[OMITTED]");
@@ -2388,16 +2368,18 @@ async fn dry_run_reads_raw_bodies_and_shows_them_only_with_show_secrets() {
         "The --data payload was read and validated; a real run reads it again."
     )));
     let shown = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
         .args(args)
         .arg("--show-secrets")
         .write_stdin(body.to_string())
         .assert()
-        .success();
+        .code(6);
     let data = json_stdout(&shown)["data"].clone();
     assert_eq!(data["body"], body);
     assert_eq!(data["values_omitted"], false);
     // Local validation still applies.
     cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
         .args(args)
         .write_stdin(json!({"wallet_id": WALLET}).to_string())
         .assert()
@@ -2407,20 +2389,18 @@ async fn dry_run_reads_raw_bodies_and_shows_them_only_with_show_secrets() {
 }
 
 #[tokio::test]
-async fn dry_run_describes_checkout_requests_without_a_token() {
+async fn checkout_session_reads_send_the_requested_origin() {
     let (server, dir) = fixture().await;
-    let watched = cli(dir.path(), &server)
-        .env_remove("VOLTAGE_STREAM_TOKEN")
-        .args(["checkout", "events", "watch", "-n"])
-        .assert()
-        .success();
-    let data = json_stdout(&watched)["data"].clone();
-    assert_eq!(data["run"], json!({"kind": "event_stream"}));
-    assert_eq!(data["origin"], Value::Null);
-
     // The Origin header decides whether a browser-bound session accepts the request.
-    let session = cli(dir.path(), &server)
-        .env_remove("VOLTAGE_CHECKOUT_TOKEN")
+    respond_once(
+        &server,
+        route("GET", format!("/checkout/sessions/{RESOURCE}"))
+            .and(header("origin", "https://shop.example.test")),
+        ok(json!({"id": RESOURCE, "status": "ready"})),
+    )
+    .await;
+    cli(dir.path(), &server)
+        .env("VOLTAGE_CHECKOUT_TOKEN", CHECKOUT_KEY)
         .args([
             "checkout",
             "sessions",
@@ -2428,15 +2408,10 @@ async fn dry_run_describes_checkout_requests_without_a_token() {
             RESOURCE,
             "--origin",
             "https://shop.example.test",
-            "-n",
         ])
         .assert()
         .success();
-    assert_eq!(
-        json_stdout(&session)["data"]["origin"],
-        "https://shop.example.test"
-    );
-    assert!(server.received_requests().await.unwrap().is_empty());
+    server.verify().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3702,8 +3677,8 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
     assert_eq!(interrupted.modes.0, interrupted.modes.1);
     assert_eq!(listings().await, 3);
 
-    // JSON output, --no-input, and dry runs neither ask nor list.
-    for extra in ["--json", "--no-input", "--dry-run"] {
+    // JSON output and --no-input neither ask nor list.
+    for extra in ["--json", "--no-input"] {
         let mut args = send.to_vec();
         args.push(extra);
         let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
@@ -4200,7 +4175,7 @@ mod examples {
 }
 
 /// A documented placeholder as a value the CLI accepts: IDs become a fixed UUID, and an
-/// invoice or address a syntactically plausible stand-in. Dry runs never send them.
+/// invoice or address a syntactically plausible stand-in. Described changes never send them.
 fn placeholder(word: &str) -> &str {
     match word {
         "BOLT11_INVOICE" => "lntbs1example",
@@ -4212,9 +4187,9 @@ fn placeholder(word: &str) -> &str {
     }
 }
 
-/// Request bodies for the files the documented `--data` examples name, just complete enough
-/// for local validation. A new `@FILE` in the docs needs a body here.
-fn data_stubs() -> [(&'static str, Value); 3] {
+/// Request bodies for the files the documented and help `--data` examples name, just
+/// complete enough for local validation. A new `@FILE` in an example needs a body here.
+fn data_stubs() -> [(&'static str, Value); 8] {
     [
         (
             "payment.json",
@@ -4226,6 +4201,17 @@ fn data_stubs() -> [(&'static str, Value); 3] {
             "test-delivery.json",
             json!({"delivery_id": RESOURCE, "payload": {}}),
         ),
+        (
+            "movement.json",
+            json!({"id": RESOURCE, "wallet_id": WALLET}),
+        ),
+        ("sandbox.json", json!({})),
+        (
+            "session-request.json",
+            json!({"wallet_id": WALLET, "id": RESOURCE}),
+        ),
+        ("stream.json", json!({})),
+        ("settings.json", json!({})),
     ]
 }
 
@@ -4237,11 +4223,10 @@ fn file_names(dir: &Path) -> BTreeSet<OsString> {
         .collect()
 }
 
-/// Every change the docs show with `--execute` also passes as a dry run, offline: flags,
-/// units, scope, and `--data` bodies still validate as documented, nothing reaches the API,
-/// and no file is created.
-#[tokio::test(flavor = "multi_thread")]
-async fn documented_changes_pass_as_offline_dry_runs() {
+/// Run each example that sends a change without `--execute` instead, and require that it is
+/// described (exit 6) without a request reaching the API: flags, units, scope, and `--data`
+/// bodies still validate as documented, and no file is created.
+async fn assert_changes_describe_offline(examples: Vec<String>, minimum: usize) {
     let (server, dir) = fixture().await;
     let mut settings = seeded_api_key(dir.path(), "key", ACCOUNT_KEY);
     for name in ["prod", "staging", "test"] {
@@ -4262,11 +4247,11 @@ async fn documented_changes_pass_as_offline_dry_runs() {
     // `--data -` reads stdin, which the docs fill with `cat payment.json |`.
     let stdin = stubs[0].1.to_string();
     let before = file_names(dir.path());
-    let changes: Vec<String> = examples::doc_examples()
+    let changes: Vec<String> = examples
         .into_iter()
         .filter(|example| example.split_whitespace().any(|word| word == "--execute"))
         .collect();
-    assert!(changes.len() >= 19, "{changes:?}");
+    assert!(changes.len() >= minimum, "{changes:?}");
     for example in &changes {
         let args = example
             .split_whitespace()
@@ -4277,18 +4262,19 @@ async fn documented_changes_pass_as_offline_dry_runs() {
         let mut command = cli(dir.path(), &server);
         command
             .current_dir(dir.path())
+            .env_remove("VOLTAGE_EXECUTE")
             .env("VOLTAGE_ORGANIZATION_ID", ORG)
             .env("VOLTAGE_ENVIRONMENT_ID", ENV)
             .env("VOLTAGE_WALLET_ID", WALLET)
-            .args(args)
-            .arg("--dry-run");
+            .args(args);
         if example.contains("--data -") {
             command.write_stdin(stdin.clone());
         }
         let result = command.assert();
         let output = result.get_output();
-        assert!(
-            output.status.success(),
+        assert_eq!(
+            output.status.code(),
+            Some(6),
             "{example}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -4298,6 +4284,65 @@ async fn documented_changes_pass_as_offline_dry_runs() {
     // No `--output-file`, journal, or other file appears.
     assert_eq!(file_names(dir.path()), before);
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// The lines of the section of `help` under `heading`, up to the next blank line.
+fn help_section<'a>(help: &'a str, heading: &str) -> Vec<&'a str> {
+    help.split_once(&format!("\n{heading}\n"))
+        .map(|(_, section)| {
+            section
+                .lines()
+                .take_while(|line| !line.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every example in each command's `--help`, found by walking the command lists the binary
+/// prints, as a person or an agent reading help would.
+fn help_examples(dir: &Path) -> Vec<String> {
+    let mut examples = Vec::new();
+    let mut pending = vec![Vec::<String>::new()];
+    while let Some(path) = pending.pop() {
+        let output = human_process_at(dir, "http://127.0.0.1:9")
+            .args(&path)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{path:?}");
+        let help = String::from_utf8(output.stdout).unwrap();
+        for line in help_section(&help, "Commands:") {
+            let name = line.split_whitespace().next().unwrap_or_default();
+            if name != "help" {
+                pending.push(path.iter().cloned().chain([name.to_owned()]).collect());
+            }
+        }
+        examples.extend(
+            help_section(&help, "Examples:")
+                .into_iter()
+                .map(str::trim)
+                .filter(|line| line.starts_with("voltage "))
+                .map(|line| {
+                    line.split(['<', '>', '|'])
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned()
+                }),
+        );
+    }
+    examples
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn documented_changes_describe_themselves_offline() {
+    assert_changes_describe_offline(examples::doc_examples(), 19).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn help_examples_describe_themselves_offline() {
+    let dir = private_tempdir();
+    assert_changes_describe_offline(help_examples(dir.path()), 15).await;
 }
 
 // ---------------------------------------------------------------------------------------

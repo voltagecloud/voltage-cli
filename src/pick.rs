@@ -5,7 +5,7 @@ use crate::{
     Result,
     api::{self, SubmissionState},
     auth::{self, ApiCredential, Discovery},
-    cli::{BodySource, Command, GlobalFlags, LocalCommand, ProfileCommand, Requested},
+    cli::{BodySource, Command, GlobalFlags, LocalCommand, ProfileCommand},
     config::{Credential, Scope, Settings},
     output::OutputFormat,
     registry::{OperationId, ParameterLocation, ScopeParameter},
@@ -35,8 +35,6 @@ impl Needs {
 
 fn needs(command: &Command) -> Needs {
     match command {
-        // A dry run promises no prompt and no network request.
-        Command::Api(api) if api.requested == Requested::DryRun => Needs::default(),
         Command::Api(api) => {
             let operation = api.operation;
             let target = operation.target.map(|target| target.parameter_name());
@@ -261,12 +259,7 @@ mod tests {
             needs_of(&["profiles", "create", "prod"]),
             Needs::new(true, true, false)
         );
-        for args in [
-            &["wallets", "list", "--dry-run"][..],
-            &["organizations", "list"],
-            &["context"],
-            &["price"],
-        ] {
+        for args in [&["organizations", "list"][..], &["context"], &["price"]] {
             assert_eq!(needs_of(args), Needs::default(), "{args:?}");
         }
     }

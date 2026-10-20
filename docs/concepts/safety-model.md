@@ -4,25 +4,27 @@
 
 ## Changes need `--execute`
 
-Commands that change something (any method but GET) only describe their request unless you pass `--execute`, then exit with code 6. Reads run as usual. `--execute` is the only approval: nothing asks again before sending. A described change reports the same `resource_id` a real run would use, so chained commands see the same IDs in both modes. Scripts can set `VOLTAGE_EXECUTE=1` instead; see [scripting](../guides/scripting.md#send-changes-from-a-script).
+Commands that change something (any method but GET) only describe their request unless you pass `--execute`. Reads run as usual. `--execute` is the only approval: nothing asks again before sending.
 
-## Dry runs
+| Command | What happens | Exit code |
+|---|---|---|
+| A read (`list`, `get`, `watch`) | Sends the request | 0 on success |
+| A change without `--execute` | Describes the request and sends nothing | 6 |
+| A change with `--execute` | Sends the request | 0 on success |
 
-`-n, --dry-run` validates any API command and describes the request it would send, then stops: it reports the method, URL, query, `Origin` header, and body, plus a `run` object with what a real run would do next. That is the same plan a real run follows:
-
-- A `read` says whether it checks the wallet's environment and whether it then pages, waits for a payment, or waits for a checkout session.
-- A `mutation` says whether it verifies the wallet's environment, the ID it would journal for recovery, whether a failed payment submission is reconciled, and what it waits for.
-- An `event_stream` follows checkout events.
-
-A dry run authenticates nothing, makes no network request (including the wallet environment check a real mutation performs), prompts for nothing, writes no journal entry, and does not create `--output-file`. Body and metadata-filter values are replaced with `[OMITTED]` unless the field holds only identifiers, enums, or amounts; `--show-secrets` shows them. `--data -` still reads stdin, and a friendly create generates a fresh ID each run unless you pass `--id`. Passing local validation does not mean the API will accept the request.
+Exit code 6 means "described, not sent", so a script that forgot `--execute` fails instead of looking as if it sent money. To check a change on purpose, run it without `--execute` and treat exit code 6 as the expected result. Scripts can set `VOLTAGE_EXECUTE=1` instead of passing `--execute`, and `VOLTAGE_EXECUTE=0` describes one command again; see [scripting](../guides/scripting.md#send-changes-from-a-script).
 
 ```sh
 voltage payments send --profile prod --wallet WALLET_ID --currency btc \
-  --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats --dry-run
-voltage wallets delete WALLET_ID --profile prod -n --json
+  --invoice BOLT11_INVOICE --max-fee 10 --fee-unit sats
+voltage wallets delete WALLET_ID --profile prod
 ```
 
-The result is a normal envelope with `outcome: dry_run` and no `http_status`.
+## What a described change shows
+
+The description reports the method, URL, query, `Origin` header, and body, plus a `run` object with what a real run would do next: whether it verifies the wallet's environment, the ID it would journal for recovery, whether a failed payment submission is reconciled, and what it waits for. It reports the same `resource_id` a real run would use, so chained commands see the same IDs in both modes. The result is a normal envelope with `outcome: dry_run` and no `http_status`.
+
+Describing a change authenticates nothing, makes no request for the change itself (including the wallet environment check a real run performs), writes no journal entry, and does not create `--output-file`. On a terminal, a missing organization, environment, or wallet can still open a [picker](../guides/login-and-profiles.md#pick-the-scope-interactively), which lists choices from the API; pass the scope, `--no-input`, or `--json` to stay offline. Body and metadata-filter values are replaced with `[OMITTED]` unless the field holds only identifiers, enums, or amounts; `--show-secrets` shows them. `--data -` still reads stdin, and a friendly create generates a fresh ID each run unless you pass `--id`. Passing local validation does not mean the API will accept the request.
 
 ## Payment IDs and the request journal
 
