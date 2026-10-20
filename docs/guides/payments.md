@@ -17,7 +17,7 @@ Run a change without `--execute` to see exactly what it would send, then add `--
 
 ## Wait for a payment
 
-An accepted submission returns immediately with `outcome: accepted`. To wait, add `--wait ready` (the invoice or address exists) or `--wait completed` (the payment settled). Waiting polls the payment, starting quickly and backing off with jitter, and honors the API's retry hints. It tolerates a payment that is not visible yet and stops at `--timeout`, reporting the payment ID with exit code 5 so you can keep watching:
+An accepted submission returns immediately with `outcome: accepted`. In human output, an accepted receive or quote then names the command that shows it, such as `voltage payments get PAYMENT_ID`. To wait, add `--wait ready` (the invoice or address exists) or `--wait completed` (the payment settled). Waiting polls the payment, starting quickly and backing off with jitter, and honors the API's retry hints. It tolerates a payment that is not visible yet and stops at `--timeout`, reporting the payment ID with exit code 5 so you can keep watching:
 
 ```sh
 voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120

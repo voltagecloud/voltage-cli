@@ -870,10 +870,45 @@ impl Call<'_> {
                 } else {
                     Outcome::Succeeded
                 };
-                self.write_pages(response, settled, false).await
+                let accepted = response.status == 202;
+                self.write_pages(response, settled, false).await?;
+                if accepted
+                    && self.out.is_human()
+                    && let Some(step) = next_step(self.invocation, scope, self.request.resource_id)
+                {
+                    self.api.terminal.notice(step);
+                }
+                Ok(())
             }
         }
     }
+}
+
+/// How to see what an accepted request creates once it exists: the invoice or address of a
+/// receive, or a quote. Their 202 response carries no body.
+fn next_step(invocation: &ApiInvocation, scope: &Scope, id: Option<Uuid>) -> Option<String> {
+    let id = id?;
+    let scope = scope_flags(scope);
+    if invocation.alias == Some(PaymentDirection::Receive) {
+        return Some(format!(
+            "hint: Show the invoice or address with `voltage payments get {id}{scope}`, or pass --wait ready next time (--qr or --copy for a BOLT11 invoice)."
+        ));
+    }
+    (invocation.operation.id == OperationId::RequestAQuote).then(|| {
+        format!("hint: Show the quote with `voltage quotes get {id}{scope}` once it is ready.")
+    })
+}
+
+/// The effective scope as flags, so a command in a hint reaches the same organization,
+/// environment, and saved credential however the original command selected them.
+fn scope_flags(scope: &Scope) -> String {
+    let org = scope.org.map(|org| format!(" --org {org}"));
+    let envs = scope.envs.iter().map(|env| format!(" --env {env}"));
+    let account = scope
+        .account
+        .as_deref()
+        .map(|account| format!(" --account {}", auth::shell_word(account)));
+    org.into_iter().chain(envs).chain(account).collect()
 }
 
 /// A transport failure after a mutation may have been sent leaves its outcome unknown.
@@ -1504,6 +1539,24 @@ mod tests {
             api(Authorization::CheckoutStream(Secret::new("stream".into()))).secrets(),
             ["stream"]
         );
+    }
+
+    /// A hint's command carries the effective scope, and quotes an account name for the shell.
+    #[test]
+    fn scope_flags_name_the_effective_scope() {
+        let org = Uuid::from_u128(1);
+        let env = Uuid::from_u128(2);
+        let scope = Scope {
+            org: Some(org),
+            envs: vec![env],
+            account: Some("my login".into()),
+            ..Scope::default()
+        };
+        assert_eq!(
+            scope_flags(&scope),
+            format!(" --org {org} --env {env} --account 'my login'")
+        );
+        assert_eq!(scope_flags(&Scope::default()), "");
     }
 
     #[test]

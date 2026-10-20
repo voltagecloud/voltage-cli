@@ -209,6 +209,11 @@ impl Output {
         self.show_secrets || self.file.is_some()
     }
 
+    /// Human output, where a next step on stderr is read rather than parsed.
+    pub fn is_human(&self) -> bool {
+        !self.format.is_machine_readable()
+    }
+
     /// JSON output collects `--all` pages into one envelope; NDJSON streams them.
     pub fn collects_pages(&self) -> bool {
         self.format == OutputFormat::Json

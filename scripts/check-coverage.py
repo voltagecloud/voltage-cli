@@ -102,7 +102,7 @@ lines += ['']
 lines += [
     '## API operations',
     '',
-    'IDs are positional; enclosing scope uses flags. Paths are relative to the API base URL (`https://voltageapi.com/v1`, overridable with `--api-url`).',
+    'IDs are positional, or passed as `--id ID`; enclosing scope uses flags. Paths are relative to the API base URL (`https://voltageapi.com/v1`, overridable with `--api-url`).',
     '',
     '| Command | Method | Path |',
     '|---|---|---|',
