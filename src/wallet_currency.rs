@@ -7,11 +7,10 @@
 //! local mistake fails before any credential is resolved or request is sent.
 
 use crate::{
-    Result,
-    api::{self, SubmissionState},
-    auth,
+    Result, api,
+    auth::Resolver,
     cli::{ApiInvocation, BodySource, FriendlyFlags, GlobalFlags},
-    config::{Scope, Settings},
+    config::Scope,
     input::check_payment,
     payment::PaymentDirection,
 };
@@ -19,9 +18,8 @@ use crate::{
 pub async fn fill(
     invocation: &mut ApiInvocation,
     global: &GlobalFlags,
-    settings: &Settings,
+    resolver: Resolver<'_>,
     scope: &Scope,
-    submission: &SubmissionState,
 ) -> Result<()> {
     let alias = invocation.alias;
     let Some(BodySource::Friendly(FriendlyFlags::Payment(flags))) = &mut invocation.body else {
@@ -43,7 +41,8 @@ pub async fn fill(
     // Local mistakes fail before any credential is resolved or request is sent.
     check_payment(flags, alias)?;
     let org = scope.require_org()?;
-    let credential = auth::resolve_organization(settings, scope, global, submission)
+    let credential = resolver
+        .resolve_organization(scope)
         .await
         .map_err(|error| error.and_hint("Or pass --currency to skip reading the wallet."))?;
     let currency = api::wallet_currency(global, credential, org, wallet).await?;

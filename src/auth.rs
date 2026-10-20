@@ -636,48 +636,6 @@ async fn revoke(
     .require_success()
 }
 
-/// The saved credential for this command, refreshing an expiring login under the lock.
-pub async fn resolve(
-    settings: &Settings,
-    scope: &Scope,
-    flags: &GlobalFlags,
-    submission: &SubmissionState,
-) -> Result<Credential> {
-    let (name, account) = match select(settings, scope, flags)
-        .map_err(|rejected| rejected.problem.error(scope, settings))?
-    {
-        Selected::Ambient(key) => return Ok(Credential::ApiKey(key)),
-        Selected::Saved { name, account } => (name, account),
-    };
-    match account.kind {
-        AccountKind::ApiKey => settings.read_credential(&name),
-        AccountKind::User => {
-            // `select` rejected a valid flag that differs from the saved URL.
-            let url = base_url(flags.auth_url.as_deref().unwrap_or(&account.auth_url))?;
-            // Credential writes replace the whole value atomically, so a fresh login is used
-            // without the lock. Only a refresh, which spends the single-use refresh token, is
-            // serialized.
-            let login = saved_login(settings, &name)?;
-            if login.expires_at > now() + REFRESH_MARGIN {
-                return Ok(Credential::Login(login));
-            }
-            let _lock = settings.lock(flags.terminal()).await?;
-            // Another process may have refreshed while this one waited.
-            let login = saved_login(settings, &name)?;
-            if login.expires_at > now() + REFRESH_MARGIN {
-                return Ok(Credential::Login(login));
-            }
-            submission.session_changing(SessionChange::Refresh {
-                account: name.clone(),
-            });
-            let refreshed = Credential::Login(refresh(&url, login, &name, flags.terminal()).await?);
-            settings.write_credential(&name, account.store, &refreshed)?;
-            submission.session_settled();
-            Ok(refreshed)
-        }
-    }
-}
-
 fn saved_login(settings: &Settings, name: &str) -> Result<Login> {
     match settings.read_credential(name)? {
         Credential::Login(login) => Ok(login),
@@ -735,58 +693,169 @@ fn shell_word(value: &str) -> String {
     }
 }
 
-/// The credential for organization API calls: the API key as is, or the login exchanged
-/// for a token scoped to `--org`.
-pub async fn resolve_organization(
-    settings: &Settings,
-    scope: &Scope,
-    flags: &GlobalFlags,
-    submission: &SubmissionState,
-) -> Result<ApiCredential> {
-    let credential = resolve(settings, scope, flags, submission).await?;
-    exchange(settings, scope, flags, credential).await
+/// Resolves, refreshes, and exchanges one command's credential, and lists what it can see.
+/// It holds what stays the same for the whole command. The scope is an argument to each call,
+/// because a picker can fill in the organization between two calls.
+#[derive(Clone, Copy)]
+pub struct Resolver<'a> {
+    pub settings: &'a Settings,
+    pub flags: &'a GlobalFlags,
+    /// Records a refresh in flight, so an interruption can report it.
+    pub submission: &'a SubmissionState,
 }
 
-/// The credential to send to the Voltage API for the scope's organization. An API key is sent
-/// unchanged. A browser login's access token is account-wide and the API does not accept it,
-/// so it is traded at the auth service (OAuth token exchange) for a short-lived token whose
-/// audience is the `--org` organization.
-pub async fn exchange(
-    settings: &Settings,
-    scope: &Scope,
-    flags: &GlobalFlags,
-    credential: Credential,
-) -> Result<ApiCredential> {
-    let login = match credential {
-        Credential::ApiKey(key) => return Ok(ApiCredential::ApiKey(key)),
-        Credential::Login(login) => login,
-    };
-    let organization = scope.require_org()?;
-    let name = settings.account_name(scope)?;
-    let url = base_url(&settings.account(&name)?.auth_url)?;
-    let response = auth_request(
-        client(AUTH_TIMEOUT)?
-            .post(format!("{url}/oauth/token"))
-            .form(&[
-                ("grant_type", TOKEN_EXCHANGE_GRANT),
-                ("subject_token", login.access_token.expose()),
-                ("subject_token_type", ACCESS_TOKEN_TYPE),
-                ("audience", &organization.to_string()),
-            ]),
-        flags.terminal(),
-    )
-    .await?;
-    // A session revoked before its access token expires fails here, not at refresh.
-    response.require_login(&name, &url)?;
-    let token: OrganizationTokenResponse = response.json("Invalid organization token response")?;
-    if token.access_token.expose().is_empty()
-        || token.issued_token_type != ACCESS_TOKEN_TYPE
-        || !token.token_type.eq_ignore_ascii_case("bearer")
-        || token.expires_in == 0
-    {
-        return Err(Error::auth("Invalid organization token response"));
+impl Resolver<'_> {
+    /// The saved credential for this command, refreshing an expiring login under the lock.
+    pub async fn resolve(self, scope: &Scope) -> Result<Credential> {
+        let Self {
+            settings,
+            flags,
+            submission,
+        } = self;
+        let (name, account) = match select(settings, scope, flags)
+            .map_err(|rejected| rejected.problem.error(scope, settings))?
+        {
+            Selected::Ambient(key) => return Ok(Credential::ApiKey(key)),
+            Selected::Saved { name, account } => (name, account),
+        };
+        match account.kind {
+            AccountKind::ApiKey => settings.read_credential(&name),
+            AccountKind::User => {
+                // `select` rejected a valid flag that differs from the saved URL.
+                let url = base_url(flags.auth_url.as_deref().unwrap_or(&account.auth_url))?;
+                // Credential writes replace the whole value atomically, so a fresh login is used
+                // without the lock. Only a refresh, which spends the single-use refresh token, is
+                // serialized.
+                let login = saved_login(settings, &name)?;
+                if login.expires_at > now() + REFRESH_MARGIN {
+                    return Ok(Credential::Login(login));
+                }
+                let _lock = settings.lock(flags.terminal()).await?;
+                // Another process may have refreshed while this one waited.
+                let login = saved_login(settings, &name)?;
+                if login.expires_at > now() + REFRESH_MARGIN {
+                    return Ok(Credential::Login(login));
+                }
+                submission.session_changing(SessionChange::Refresh {
+                    account: name.clone(),
+                });
+                let refreshed =
+                    Credential::Login(refresh(&url, login, &name, flags.terminal()).await?);
+                settings.write_credential(&name, account.store, &refreshed)?;
+                submission.session_settled();
+                Ok(refreshed)
+            }
+        }
     }
-    Ok(ApiCredential::OrganizationToken(token.access_token))
+
+    /// The credential for organization API calls: the API key as is, or the login exchanged
+    /// for a token scoped to `--org`.
+    pub async fn resolve_organization(self, scope: &Scope) -> Result<ApiCredential> {
+        let credential = self.resolve(scope).await?;
+        self.exchange(scope, credential).await
+    }
+
+    /// The credential to send to the Voltage API for the scope's organization. An API key is sent
+    /// unchanged. A browser login's access token is account-wide and the API does not accept it,
+    /// so it is traded at the auth service (OAuth token exchange) for a short-lived token whose
+    /// audience is the `--org` organization.
+    pub async fn exchange(self, scope: &Scope, credential: Credential) -> Result<ApiCredential> {
+        let login = match credential {
+            Credential::ApiKey(key) => return Ok(ApiCredential::ApiKey(key)),
+            Credential::Login(login) => login,
+        };
+        let organization = scope.require_org()?;
+        let name = self.settings.account_name(scope)?;
+        let url = base_url(&self.settings.account(&name)?.auth_url)?;
+        let response = auth_request(
+            client(AUTH_TIMEOUT)?
+                .post(format!("{url}/oauth/token"))
+                .form(&[
+                    ("grant_type", TOKEN_EXCHANGE_GRANT),
+                    ("subject_token", login.access_token.expose()),
+                    ("subject_token_type", ACCESS_TOKEN_TYPE),
+                    ("audience", &organization.to_string()),
+                ]),
+            self.flags.terminal(),
+        )
+        .await?;
+        // A session revoked before its access token expires fails here, not at refresh.
+        response.require_login(&name, &url)?;
+        let token: OrganizationTokenResponse =
+            response.json("Invalid organization token response")?;
+        if token.access_token.expose().is_empty()
+            || token.issued_token_type != ACCESS_TOKEN_TYPE
+            || !token.token_type.eq_ignore_ascii_case("bearer")
+            || token.expires_in == 0
+        {
+            return Err(Error::auth("Invalid organization token response"));
+        }
+        Ok(ApiCredential::OrganizationToken(token.access_token))
+    }
+
+    /// List organizations visible to the login, or environments in the selected organization.
+    pub async fn discover(self, scope: &Scope, what: Discovery) -> Result<Value> {
+        // An API key cannot list organizations or environments; say which key was used.
+        let requires_login = || {
+            let command = match what {
+                Discovery::Organizations => "organizations list",
+                Discovery::Environments => "environments list",
+            };
+            if ambient_api_key(self.flags).is_some() {
+                return Error::auth(format!(
+                    "{command} needs a browser login, but this command used VOLTAGE_API_KEY from the environment"
+                ))
+                .with_hint(
+                    "Pass --account NAME to use a saved browser login (`voltage login` creates one), or unset VOLTAGE_API_KEY.",
+                );
+            }
+            let used = self.settings.account_name(scope).unwrap_or_default();
+            Error::auth(format!(
+                "{command} needs a browser login, but the selected credential {used} is an API key"
+            ))
+            .with_hint(
+                "Select a browser login with --account NAME, or sign in with `voltage login`.",
+            )
+        };
+        let token = match what {
+            Discovery::Organizations => match self.resolve(scope).await? {
+                Credential::Login(login) => login.access_token,
+                Credential::ApiKey(_) => return Err(requires_login()),
+            },
+            Discovery::Environments => match self.resolve_organization(scope).await? {
+                ApiCredential::OrganizationToken(token) => token,
+                ApiCredential::ApiKey(_) => return Err(requires_login()),
+            },
+        };
+        self.list(scope, what, &token).await
+    }
+
+    /// One discovery listing with a token already in hand: the login's access token for
+    /// organizations, or an organization token for environments.
+    pub async fn list(self, scope: &Scope, what: Discovery, token: &Secret) -> Result<Value> {
+        let name = self.settings.account_name(scope)?;
+        let url = base_url(&self.settings.account(&name)?.auth_url)?;
+        let path = match what {
+            Discovery::Organizations => "/users/current".to_owned(),
+            Discovery::Environments => {
+                format!("/organizations/{}/environments", scope.require_org()?)
+            }
+        };
+        let response = auth_request(
+            client(AUTH_TIMEOUT)?
+                .get(format!("{url}{path}"))
+                .bearer_auth(token.expose()),
+            self.flags.terminal(),
+        )
+        .await?;
+        response.require_success()?;
+        match what {
+            Discovery::Organizations => Ok(response
+                .json::<OrganizationDiscovery>("Invalid user response")?
+                .organizations),
+            Discovery::Environments => response.json("Invalid environment response"),
+        }
+    }
 }
 
 pub async fn logout(
@@ -879,82 +948,6 @@ pub async fn import_key(
         account: name,
         imported: true,
     })
-}
-
-/// List organizations visible to the login, or environments in the selected organization.
-pub async fn discover(
-    settings: &Settings,
-    scope: &Scope,
-    flags: &GlobalFlags,
-    what: Discovery,
-    submission: &SubmissionState,
-) -> Result<Value> {
-    // An API key cannot list organizations or environments; say which key was used.
-    let requires_login = || {
-        let command = match what {
-            Discovery::Organizations => "organizations list",
-            Discovery::Environments => "environments list",
-        };
-        if ambient_api_key(flags).is_some() {
-            return Error::auth(format!(
-                "{command} needs a browser login, but this command used VOLTAGE_API_KEY from the environment"
-            ))
-            .with_hint(
-                "Pass --account NAME to use a saved browser login (`voltage login` creates one), or unset VOLTAGE_API_KEY.",
-            );
-        }
-        let used = settings.account_name(scope).unwrap_or_default();
-        Error::auth(format!(
-            "{command} needs a browser login, but the selected credential {used} is an API key"
-        ))
-        .with_hint("Select a browser login with --account NAME, or sign in with `voltage login`.")
-    };
-    let token = match what {
-        Discovery::Organizations => match resolve(settings, scope, flags, submission).await? {
-            Credential::Login(login) => login.access_token,
-            Credential::ApiKey(_) => return Err(requires_login()),
-        },
-        Discovery::Environments => {
-            match resolve_organization(settings, scope, flags, submission).await? {
-                ApiCredential::OrganizationToken(token) => token,
-                ApiCredential::ApiKey(_) => return Err(requires_login()),
-            }
-        }
-    };
-    list(settings, scope, flags, what, &token).await
-}
-
-/// One discovery listing with a token already in hand: the login's access token for
-/// organizations, or an organization token for environments.
-pub async fn list(
-    settings: &Settings,
-    scope: &Scope,
-    flags: &GlobalFlags,
-    what: Discovery,
-    token: &Secret,
-) -> Result<Value> {
-    let name = settings.account_name(scope)?;
-    let url = base_url(&settings.account(&name)?.auth_url)?;
-    let path = match what {
-        Discovery::Organizations => "/users/current".to_owned(),
-        Discovery::Environments => {
-            format!("/organizations/{}/environments", scope.require_org()?)
-        }
-    };
-    let response = auth_request(
-        client(AUTH_TIMEOUT)?
-            .get(format!("{url}{path}"))
-            .bearer_auth(token.expose()),
-        flags.terminal(),
-    )
-    .await?;
-    response.require_success()?;
-    match what {
-        Discovery::Organizations => Ok(response
-            .json::<OrganizationDiscovery>("Invalid user response")?
-            .organizations),
-        Discovery::Environments => response.json("Invalid environment response"),
-    }
 }
 
 #[cfg(test)]

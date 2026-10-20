@@ -2,11 +2,10 @@
 //! a person at a terminal picks one instead of copying a UUID. Scripts never see a prompt.
 
 use crate::{
-    Result,
-    api::{self, SubmissionState},
-    auth::{self, ApiCredential, Discovery},
+    Result, api,
+    auth::{ApiCredential, Discovery, Resolver},
     cli::{BodySource, Command, GlobalFlags, LocalCommand, ProfileCommand},
-    config::{Credential, Scope, Settings},
+    config::{Credential, Scope},
     output::OutputFormat,
     registry::{OperationId, ParameterLocation, ScopeParameter},
     terminal::{Choice, Terminal},
@@ -83,9 +82,8 @@ fn needs(command: &Command) -> Needs {
 pub async fn fill(
     command: &Command,
     global: &GlobalFlags,
-    settings: &Settings,
+    resolver: Resolver<'_>,
     scope: &mut Scope,
-    submission: &SubmissionState,
 ) -> Result<()> {
     let needs = needs(command);
     let missing = Needs {
@@ -100,64 +98,57 @@ pub async fn fill(
     {
         return Ok(());
     }
-    // Without a credential there is nothing to list. That, not the missing scope, is what the
-    // person must fix first, so report it.
-    let credential = auth::resolve(settings, scope, global, submission).await?;
-    let mut picked = Vec::new();
-    let asked = ask(missing, credential, global, settings, scope, &mut picked).await;
-    if asked.is_ok() && !picked.is_empty() {
+    let picked = ask(missing, global, resolver, scope).await?;
+    if !picked.is_empty() {
         let profile = match command {
             Command::Local(LocalCommand::Profiles { .. }) => "",
             _ => " or save a profile with voltage profiles create",
         };
         terminal.notice(format!("Next time, pass {}{profile}.", picked.join(" ")));
     }
-    asked
+    Ok(())
 }
 
 /// The pickers themselves, with one credential resolution and at most one organization token
 /// exchange. An API key cannot list organizations or environments, so only its wallets are
-/// offered.
+/// offered. Returns the flags for what was picked, which Esc or an empty list can cut short.
 async fn ask(
     missing: Needs,
-    credential: Credential,
     global: &GlobalFlags,
-    settings: &Settings,
+    resolver: Resolver<'_>,
     scope: &mut Scope,
-    picked: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let terminal = global.terminal();
+    // Without a credential there is nothing to list. That, not the missing scope, is what the
+    // person must fix first, so report it.
+    let credential = resolver.resolve(scope).await?;
+    let mut picked = Vec::new();
     if missing.org {
         let Credential::Login(login) = &credential else {
             terminal.notice("An API key cannot list organizations, so there is nothing to pick.");
-            return Ok(());
+            return Ok(picked);
         };
-        let listed = auth::list(
-            settings,
-            scope,
-            global,
-            Discovery::Organizations,
-            &login.access_token,
-        )
-        .await?;
+        let listed = resolver
+            .list(scope, Discovery::Organizations, &login.access_token)
+            .await?;
         let Some(org) = choose(terminal, "Organization:", "organizations", &listed).await? else {
-            return Ok(());
+            return Ok(picked);
         };
         scope.org = Some(org);
         picked.push(format!("--org {org}"));
     }
     if !missing.env && !missing.wallet {
-        return Ok(());
+        return Ok(picked);
     }
-    let credential = auth::exchange(settings, scope, global, credential).await?;
+    let credential = resolver.exchange(scope, credential).await?;
     if missing.env {
         let ApiCredential::OrganizationToken(token) = &credential else {
             terminal.notice("An API key cannot list environments, so there is nothing to pick.");
-            return Ok(());
+            return Ok(picked);
         };
-        let listed = auth::list(settings, scope, global, Discovery::Environments, token).await?;
+        let listed = resolver.list(scope, Discovery::Environments, token).await?;
         let Some(env) = choose(terminal, "Environment:", "environments", &listed).await? else {
-            return Ok(());
+            return Ok(picked);
         };
         scope.envs = vec![env];
         picked.push(format!("--env {env}"));
@@ -165,12 +156,12 @@ async fn ask(
     if missing.wallet {
         let listed = api::wallets(global, credential, scope).await?;
         let Some(wallet) = choose(terminal, "Wallet:", "wallets", &listed).await? else {
-            return Ok(());
+            return Ok(picked);
         };
         scope.wallet = Some(wallet);
         picked.push(format!("--wallet {wallet}"));
     }
-    Ok(())
+    Ok(picked)
 }
 
 /// Pick from a listing, or say why there is nothing to pick.
