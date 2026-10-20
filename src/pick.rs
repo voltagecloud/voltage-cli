@@ -179,7 +179,8 @@ async fn choose(
     terminal.pick(question, choices).await
 }
 
-/// The listed resources that carry a UUID `id`, sorted by name.
+/// The listed resources that carry a UUID `id`, sorted by name. A wallet also shows its
+/// currency when all of its balances report the same one.
 fn choices(listed: &Value) -> Vec<Choice> {
     let items = listed
         .as_array()
@@ -191,11 +192,28 @@ fn choices(listed: &Value) -> Vec<Choice> {
         .filter_map(|item| {
             let id = item.get("id")?.as_str()?.parse().ok()?;
             let name = item.get("name").and_then(Value::as_str).unwrap_or("-");
-            Some(Choice::new(id, name))
+            let choice = Choice::new(id, name);
+            Some(match currency(item) {
+                Some(currency) => choice.with_currency(currency),
+                None => choice,
+            })
         })
         .collect();
     choices.sort_by_key(|choice| choice.name().to_lowercase());
     choices
+}
+
+/// The one currency a wallet's balances report, or `None` when they report none or disagree.
+fn currency(item: &Value) -> Option<&str> {
+    let mut currencies = item
+        .get("balances")?
+        .as_array()?
+        .iter()
+        .map(|balance| balance.get("currency").and_then(Value::as_str));
+    let first = currencies.next()??;
+    currencies
+        .all(|currency| currency == Some(first))
+        .then_some(first)
 }
 
 #[cfg(test)]
@@ -275,5 +293,33 @@ mod tests {
         );
         assert_eq!(choices(&json!({"items": [{"id": ID}]})).len(), 1);
         assert!(choices(&json!({"unexpected": true})).is_empty());
+    }
+
+    #[test]
+    fn wallet_choices_show_a_currency_only_when_their_balances_agree() {
+        let wallet = |balances: Value| json!([{"id": ID, "name": "Payroll", "balances": balances}]);
+        let label = |listed: Value| choices(&listed)[0].to_string();
+        let usd = json!({"currency": "usd", "available": 1});
+        assert_eq!(
+            label(wallet(json!([usd, usd]))),
+            format!("Payroll  USD  {ID}")
+        );
+        assert_eq!(
+            label(wallet(json!([{"currency": "btc\u{1b}[2J"}]))),
+            format!("Payroll  BTC [2J  {ID}")
+        );
+        for balances in [
+            json!([]),
+            json!([usd, {"currency": "btc"}]),
+            json!([usd, {"available": 1}]),
+            json!([{"available": 1}]),
+            json!("usd"),
+        ] {
+            assert_eq!(
+                label(wallet(balances.clone())),
+                format!("Payroll  {ID}"),
+                "{balances}"
+            );
+        }
     }
 }
