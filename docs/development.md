@@ -126,14 +126,17 @@ build when they disagree. `docs/commands.md` is generated; regenerate it with
 ## Scripts
 
 - `scripts/voltage-local` runs the development binary with isolated credentials, loopback
-  auth on port 8081, and a disabled API endpoint. `--build` compiles it first.
+  auth on port 8081, and a disabled API endpoint. A leading `--build` compiles it, then runs
+  the rest of the arguments, if any: `scripts/voltage-local --build login --account me`.
 - `scripts/voltage-staging` runs the development binary against staging. It reads the
   staging endpoints (`VOLTAGE_STAGING_API_URL`, `VOLTAGE_STAGING_AUTH_URL`) and, only for
   API-key runs, the optional `VOLTAGE_API_KEY`, `VOLTAGE_ORGANIZATION_ID`,
   `VOLTAGE_ENVIRONMENT_ID`, and `VOLTAGE_WALLET_ID` from the repository's private `.env`
   (copy `.env.example`, fill it in, `chmod 600 .env`) without evaluating it as shell code,
   keeps CLI state under `.work/staging/cli`, and refuses `--config-dir`, `--api-url`, and
-  `--auth-url` so a staging command cannot target another deployment. Browser login and
+  `--auth-url` so a staging command cannot target another deployment. A leading `--build`
+  works as it does for `voltage-local`, but checks `.env` before it builds when a command
+  follows; `--build` alone needs no `.env`. Browser login and
   profiles need no credential variables. The repository itself names no deployment. Before
   creating a payment, confirm the wallet's reported network is a test network.
 - `scripts/package.sh TARGET` builds the release archive for one Rust target and smoke-tests
@@ -160,6 +163,9 @@ the same way you would against production.
    alias voltage="$PWD/scripts/voltage-staging"
    voltage --build
    ```
+
+   A leading `--build` also runs a command after the build, such as
+   `voltage --build login --account me --credential-store file`.
 
 3. Sign in through the browser and discover your organization and environment. These two
    list commands require a browser login; an API key cannot use them. `--credential-store
