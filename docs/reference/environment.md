@@ -8,7 +8,7 @@ A flag beats a variable, and `--profile` or `--account` beats the scope and cred
 | `VOLTAGE_ORGANIZATION_ID` | Organization UUID | `--org`, `--profile` |
 | `VOLTAGE_ENVIRONMENT_ID` | Environment UUID | `--env`, `--profile` |
 | `VOLTAGE_WALLET_ID` | Wallet UUID | `--wallet`, `--profile` |
-| `VOLTAGE_EXECUTE` | `1` or `true` sends every change without `--execute`; `0`, `false`, or empty only describes changes. Any other value fails before a change. | `--dry-run` |
+| `VOLTAGE_EXECUTE` | `1` or `true` sends every change without `--execute`; `0`, `false`, or empty only describes changes. Any other value fails before a change. | — |
 | `VOLTAGE_CHECKOUT_TOKEN` | A checkout session token for `checkout sessions` reads | `--token-file` |
 | `VOLTAGE_STREAM_TOKEN` | A checkout stream token for `checkout events watch` | `--token-file` |
 | `VOLTAGE_CONFIG_DIR` | The configuration directory, as an absolute path | `--config-dir` |

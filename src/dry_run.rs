@@ -1,4 +1,4 @@
-//! `--dry-run`: describe the request an API command would send, then stop.
+//! A change without `--execute`: describe the request it would send, then stop.
 //!
 //! The description is built after local validation and before authentication, wallet
 //! preflight, confirmation, journaling, or any network request. It reports the `Run` that
@@ -51,7 +51,7 @@ struct QueryPair<'a> {
     value: &'a str,
 }
 
-/// The `data` of a dry-run envelope.
+/// The `data` of a described change's envelope (`outcome: dry_run`).
 #[derive(Serialize)]
 struct DryRun<'a> {
     operation: String,
@@ -102,7 +102,7 @@ pub fn describe(
     let mut notes =
         vec!["No request was sent. Local validation does not prove the API will accept it."];
     if generated_id(invocation) {
-        notes.push("The id was generated for this dry run; a real run generates a new one unless you pass --id.");
+        notes.push("The id was generated for this description; a real run generates a new one unless you pass --id.");
     }
     if matches!(invocation.body, Some(BodySource::Raw(_))) {
         notes.push("The --data payload was read and validated; a real run reads it again.");

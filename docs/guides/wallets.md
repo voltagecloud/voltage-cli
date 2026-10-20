@@ -36,10 +36,10 @@ voltage wallets policies get WALLET_ID --profile prod --json | jq .data > polici
 voltage wallets policies update WALLET_ID --profile prod --data @policies.json --execute
 ```
 
-Policies have no friendly flags: save the current policies, edit the file, and send the complete object with `--data`. Save only `.data`: `--json` and `--output-file` wrap the response in an envelope, which is not a policy body. Deleting a wallet cannot be undone, so check the request with a dry run first:
+Policies have no friendly flags: save the current policies, edit the file, and send the complete object with `--data`. Save only `.data`: `--json` and `--output-file` wrap the response in an envelope, which is not a policy body. Deleting a wallet cannot be undone, so run it without `--execute` first to see the request:
 
 ```sh
-voltage wallets delete WALLET_ID --profile prod --dry-run
+voltage wallets delete WALLET_ID --profile prod
 voltage wallets delete WALLET_ID --profile prod --execute
 ```
 

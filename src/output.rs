@@ -86,7 +86,7 @@ pub enum Outcome {
     Ready,
     /// The payment settled.
     Completed,
-    /// `--dry-run` described a request without sending it.
+    /// A change without `--execute` was described without being sent.
     #[serde(rename = "dry_run")]
     DryRun,
 }
