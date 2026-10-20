@@ -14,6 +14,29 @@ Rules for coding agents working in this repository. Engineering conventions live
   change would exceed that, split the rest onto a new branch based on the one you changed
   and open it as a stacked pull request.
 
+## Before you request review
+
+Authors and reviewers, people or agents, run the same checks. CI does not run all of them,
+so a pull request is not ready until each one is done and reported.
+
+1. Review the diff against its base with the `voltage-pr-review` skill from
+   [voltagecloud/engineering-skills](https://github.com/voltagecloud/engineering-skills).
+   For Rust changes, also read the `voltage-backend-engineering` skill and its Rust style
+   checklist. Fix each applicable finding before you ask for review.
+2. Test every new error and early-return path, not only the success path.
+3. Run the verification gate in the [development guide](docs/development.md).
+4. When the change touches `src/` or `tests/`, run the
+   [CRAP report](docs/quality.md#crap-risk-check). It is required even though CI does not
+   run it: every measured function must stay below 20. Fix a violation in the pull request
+   that introduces it, by adding meaningful tests or simplifying the code, never by
+   splitting functions only to lower the score.
+5. In the pull request description, give the checks you ran and the CRAP result: the
+   highest score and each function at or above 20. Name any check you could not run, and
+   why.
+
+A reviewer runs the CRAP report on the pull request's head and reports each violation as a
+finding, together with the review from step 1.
+
 ## Agent friction log
 
 The CLI must be easy for AI agents to use. When it is not, record why in
