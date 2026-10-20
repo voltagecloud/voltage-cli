@@ -1038,6 +1038,14 @@ mod tests {
     const ENV: &str = "22222222-2222-4222-8222-222222222222";
     const WALLET: &str = "33333333-3333-4333-8333-333333333333";
 
+    mod examples {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/examples.rs"
+        ));
+    }
+    use examples::{doc_examples, user_docs};
+
     fn api(args: &[&str]) -> ApiInvocation {
         let mut full = vec!["voltage"];
         full.extend_from_slice(args);
@@ -1375,66 +1383,6 @@ mod tests {
                 .is_err()
         );
         assert!(Invocation::try_parse_from(["voltage", "bogus"]).is_err());
-    }
-
-    /// The README and the docs index, guides, concepts, reference, and development guide, as
-    /// (path from the repository root, contents).
-    fn user_docs() -> Vec<(PathBuf, String)> {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut paths = ["README.md", "docs/README.md", "docs/development.md"]
-            .map(|path| root.join(path))
-            .to_vec();
-        for dir in ["guides", "concepts", "reference"] {
-            for entry in std::fs::read_dir(root.join("docs").join(dir)).unwrap() {
-                let path = entry.unwrap().path();
-                // Only Markdown is documentation; an image or other asset is not read as text.
-                if path.extension().is_some_and(|extension| extension == "md") {
-                    paths.push(path);
-                }
-            }
-        }
-        paths
-            .into_iter()
-            .map(|path| {
-                let text = std::fs::read_to_string(&path).unwrap();
-                (path.strip_prefix(&root).unwrap().to_owned(), text)
-            })
-            .collect()
-    }
-
-    /// Every `voltage` line in a documentation shell block, with continuations joined,
-    /// comments dropped, and pipes, redirections, and leading variable assignments cut away.
-    fn doc_examples() -> Vec<String> {
-        let mut examples = Vec::new();
-        for (_, text) in user_docs() {
-            let mut shell = false;
-            let mut line = String::new();
-            for raw in text.lines().map(str::trim) {
-                if let Some(language) = raw.strip_prefix("```") {
-                    shell = matches!(language, "sh" | "bash" | "shell" | "console");
-                    continue;
-                }
-                if !shell {
-                    continue;
-                }
-                line.push_str(raw.trim_end_matches('\\'));
-                if raw.ends_with('\\') {
-                    continue;
-                }
-                let command = line.split(" #").next().unwrap_or_default();
-                let command = command.split('|').find(|part| part.contains("voltage "));
-                if let Some(command) = command.and_then(|part| part.split(['<', '>']).next()) {
-                    let start = command.find("voltage ").unwrap_or_default();
-                    let command = command[start..].trim();
-                    // `--build` belongs to the development guide's staging wrapper.
-                    if command != "voltage --build" {
-                        examples.push(command.to_owned());
-                    }
-                }
-                line.clear();
-            }
-        }
-        examples
     }
 
     /// GitHub's anchors for a document's headings: lowercase, punctuation dropped, spaces
