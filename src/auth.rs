@@ -10,7 +10,7 @@ use crate::{
     cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
         AUTH_URL, Account, AccountKind, Credential, CredentialProblem, InputSource, LOCK_TIMEOUT,
-        Login, Scope, Settings, read_secret,
+        Login, Scope, Settings, name_in_use, read_secret,
     },
     secret::Secret,
     terminal::{self, Terminal},
@@ -652,9 +652,7 @@ pub async fn login(
     if let Some(name) = &global.account
         && settings.config.accounts.contains_key(name)
     {
-        return Err(Error::usage(
-            "Credential already exists; log out first or choose another --account",
-        ));
+        return Err(name_in_use(name));
     }
     let device = auth.device_authorization().await?;
     let verification = device.verification_url()?;
@@ -699,32 +697,18 @@ async fn save_login(
         .or_else(|| login.email.clone())
         .or_else(|| login.user_id.clone())
         .ok_or_else(|| Error::auth("User response has no account identity"))?;
-    let _lock = settings.lock(auth.terminal).await?;
-    settings.reload()?;
-    if settings.config.accounts.contains_key(&name) {
-        return Err(Error::usage(format!(
-            "Credential {name} already exists; log it out first or use a different --account name"
-        )));
-    }
     let email = login.email.clone();
-    settings.write_credential(&name, flags.credential_store, &Credential::Login(login))?;
-    settings.config.accounts.insert(
-        name.clone(),
-        Account {
-            store: flags.credential_store,
-            kind: AccountKind::User,
-            email: email.clone(),
-            organization_id: None,
-            environment_id: None,
-            auth_url: auth.url.clone(),
-        },
-    );
-    if let Err(error) = settings.save() {
-        // Do not leave a stored secret that no account entry can reach.
-        let _ = settings.delete_credential(&name);
-        settings.config.accounts.remove(&name);
-        return Err(error);
-    }
+    let account = Account {
+        store: flags.credential_store,
+        kind: AccountKind::User,
+        email: email.clone(),
+        organization_id: None,
+        environment_id: None,
+        auth_url: auth.url.clone(),
+    };
+    settings
+        .add_account(&name, account, &Credential::Login(login), auth.terminal)
+        .await?;
     Ok(LoginOutcome {
         account: name,
         email,
@@ -975,24 +959,17 @@ pub async fn import_key(
     if key.expose().trim().is_empty() {
         return Err(Error::usage("API key cannot be empty"));
     }
-    let _lock = settings.lock(global.terminal()).await?;
-    settings.reload()?;
-    if settings.config.accounts.contains_key(&name) {
-        return Err(Error::usage("Credential already exists"));
-    }
-    settings.write_credential(&name, flags.credential_store, &Credential::ApiKey(key))?;
-    settings.config.accounts.insert(
-        name.clone(),
-        Account {
-            store: flags.credential_store,
-            kind: AccountKind::ApiKey,
-            email: None,
-            organization_id: Some(organization),
-            environment_id: Some(environment),
-            auth_url: AUTH_URL.into(),
-        },
-    );
-    settings.save()?;
+    let account = Account {
+        store: flags.credential_store,
+        kind: AccountKind::ApiKey,
+        email: None,
+        organization_id: Some(organization),
+        environment_id: Some(environment),
+        auth_url: AUTH_URL.into(),
+    };
+    settings
+        .add_account(&name, account, &Credential::ApiKey(key), global.terminal())
+        .await?;
     Ok(ImportOutcome {
         account: name,
         imported: true,

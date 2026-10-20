@@ -1203,12 +1203,27 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
     assert_eq!(data["kind"], "api_key");
     assert_eq!(data["expired"], false);
     assert!(!stdout(&status).contains("imported-secret"));
-    cli(dir.path(), &server)
+    // A name in use is refused with the same message as `login`, and the saved key is kept.
+    let in_use =
+        "Credential staging-key already exists; log it out first or use a different --account name";
+    let again = cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
         .args(import)
         .write_stdin("again")
         .assert()
         .code(2);
+    assert_eq!(json_error(&again)["error"]["message"], in_use);
+    let login = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_API_KEY")
+        .args(["login", "--account", "staging-key", "--no-browser"])
+        .assert()
+        .code(2);
+    assert_eq!(json_error(&login)["error"]["message"], in_use);
+    let settings = Settings::open(dir.path().to_path_buf()).unwrap();
+    let Credential::ApiKey(key) = settings.read_credential("staging-key").unwrap() else {
+        panic!("expected an API key");
+    };
+    assert_eq!(key.expose(), "imported-secret");
     cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
         .args([

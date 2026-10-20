@@ -26,6 +26,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 ### Fixed
 
 - Help and README examples for changes include `--execute`, so copying one sends it.
+- `voltage auth import-key` removes the saved key again when it cannot save the configuration, as `voltage login` does, and reports a name in use with the same message.
 
 ## 0.1.0 - 2026-09-18
 

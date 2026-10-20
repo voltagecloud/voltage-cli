@@ -566,6 +566,31 @@ impl Settings {
         Ok(())
     }
 
+    /// Save a new account and its secret under the credential lock. A name already in use is
+    /// refused. When the configuration cannot be saved, the secret is removed again, so no
+    /// stored secret is left that no account entry reaches.
+    pub async fn add_account(
+        &mut self,
+        name: &str,
+        account: Account,
+        credential: &Credential,
+        terminal: Terminal,
+    ) -> Result<()> {
+        let _lock = self.lock(terminal).await?;
+        self.reload()?;
+        if self.config.accounts.contains_key(name) {
+            return Err(name_in_use(name));
+        }
+        self.write_credential(name, account.store, credential)?;
+        self.config.accounts.insert(name.to_owned(), account);
+        if let Err(error) = self.save() {
+            let _ = self.delete_credential(name);
+            self.config.accounts.remove(name);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Exclusive process lock for credential and configuration writes.
     pub async fn lock(&self, terminal: Terminal) -> Result<File> {
         private_dir(&self.dir)?;
@@ -631,6 +656,13 @@ fn sourced<T>(value: Option<T>, source: Source) -> (Option<T>, Source) {
         Source::Unset
     };
     (value, source)
+}
+
+/// A new account named like a saved one; `login` and `auth import-key` refuse it alike.
+pub(crate) fn name_in_use(name: &str) -> Error {
+    Error::usage(format!(
+        "Credential {name} already exists; log it out first or use a different --account name"
+    ))
 }
 
 /// Saved names, comma-separated, or `None` when there are none.
@@ -997,5 +1029,45 @@ mod tests {
         assert_eq!(key.expose(), "api-key");
         settings.delete_credential("key").unwrap();
         assert!(settings.read_credential("key").is_err());
+    }
+
+    /// A configuration directory that is read-only to its owner refuses the new config.toml,
+    /// while the existing credentials directory and lock file stay writable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_account_that_cannot_be_saved_leaves_no_secret_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(dir.path(), 0o700);
+        let credentials = dir.path().join(CREDENTIALS_DIR);
+        fs::create_dir(&credentials).unwrap();
+        mode(&credentials, 0o700);
+        new_private(&dir.path().join(LOCK_FILE)).unwrap();
+        mode(dir.path(), 0o500);
+        // The owner's permissions do not bind root, so there is nothing to test.
+        if new_private(&dir.path().join("probe")).is_ok() {
+            mode(dir.path(), 0o700);
+            return;
+        }
+        let mut settings = settings(dir.path().to_path_buf());
+        let account = Account {
+            store: CredentialStore::File,
+            kind: AccountKind::ApiKey,
+            email: None,
+            organization_id: None,
+            environment_id: None,
+            auth_url: AUTH_URL.into(),
+        };
+        let key = Credential::ApiKey(Secret::new("api-key".into()));
+        let added = settings
+            .add_account("key", account, &key, Terminal::new(true, true))
+            .await;
+        mode(dir.path(), 0o700);
+        assert!(added.is_err());
+        assert!(!settings.config.accounts.contains_key("key"));
+        assert!(!settings.credential_path("key").exists());
     }
 }
