@@ -516,7 +516,7 @@ pub async fn execute(
     out: &mut Output,
 ) -> Result<()> {
     let operation = invocation.operation;
-    let mut request = Request::read(invocation, scope).await?;
+    let request = Request::read(invocation, scope).await?;
     check_invoice_flags(invocation, &request)?;
     let run = Run::plan(invocation, &request, scope);
     match execution {
@@ -541,27 +541,22 @@ pub async fn execute(
     }
     let authorization = Authorization::resolve(invocation, resolver, scope).await?;
     let api = Api::new(global, invocation.origin.clone(), authorization)?;
-    let steps = Steps {
-        api: &api,
-        invocation,
-        scope,
-        deadline: Instant::now() + global.timeout,
-    };
     if request.pagination_mode() == PaginationMode::Offset && operation.has_parameter("cursor") {
         api.terminal.important(OFFSET_PAGINATION_DEPRECATED);
     }
+    let call = Call {
+        api,
+        invocation,
+        scope,
+        deadline: Instant::now() + global.timeout,
+        request,
+        out,
+    };
     match run {
-        Run::EventStream => api.stream(&request, out).await,
-        Run::Read(read) => read.execute(&steps, &mut request, out).await,
+        Run::EventStream => call.api.stream(&call.request, call.out).await,
+        Run::Read(read) => call.read(read).await,
         Run::Mutation(mutation) => {
-            mutation
-                .execute(
-                    &steps,
-                    &mut request,
-                    resolver.settings,
-                    resolver.submission,
-                    out,
-                )
+            call.mutate(mutation, resolver.settings, resolver.submission)
                 .await
         }
     }
@@ -727,55 +722,6 @@ impl Read {
             then,
         }
     }
-
-    async fn execute(
-        self,
-        steps: &Steps<'_>,
-        request: &mut Request,
-        out: &mut Output,
-    ) -> Result<()> {
-        let operation = steps.invocation.operation;
-        let sent = steps
-            .api
-            .send(
-                operation.method,
-                &request.path,
-                &request.query,
-                request.body.as_ref(),
-            )
-            .await;
-        let response = match (sent, self.then) {
-            (
-                Err(error),
-                ReadThen::PaymentWait {
-                    missing_is_pending: true,
-                    ..
-                },
-            ) if error.http_status() == Some(404) => Response {
-                status: 404,
-                body: Value::Null,
-                retry_after: None,
-            },
-            (sent, _) => sent?,
-        };
-        if self.check_wallet_environment {
-            require_wallet_in_environment(&response.body, steps.scope)?;
-        }
-        check_invoice_payment(steps.invocation, &response)?;
-        match self.then {
-            ReadThen::PaymentWait { until, .. } => {
-                wait_for_payment(steps, request, response, until, out).await
-            }
-            ReadThen::SessionProjection => {
-                let response =
-                    await_session_projection(steps.api, request, response, steps.deadline).await?;
-                write_pages(steps, request, response, Outcome::Retrieved, false, out).await
-            }
-            ReadThen::Pages { follow } => {
-                write_pages(steps, request, response, Outcome::Retrieved, follow, out).await
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -801,72 +747,116 @@ impl Mutation {
             wait: wait_target(invocation),
         }
     }
+}
 
-    /// Verify and journal, then send the mutation exactly once. A transport
-    /// failure is reported as an uncertain submission unless reconciliation proves acceptance.
-    async fn execute(
-        self,
-        steps: &Steps<'_>,
-        request: &mut Request,
-        settings: &Settings,
-        submission: &SubmissionState,
-        out: &mut Output,
-    ) -> Result<()> {
-        let operation = steps.invocation.operation;
-        let scope = steps.scope;
-        if self.verify_wallet_environment {
-            verify_wallet_environment(steps.api, scope, steps.invocation.resource_id).await?;
-        }
-        // `--execute` is the approval, so nothing asks again; a send still states that its
-        // fee limit is not the whole cost.
-        if operation.id == OperationId::CreatePayment && request.is_consequential(operation) {
-            steps.api.terminal.important(PAYMENT_FEE_LIMIT_NOTE);
-        }
-        if let (Some(id), Some(body)) = (self.journal_id, &request.body) {
-            journal(settings, operation, scope, body, id, steps.api.terminal)?;
-        }
-        submission.record(operation.id, request.resource_id, scope);
-        let sent = steps
+/// One API command's run once its credential is resolved: the client, what was asked, the
+/// request, and where results go. Each step of a read, mutation, wait, or page walk is a
+/// method, so the request and output are not handed from step to step.
+struct Call<'a> {
+    api: Api,
+    invocation: &'a ApiInvocation,
+    scope: &'a Scope,
+    deadline: Instant,
+    request: Request,
+    out: &'a mut Output,
+}
+
+impl Call<'_> {
+    async fn read(mut self, read: Read) -> Result<()> {
+        let operation = self.invocation.operation;
+        let sent = self
             .api
             .send(
                 operation.method,
-                &request.path,
-                &request.query,
-                request.body.as_ref(),
+                &self.request.path,
+                &self.request.query,
+                self.request.body.as_ref(),
+            )
+            .await;
+        let response = match (sent, read.then) {
+            (
+                Err(error),
+                ReadThen::PaymentWait {
+                    missing_is_pending: true,
+                    ..
+                },
+            ) if error.http_status() == Some(404) => Response {
+                status: 404,
+                body: Value::Null,
+                retry_after: None,
+            },
+            (sent, _) => sent?,
+        };
+        if read.check_wallet_environment {
+            require_wallet_in_environment(&response.body, self.scope)?;
+        }
+        check_invoice_payment(self.invocation, &response)?;
+        match read.then {
+            ReadThen::PaymentWait { until, .. } => self.wait_for_payment(response, until).await,
+            ReadThen::SessionProjection => {
+                let response = self.await_session_projection(response).await?;
+                self.write_pages(response, Outcome::Retrieved, false).await
+            }
+            ReadThen::Pages { follow } => {
+                self.write_pages(response, Outcome::Retrieved, follow).await
+            }
+        }
+    }
+
+    /// Verify and journal, then send the mutation exactly once. A transport
+    /// failure is reported as an uncertain submission unless reconciliation proves acceptance.
+    async fn mutate(
+        mut self,
+        mutation: Mutation,
+        settings: &Settings,
+        submission: &SubmissionState,
+    ) -> Result<()> {
+        let operation = self.invocation.operation;
+        let scope = self.scope;
+        if mutation.verify_wallet_environment {
+            verify_wallet_environment(&self.api, scope, self.invocation.resource_id).await?;
+        }
+        // `--execute` is the approval, so nothing asks again; a send still states that its
+        // fee limit is not the whole cost.
+        if operation.id == OperationId::CreatePayment && self.request.is_consequential(operation) {
+            self.api.terminal.important(PAYMENT_FEE_LIMIT_NOTE);
+        }
+        if let (Some(id), Some(body)) = (mutation.journal_id, &self.request.body) {
+            journal(settings, operation, scope, body, id, self.api.terminal)?;
+        }
+        submission.record(operation.id, self.request.resource_id, scope);
+        let sent = self
+            .api
+            .send(
+                operation.method,
+                &self.request.path,
+                &self.request.query,
+                self.request.body.as_ref(),
             )
             .await;
         let (response, reconciled) = match sent {
             Ok(response) => (response, false),
-            Err(error) if self.reconcile && error.is_transport() => {
-                match reconcile_payment(steps.api, request, scope).await {
+            Err(error) if mutation.reconcile && error.is_transport() => {
+                match reconcile_payment(&self.api, &self.request, scope).await {
                     Some(response) => (response, true),
-                    None => return Err(uncertain(error, request, scope)),
+                    None => return Err(uncertain(error, &self.request, scope)),
                 }
             }
-            Err(error) => return Err(uncertain(error, request, scope)),
+            Err(error) => return Err(uncertain(error, &self.request, scope)),
         };
-        check_invoice_payment(steps.invocation, &response)?;
-        match self.wait {
-            Some(until) => wait_for_payment(steps, request, response, until, out).await,
+        check_invoice_payment(self.invocation, &response)?;
+        match mutation.wait {
+            Some(until) => self.wait_for_payment(response, until).await,
             None => {
                 let settled = if reconciled {
                     Outcome::Accepted
                 } else {
                     Outcome::Succeeded
                 };
-                write_pages(steps, request, response, settled, false, out).await
+                self.write_pages(response, settled, false).await
             }
         }
     }
-}
-
-/// What every step of one command's run shares.
-#[derive(Clone, Copy)]
-struct Steps<'a> {
-    api: &'a Api,
-    invocation: &'a ApiInvocation,
-    scope: &'a Scope,
-    deadline: Instant,
 }
 
 /// A transport failure after a mutation may have been sent leaves its outcome unknown.
@@ -1118,117 +1108,110 @@ async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Optio
     Some(found)
 }
 
-/// Poll the payment until the wait target, pacing by the server's retry hints.
-async fn wait_for_payment(
-    steps: &Steps<'_>,
-    request: &Request,
-    mut response: Response,
-    until: WaitTarget,
-    out: &mut Output,
-) -> Result<()> {
-    let Steps {
-        api,
-        invocation,
-        scope,
-        deadline,
-    } = *steps;
-    let id = request
-        .resource_id
-        .ok_or_else(|| Error::usage("Waiting requires a payment ID"))?;
-    let path = format!(
-        "/organizations/{}/environments/{}/payments/{id}",
-        scope.require_org()?,
-        scope.single_env()?
-    );
-    let target = until.as_str();
-    if invocation.operation.method != Method::Get {
-        api.terminal
-            .important(format!("Payment {id} accepted; waiting for {target}."));
-    }
-    let mut backoff = Backoff::new(
-        match until {
-            WaitTarget::Ready => READY_POLL_START,
-            WaitTarget::Completed => COMPLETION_POLL_START,
-        },
-        POLL_CEILING,
-    );
-    let mut pause = backoff.pause();
-    let mut invoice_presented = false;
-    let mut last_status: Option<StatusText> = None;
-    let mut last_notice = Instant::now() - STATUS_NOTICE_INTERVAL;
-    let started = Instant::now();
-    loop {
-        let view = PaymentView::from_body(&response.body);
-        if let Some(status) = &view.status
-            && (Some(status) != last_status.as_ref()
-                || last_notice.elapsed() >= STATUS_NOTICE_INTERVAL)
-        {
-            api.terminal.notice(format!(
-                "Payment {id} status: {}; waiting for {target}.",
-                status.as_str()
-            ));
-            last_status = Some(status.clone());
-            last_notice = Instant::now();
+impl Call<'_> {
+    /// Poll the payment until the wait target, pacing by the server's retry hints.
+    async fn wait_for_payment(&mut self, mut response: Response, until: WaitTarget) -> Result<()> {
+        let (api, invocation, scope, deadline) =
+            (&self.api, self.invocation, self.scope, self.deadline);
+        let id = self
+            .request
+            .resource_id
+            .ok_or_else(|| Error::usage("Waiting requires a payment ID"))?;
+        let path = format!(
+            "/organizations/{}/environments/{}/payments/{id}",
+            scope.require_org()?,
+            scope.single_env()?
+        );
+        let target = until.as_str();
+        if invocation.operation.method != Method::Get {
+            api.terminal
+                .important(format!("Payment {id} accepted; waiting for {target}."));
         }
-        if invocation.presents_invoice()
-            && !invoice_presented
-            && let Some(invoice) = view.invoice()
-        {
-            present_invoice(invoice, invocation, api.terminal)?;
-            invoice_presented = true;
-            if until == WaitTarget::Completed {
-                api.terminal
-                    .notice("Invoice is ready; continuing to poll for settlement.");
+        let mut backoff = Backoff::new(
+            match until {
+                WaitTarget::Ready => READY_POLL_START,
+                WaitTarget::Completed => COMPLETION_POLL_START,
+            },
+            POLL_CEILING,
+        );
+        let mut pause = backoff.pause();
+        let mut invoice_presented = false;
+        let mut last_status: Option<StatusText> = None;
+        let mut last_notice = Instant::now() - STATUS_NOTICE_INTERVAL;
+        let started = Instant::now();
+        loop {
+            let view = PaymentView::from_body(&response.body);
+            if let Some(status) = &view.status
+                && (Some(status) != last_status.as_ref()
+                    || last_notice.elapsed() >= STATUS_NOTICE_INTERVAL)
+            {
+                api.terminal.notice(format!(
+                    "Payment {id} status: {}; waiting for {target}.",
+                    status.as_str()
+                ));
+                last_status = Some(status.clone());
+                last_notice = Instant::now();
             }
-        }
-        match view.progress(until) {
-            WaitProgress::Unsuccessful => {
-                return Err(Error::api("Payment reached an unsuccessful terminal state")
-                    .with_detail(ErrorDetail::Payment(response.body))
-                    .redacted(&api.secrets()));
-            }
-            WaitProgress::Reached(outcome) => {
-                if invocation.presents_invoice() && !invoice_presented {
-                    present_invoice(
-                        view.invoice().ok_or_else(|| {
-                            Error::usage("The ready payment does not contain a BOLT11 invoice")
-                        })?,
-                        invocation,
-                        api.terminal,
-                    )?;
+            if invocation.presents_invoice()
+                && !invoice_presented
+                && let Some(invoice) = view.invoice()
+            {
+                present_invoice(invoice, invocation, api.terminal)?;
+                invoice_presented = true;
+                if until == WaitTarget::Completed {
+                    api.terminal
+                        .notice("Invoice is ready; continuing to poll for settlement.");
                 }
-                return out.write(
-                    Envelope::new(Some(response.status), response.body, Some(id), outcome),
-                    &api.secrets(),
-                );
             }
-            WaitProgress::Pending => {}
-        }
-        if Instant::now() + pause >= deadline {
-            return Err(Error::timeout(format!(
-                "Payment {id} is still pending; waiting timed out"
-            ))
-            .with_detail(ErrorDetail::pending(id)));
-        }
-        api.terminal
-            .during(
-                format!(
-                    "Waiting for the payment to be {target}... {}",
-                    terminal::elapsed(started.elapsed())
-                ),
-                tokio::time::sleep(pause),
-            )
-            .await;
-        match tokio::time::timeout_at(deadline, api.read(&path)).await {
-            Ok(Ok(next)) => {
-                pause = next.retry_after.unwrap_or_else(|| backoff.pause());
-                response = next;
+            match view.progress(until) {
+                WaitProgress::Unsuccessful => {
+                    return Err(Error::api("Payment reached an unsuccessful terminal state")
+                        .with_detail(ErrorDetail::Payment(response.body))
+                        .redacted(&api.secrets()));
+                }
+                WaitProgress::Reached(outcome) => {
+                    if invocation.presents_invoice() && !invoice_presented {
+                        present_invoice(
+                            view.invoice().ok_or_else(|| {
+                                Error::usage("The ready payment does not contain a BOLT11 invoice")
+                            })?,
+                            invocation,
+                            api.terminal,
+                        )?;
+                    }
+                    return self.out.write(
+                        Envelope::new(Some(response.status), response.body, Some(id), outcome),
+                        &api.secrets(),
+                    );
+                }
+                WaitProgress::Pending => {}
             }
-            Ok(Err(error)) if error.http_status() == Some(404) => pause = backoff.pause(),
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                return Err(Error::timeout(format!("Payment {id} wait timed out"))
-                    .with_detail(ErrorDetail::pending(id)));
+            if Instant::now() + pause >= deadline {
+                return Err(Error::timeout(format!(
+                    "Payment {id} is still pending; waiting timed out"
+                ))
+                .with_detail(ErrorDetail::pending(id)));
+            }
+            api.terminal
+                .during(
+                    format!(
+                        "Waiting for the payment to be {target}... {}",
+                        terminal::elapsed(started.elapsed())
+                    ),
+                    tokio::time::sleep(pause),
+                )
+                .await;
+            match tokio::time::timeout_at(deadline, api.read(&path)).await {
+                Ok(Ok(next)) => {
+                    pause = next.retry_after.unwrap_or_else(|| backoff.pause());
+                    response = next;
+                }
+                Ok(Err(error)) if error.http_status() == Some(404) => pause = backoff.pause(),
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(Error::timeout(format!("Payment {id} wait timed out"))
+                        .with_detail(ErrorDetail::pending(id)));
+                }
             }
         }
     }
@@ -1266,33 +1249,31 @@ fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal
     Ok(())
 }
 
-/// A checkout session read answers 202 until its projection exists.
-async fn await_session_projection(
-    api: &Api,
-    request: &Request,
-    mut response: Response,
-    deadline: Instant,
-) -> Result<Response> {
-    let mut backoff = Backoff::new(SESSION_POLL_START, POLL_CEILING);
-    while response.status == 202 {
-        let pause = response.retry_after.unwrap_or_else(|| backoff.pause());
-        if Instant::now() + pause >= deadline {
-            return Err(Error::timeout("Checkout session projection is not ready"));
-        }
-        api.terminal
-            .during(
-                "Waiting for checkout session projection...",
-                tokio::time::sleep(pause),
+impl Call<'_> {
+    /// A checkout session read answers 202 until its projection exists.
+    async fn await_session_projection(&self, mut response: Response) -> Result<Response> {
+        let (api, request, deadline) = (&self.api, &self.request, self.deadline);
+        let mut backoff = Backoff::new(SESSION_POLL_START, POLL_CEILING);
+        while response.status == 202 {
+            let pause = response.retry_after.unwrap_or_else(|| backoff.pause());
+            if Instant::now() + pause >= deadline {
+                return Err(Error::timeout("Checkout session projection is not ready"));
+            }
+            api.terminal
+                .during(
+                    "Waiting for checkout session projection...",
+                    tokio::time::sleep(pause),
+                )
+                .await;
+            response = tokio::time::timeout_at(
+                deadline,
+                api.send(Method::Get, &request.path, &request.query, None),
             )
-            .await;
-        response = tokio::time::timeout_at(
-            deadline,
-            api.send(Method::Get, &request.path, &request.query, None),
-        )
-        .await
-        .map_err(|_| Error::timeout("Checkout session wait timed out"))??;
+            .await
+            .map_err(|_| Error::timeout("Checkout session wait timed out"))??;
+        }
+        Ok(response)
     }
-    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -1300,67 +1281,69 @@ struct Pages {
     pages: Vec<Envelope>,
 }
 
-/// Write the response, then follow pages when `follow`: collected for JSON, streamed for
-/// NDJSON. A 202 is reported as accepted; any other status as `settled`.
-async fn write_pages(
-    steps: &Steps<'_>,
-    request: &mut Request,
-    mut response: Response,
-    settled: Outcome,
-    follow: bool,
-    out: &mut Output,
-) -> Result<()> {
-    let Steps { api, deadline, .. } = *steps;
-    let mut pages = Vec::new();
-    let mut cursors = BTreeSet::new();
-    loop {
-        let next = if follow {
-            next_page(&response.body, request)?
-        } else {
-            None
-        };
-        let outcome = if response.status == 202 {
-            Outcome::Accepted
-        } else {
-            settled
-        };
-        let envelope = Envelope::new(
-            Some(response.status),
-            response.body,
-            request.resource_id,
-            outcome,
-        );
-        if follow && out.collects_pages() {
-            pages.push(envelope);
-        } else {
-            out.write(envelope, &api.secrets())?;
+impl Call<'_> {
+    /// Write the response, then follow pages when `follow`: collected for JSON, streamed for
+    /// NDJSON. A 202 is reported as accepted; any other status as `settled`.
+    async fn write_pages(
+        &mut self,
+        mut response: Response,
+        settled: Outcome,
+        follow: bool,
+    ) -> Result<()> {
+        let mut pages = Vec::new();
+        let mut cursors = BTreeSet::new();
+        loop {
+            let next = if follow {
+                next_page(&response.body, &self.request)?
+            } else {
+                None
+            };
+            let outcome = if response.status == 202 {
+                Outcome::Accepted
+            } else {
+                settled
+            };
+            let envelope = Envelope::new(
+                Some(response.status),
+                response.body,
+                self.request.resource_id,
+                outcome,
+            );
+            if follow && self.out.collects_pages() {
+                pages.push(envelope);
+            } else {
+                self.out.write(envelope, &self.api.secrets())?;
+            }
+            let Some((name, value)) = next else {
+                break;
+            };
+            if !cursors.insert((name.clone(), value.clone())) {
+                return Err(Error::transport("Pagination did not advance"));
+            }
+            self.request.advance(name, value);
+            response = tokio::time::timeout_at(
+                self.deadline,
+                self.api
+                    .send(Method::Get, &self.request.path, &self.request.query, None),
+            )
+            .await
+            .map_err(|_| {
+                Error::timeout("Pagination deadline exceeded; use a longer --timeout")
+            })??;
         }
-        let Some((name, value)) = next else {
-            break;
-        };
-        if !cursors.insert((name.clone(), value.clone())) {
-            return Err(Error::transport("Pagination did not advance"));
+        if follow && self.out.collects_pages() {
+            self.out.write(
+                Envelope::new(
+                    Some(200),
+                    serde_json::to_value(Pages { pages })?,
+                    None,
+                    Outcome::Retrieved,
+                ),
+                &self.api.secrets(),
+            )?;
         }
-        request.advance(name, value);
-        response = tokio::time::timeout_at(
-            deadline,
-            api.send(Method::Get, &request.path, &request.query, None),
-        )
-        .await
-        .map_err(|_| Error::timeout("Pagination deadline exceeded; use a longer --timeout"))??;
+        Ok(())
     }
-    if follow && out.collects_pages() {
-        out.write(
-            Envelope::new(
-                Some(200),
-                serde_json::to_value(Pages { pages })?,
-                None,
-                Outcome::Retrieved,
-            ),
-            &api.secrets(),
-        )?;
-    }
-    Ok(())
 }
 
 fn array_len<'de, D: Deserializer<'de>>(
