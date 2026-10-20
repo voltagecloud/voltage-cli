@@ -19,7 +19,7 @@ use crate::{
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output},
     payment::{PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget},
-    registry::{AuthScheme, Method, Operation, OperationId},
+    registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
     terminal::Terminal,
 };
@@ -127,14 +127,14 @@ struct Api {
 impl Api {
     fn new(
         global: &GlobalFlags,
-        invocation: &ApiInvocation,
+        origin: Option<Origin>,
         authorization: Authorization,
     ) -> Result<Self> {
         Ok(Self {
             client: auth::client(global.timeout)?,
             base: auth::base_url(global.api_url.as_deref().unwrap_or(API_URL))?,
             authorization,
-            origin: invocation.origin.clone(),
+            origin,
             terminal: global.terminal(),
         })
     }
@@ -491,7 +491,7 @@ pub async fn execute(
     }
     let authorization =
         Authorization::resolve(invocation, global, settings, scope, submission).await?;
-    let api = Api::new(global, invocation, authorization)?;
+    let api = Api::new(global, invocation.origin.clone(), authorization)?;
     let steps = Steps {
         api: &api,
         invocation,
@@ -510,6 +510,24 @@ pub async fn execute(
                 .await
         }
     }
+}
+
+/// The organization's wallets, in the environment when the scope names one, for a person to
+/// pick from. It reads with the account credential, as `wallets list` does, and builds the
+/// request from the same registry operation. More than one `--env` is an error, as it is for
+/// `wallets list`.
+pub async fn wallets(
+    global: &GlobalFlags,
+    credential: ApiCredential,
+    scope: &Scope,
+) -> Result<Value> {
+    let operation = operation(OperationId::GetAllOrganizationsWalletsAsUser);
+    let request = Request::scoped(operation, scope)?;
+    let api = Api::new(global, None, Authorization::Account(credential))?;
+    Ok(api
+        .send(operation.method, &request.path, &request.query, None)
+        .await?
+        .body)
 }
 
 /// Whether an API command sends its request, and what decided it.
@@ -1314,7 +1332,6 @@ mod tests {
     use crate::{
         cli::{Command, Invocation},
         config::Config,
-        registry::operation,
     };
     use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::json;

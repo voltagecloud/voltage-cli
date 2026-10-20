@@ -2995,6 +2995,376 @@ async fn interrupting_checkout_stream_returns_130_without_leaking_its_token() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Interactive scope pickers
+// ---------------------------------------------------------------------------------------
+
+/// What a command did on a pseudo-terminal.
+#[cfg(unix)]
+struct TerminalRun {
+    code: Option<i32>,
+    /// The terminal's local modes before the command started and after it exited.
+    modes: (libc::tcflag_t, libc::tcflag_t),
+    shown: String,
+    stdout: String,
+}
+
+/// Run a command with stdin and stderr on a pseudo-terminal and stdout piped. For each step,
+/// once the terminal shows its prompt after the previous step's, type its keys.
+#[cfg(unix)]
+async fn on_a_terminal(
+    dir: &Path,
+    server: &MockServer,
+    args: &[&str],
+    steps: &[(&'static str, &'static [u8])],
+) -> TerminalRun {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let (mut controller, terminal) = open_pty();
+    let observer = controller.try_clone().unwrap();
+    let before = local_modes(&observer);
+    let mut command = human_process_at(dir, &server.uri());
+    command
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(args)
+        .stdin(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .stdout(Stdio::piped());
+    // SAFETY: as in `interrupt_the_hidden_key_prompt`: setsid and ioctl are
+    // async-signal-safe, and the closure allocates nothing.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    let mut prompts = steps
+        .iter()
+        .map(|&(prompt, _)| prompt.as_bytes())
+        .collect::<Vec<_>>();
+    prompts.reverse();
+    let (prompted, mut shown_prompt) = tokio::sync::mpsc::unbounded_channel();
+    let drain = tokio::task::spawn_blocking(move || {
+        let (mut shown, mut seen) = (Vec::new(), 0);
+        let mut chunk = [0; 4096];
+        while let Ok(read @ 1..) = controller.read(&mut chunk) {
+            shown.extend_from_slice(&chunk[..read]);
+            while let Some(prompt) = prompts.last() {
+                let Some(at) = shown[seen..]
+                    .windows(prompt.len())
+                    .position(|w| w == *prompt)
+                else {
+                    break;
+                };
+                seen += at + prompt.len();
+                prompts.pop();
+                let _ = prompted.send(());
+            }
+        }
+        String::from_utf8_lossy(&shown).into_owned()
+    });
+    for &(_, keys) in steps {
+        tokio::time::timeout(Duration::from_secs(10), shown_prompt.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        (&observer).write_all(keys).unwrap();
+    }
+    let pid = child.id().to_string();
+    let Ok(output) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    )
+    .await
+    else {
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap();
+        panic!("the command on the terminal did not exit");
+    };
+    let output = output.unwrap();
+    let after = local_modes(&observer);
+    drop(command);
+    let shown = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    TerminalRun {
+        code: output.status.code(),
+        modes: (before, after),
+        shown,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
+    let (server, dir) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path(wallets_path(ORG)))
+        .and(query_param("environment_id", ENV))
+        .respond_with(ok(json!([
+            {"id": RESOURCE, "name": "ops"},
+            {"id": WALLET, "name": "Payroll"}
+        ])))
+        .mount(&server)
+        .await;
+    let send = [
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--currency",
+        "btc",
+        "--invoice",
+        "lnbc1",
+        "--output",
+        "table",
+    ];
+    let listings = || async {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == wallets_path(ORG))
+            .count()
+    };
+
+    // Typing filters the list, and Enter picks; the change is still only described.
+    let picked = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"Pay\r")]).await;
+    assert_eq!(picked.code, Some(6), "{}", picked.shown);
+    assert!(
+        picked.stdout.contains("body.wallet_id"),
+        "{}",
+        picked.stdout
+    );
+    assert!(picked.stdout.contains(WALLET), "{}", picked.stdout);
+    assert!(
+        picked
+            .shown
+            .contains(&format!("Next time, pass --wallet {WALLET}"))
+    );
+    assert_eq!(picked.modes.0, picked.modes.1);
+
+    // Esc leaves the scope unset, so the command fails as it did before pickers.
+    let escaped = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"\x1b")]).await;
+    assert_eq!(escaped.code, Some(2), "{}", escaped.shown);
+    assert!(
+        escaped
+            .shown
+            .contains("--wallet is required for payment creation")
+    );
+    assert_eq!(escaped.modes.0, escaped.modes.1);
+
+    // A typed Ctrl-C reaches the picker as a key in raw mode and still exits with 130.
+    let interrupted = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"\x03")]).await;
+    assert_eq!(interrupted.code, Some(130), "{}", interrupted.shown);
+    assert!(
+        interrupted
+            .shown
+            .contains("Interrupted before any resource change was submitted")
+    );
+    assert_eq!(interrupted.modes.0, interrupted.modes.1);
+    assert_eq!(listings().await, 3);
+
+    // JSON output, --no-input, and dry runs neither ask nor list.
+    for extra in ["--json", "--no-input", "--dry-run"] {
+        let mut args = send.to_vec();
+        args.push(extra);
+        let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+        assert_eq!(run.code, Some(2), "{extra}: {}", run.shown);
+        assert!(
+            run.shown
+                .contains("--wallet is required for payment creation"),
+            "{extra}"
+        );
+        assert!(!run.shown.contains("Wallet:"), "{extra}");
+    }
+    assert_eq!(listings().await, 3);
+
+    // An empty list says so instead of opening the picker.
+    Mock::given(method("GET"))
+        .and(path(wallets_path(ORG)))
+        .and(query_param("environment_id", RESOURCE))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
+    let mut args = send.to_vec();
+    args[5] = RESOURCE;
+    let empty = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(empty.code, Some(2), "{}", empty.shown);
+    assert!(
+        empty.shown.contains("No wallets to choose from."),
+        "{}",
+        empty.shown
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_api_key_without_an_organization_keeps_the_original_error() {
+    let (server, dir) = fixture().await;
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &["wallets", "list", "--output", "table"],
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown.contains("--org is required for wallets list"),
+        "{}",
+        run.shown
+    );
+    assert!(run.shown.contains("--profile NAME"), "{}", run.shown);
+
+    // A payment needs a wallet, listed within an organization the key cannot list, so the
+    // person is told why nothing is offered.
+    let receive = [
+        "payments",
+        "receive",
+        "--currency",
+        "btc",
+        "--kind",
+        "bolt11",
+        "--amount",
+        "1000",
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &receive, &[]).await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("An API key cannot list organizations, so there is nothing to pick."),
+        "{}",
+        run.shown
+    );
+    assert!(
+        run.shown
+            .contains("--wallet is required for payment creation"),
+        "{}",
+        run.shown
+    );
+
+    // With an organization, the key still cannot list environments, and says so.
+    let mut args = receive.to_vec();
+    args.extend(["--org", ORG]);
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("An API key cannot list environments, so there is nothing to pick."),
+        "{}",
+        run.shown
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missing_credential_is_reported_before_the_missing_scope() {
+    let (server, dir) = fixture().await;
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &[
+            "payments",
+            "receive",
+            "--account",
+            "nobody",
+            "--currency",
+            "btc",
+            "--kind",
+            "bolt11",
+            "--amount",
+            "1000",
+            "--output",
+            "table",
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, Some(3), "{}", run.shown);
+    assert!(
+        run.shown.contains("Unknown credential nobody"),
+        "{}",
+        run.shown
+    );
+    assert!(!run.shown.contains("--wallet is required"), "{}", run.shown);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_login_picks_an_organization_then_an_environment() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    let mut settings = seeded_login(dir.path(), &auth, false);
+    let organizations = json!({"organizations": [{"id": ORG, "name": "Acme"}]});
+    respond(&auth, route("GET", "/users/current"), ok(organizations), 2).await;
+    organization_exchange(&auth, LOGIN_ACCESS, ORG, "picker-access", 2).await;
+    let environments = route("GET", format!("/organizations/{ORG}/environments"))
+        .and(header("authorization", "Bearer picker-access"));
+    respond(
+        &auth,
+        environments,
+        ok(json!([{"id": ENV, "name": "prod"}])),
+        2,
+    )
+    .await;
+
+    // A profile needs both. Saving one is what the hint would suggest, so it is left out.
+    let args = [
+        "profiles",
+        "create",
+        "prod",
+        "--account",
+        LOGIN_NAME,
+        "--output",
+        "table",
+    ];
+    let steps: &[(&str, &[u8])] = &[("Organization:", b"\r"), ("Environment:", b"\r")];
+    let run = on_a_terminal(dir.path(), &api, &args, steps).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains(&format!("Next time, pass --org {ORG} --env {ENV}.")),
+        "{}",
+        run.shown
+    );
+    settings.reload().unwrap();
+    let profile = &settings.config.profiles["prod"];
+    assert_eq!(
+        (profile.organization_id, profile.environment_id),
+        (uuid(ORG), uuid(ENV))
+    );
+
+    // Listing environments needs only the organization, so nothing more is asked.
+    let args = [
+        "environments",
+        "list",
+        "--account",
+        LOGIN_NAME,
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal(dir.path(), &api, &args, &[("Organization:", b"\r")]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(!run.shown.contains("Environment:"), "{}", run.shown);
+    auth.verify().await;
+}
+
+// ---------------------------------------------------------------------------------------
 // Prices and conversions
 // ---------------------------------------------------------------------------------------
 

@@ -78,6 +78,18 @@ impl Request {
         })
     }
 
+    /// A read that the scope alone fills: its path, and the scope's filters in its query.
+    /// No flag, `--query` override, or body applies.
+    pub fn scoped(operation: &Operation, scope: &Scope) -> Result<Self> {
+        Ok(Self {
+            path: path(operation, None, scope)?,
+            query: query(operation, &[], &[], scope)?,
+            body: None,
+            body_id: None,
+            resource_id: None,
+        })
+    }
+
     /// The receive kind a payment body names, if it is one the CLI knows.
     pub fn receive_kind(&self) -> Option<ReceiveKind> {
         self.body
