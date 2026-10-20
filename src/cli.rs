@@ -204,9 +204,9 @@ pub struct LoginFlags {
     /// Print the approval URL without opening it
     #[arg(long)]
     pub no_browser: bool,
-    /// Where to save credentials
-    #[arg(long, value_enum, default_value_t = CredentialStore::Keychain)]
-    pub credential_store: CredentialStore,
+    /// Where to save credentials; by default the keychain, or the store of the login it replaces
+    #[arg(long, value_enum)]
+    pub credential_store: Option<CredentialStore>,
 }
 
 #[derive(Debug, Args)]
@@ -1542,7 +1542,7 @@ mod tests {
             panic!("expected login");
         };
         assert!(flags.no_browser);
-        assert_eq!(flags.credential_store, CredentialStore::File);
+        assert_eq!(flags.credential_store, Some(CredentialStore::File));
         let profile =
             Invocation::try_parse_from(["voltage", "profiles", "delete", "stage"]).unwrap();
         assert!(matches!(

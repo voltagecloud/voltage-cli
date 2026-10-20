@@ -15,6 +15,8 @@ voltage logout --local                          # removes local credentials only
 
 A login grants the permissions your account already has. Profiles do not restrict them.
 
+Signing in again under a saved name replaces that login when it is the same user at the same auth URL, and revokes the replaced session. A different user, or a name used by an imported API key, is refused. With `--account NAME`, an API key or a login at another auth URL is refused before the browser step. Without `--credential-store`, the new login stays in the replaced login's credential store; a new name uses the keychain. With `--json`, the output has `replaced: true` when the login replaced a saved one.
+
 ## API keys
 
 For automation, use an environment API key. Import one so it never lands in shell history, or pass it through `VOLTAGE_API_KEY`:
