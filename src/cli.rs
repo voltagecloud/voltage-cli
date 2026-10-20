@@ -363,23 +363,15 @@ struct InvoiceFlags {
 }
 
 #[derive(Debug, Args)]
-struct DryRunFlags {
-    /// Validate and show the request without authenticating, confirming, or sending it
-    #[arg(short = 'n', long, help_heading = "Safety")]
-    dry_run: bool,
-}
-
-#[derive(Debug, Args)]
 struct ExecuteFlags {
     /// Send this change. Without it or VOLTAGE_EXECUTE=1, the change is only described
-    #[arg(long, help_heading = "Safety", conflicts_with = "dry_run")]
+    #[arg(long, help_heading = "Safety")]
     execute: bool,
 }
 
-/// What the command line asked for: `--dry-run`, `--execute`, or neither.
+/// What the command line asked for: `--execute`, or nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Requested {
-    DryRun,
     Execute,
     Unspecified,
 }
@@ -727,7 +719,6 @@ fn api_invocation(
         .collect();
     let target = parse_if::<TargetFlags>(operation.target.is_some(), m)?;
     let query = parse::<QueryFlags>(m)?;
-    let dry_run = parse::<DryRunFlags>(m)?;
     let execute = parse_if::<ExecuteFlags>(operation.method != Method::Get, m)?;
     let pagination = parse_if::<PaginationFlags>(operation.has_parameter("limit"), m)?;
     let checkout = parse_if::<CheckoutFlags>(operation.auth.is_checkout(), m)?;
@@ -755,9 +746,7 @@ fn api_invocation(
         qr: invoice.as_ref().is_some_and(|flags| flags.qr),
         copy: invoice.as_ref().is_some_and(|flags| flags.copy),
         body,
-        requested: if dry_run.dry_run {
-            Requested::DryRun
-        } else if execute.is_some_and(|flags| flags.execute) {
+        requested: if execute.is_some_and(|flags| flags.execute) {
             Requested::Execute
         } else {
             Requested::Unspecified
@@ -934,7 +923,6 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
         cmd = cmd.arg(filter_arg(parameter));
     }
     cmd = QueryFlags::augment_args(cmd);
-    cmd = DryRunFlags::augment_args(cmd);
     if operation.method != Method::Get {
         cmd = ExecuteFlags::augment_args(cmd);
     }
@@ -1054,8 +1042,8 @@ fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str
   voltage wallets update WALLET_ID --profile prod --name operations --execute"
         }
         (OperationId::DeleteWallet, _) => {
-            "  # Check the request, then delete the wallet
-  voltage wallets delete WALLET_ID --profile prod --dry-run
+            "  # Show the request without --execute, then delete the wallet
+  voltage wallets delete WALLET_ID --profile prod
   voltage wallets delete WALLET_ID --profile prod --execute"
         }
         (OperationId::UpdateWalletPolicies, _) => {
@@ -1076,8 +1064,8 @@ fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str
   voltage webhooks update WEBHOOK_ID --profile prod --event receive.completed --event send.failed --execute"
         }
         (OperationId::DeleteWebhook, _) => {
-            "  # Check the request, then delete the webhook
-  voltage webhooks delete WEBHOOK_ID --profile prod --dry-run
+            "  # Show the request without --execute, then delete the webhook
+  voltage webhooks delete WEBHOOK_ID --profile prod
   voltage webhooks delete WEBHOOK_ID --profile prod --execute"
         }
         (OperationId::GenerateWebhookKey, _) => {
@@ -1416,21 +1404,17 @@ mod tests {
         assert_eq!(flags.currency, Some(Currency::Btc));
         assert_eq!(api(&["payments", "create", "--data", "-"]).alias, None);
         assert_eq!(
-            api(&["payments", "send", "-n"]).requested,
-            Requested::DryRun
-        );
-        assert_eq!(
             api(&["payments", "send", "--execute"]).requested,
             Requested::Execute
         );
-        assert!(
-            Invocation::try_parse_from(["voltage", "payments", "send", "-n", "--execute"]).is_err()
-        );
+        assert_eq!(api(&["payments", "send"]).requested, Requested::Unspecified);
+        // A change without --execute is already the preview, so there is no --dry-run.
+        assert!(Invocation::try_parse_from(["voltage", "payments", "send", "--dry-run"]).is_err());
+        assert!(Invocation::try_parse_from(["voltage", "payments", "send", "-n"]).is_err());
         assert!(Invocation::try_parse_from(["voltage", "payments", "list", "--execute"]).is_err());
         assert_eq!(api(&["payments", "send"]).command_name(), "payments send");
         assert_eq!(api(&["payments", "list"]).command_name(), "payments list");
         assert_eq!(api(&["payments", "list"]).requested, Requested::Unspecified);
-        assert!(Invocation::try_parse_from(["voltage", "login", "--dry-run"]).is_err());
     }
 
     #[test]
@@ -1973,6 +1957,20 @@ mod tests {
             from_docs >= MIN_DOC_EXAMPLES && examples.len() > from_docs,
             "{examples:?}"
         );
+        // A change shown without --execute is a deliberate preview only when the same
+        // command is also documented with --execute; otherwise it forgot to send.
+        let words = |example: &str| example.split_whitespace().collect::<Vec<_>>().join(" ");
+        let sent: std::collections::HashSet<String> = examples
+            .iter()
+            .filter(|example| example.split_whitespace().any(|word| word == "--execute"))
+            .map(|example| {
+                example
+                    .split_whitespace()
+                    .filter(|word| *word != "--execute")
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
         for example in &examples {
             // Placeholder IDs stand for real UUIDs; every other placeholder parses as typed.
             // Words split on whitespace with no shell quoting, so an example must not use a
@@ -2001,8 +1999,11 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{example}: {error:?}"));
             if let Command::Api(api) = invocation.command {
                 assert!(
-                    api.operation.method == Method::Get || api.requested != Requested::Unspecified,
-                    "a change without --execute or --dry-run only describes itself: {example}"
+                    api.operation.method == Method::Get
+                        || api.requested != Requested::Unspecified
+                        || sent.contains(&words(example)),
+                    "a change without --execute only describes itself; add --execute, or also \
+                     document the same command with --execute: {example}"
                 );
             }
         }

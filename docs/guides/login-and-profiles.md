@@ -54,7 +54,7 @@ voltage payments receive --currency btc --kind bolt11 --amount 1000 --unit sats 
 
 The picker offers every wallet in the environment. For this example, pick a wallet on a BTC line of credit. A wallet on a USD line of credit needs a quote for every payment, so the API rejects the receive with `quote_required` unless you pass `--quote QUOTE_ID` from `voltage quotes create`.
 
-An API key cannot list organizations or environments, so with a key the CLI offers only wallets; pass `--org` and `--env` or use a profile. Esc leaves the scope unchanged, and the command then reports what is missing. Ctrl-C exits with code 130. Picking a scope never sends a change: changes still need `--execute`. The CLI never asks when stdin or stderr is not a terminal, when stdout is piped without `--output table` (as in `voltage wallets list | jq`), or with `--no-input`, `--json`, `--output json|ndjson`, or `--dry-run`. In those cases, the command fails with the same error as before.
+An API key cannot list organizations or environments, so with a key the CLI offers only wallets; pass `--org` and `--env` or use a profile. Esc leaves the scope unchanged, and the command then reports what is missing. Ctrl-C exits with code 130. Picking a scope never sends a change: changes still need `--execute`. The CLI never asks when stdin or stderr is not a terminal, when stdout is piped without `--output table` (as in `voltage wallets list | jq`), or with `--no-input`, `--json`, or `--output json|ndjson`. In those cases, the command fails with the same error as before.
 
 ## Profiles
 
