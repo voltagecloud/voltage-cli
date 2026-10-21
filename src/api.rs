@@ -1140,6 +1140,9 @@ pub struct SubmissionState {
     /// Cleared only once the local side is done, never on drop: Ctrl-C drops the command
     /// before the interruption is reported.
     session: Mutex<Option<SessionChange>>,
+    /// The saved login whose profile offer is under way. Kept apart from `session`: the
+    /// offer's own refresh or token exchange sets and settles a session change of its own.
+    profile_offer: Mutex<Option<String>>,
 }
 
 /// A login change that the server and the saved credentials can disagree about.
@@ -1180,6 +1183,14 @@ impl SubmissionState {
         *self.session.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
+    /// Marks the profile offer after a login, which is saved by then, as under way or done.
+    pub(crate) fn offering_profile(&self, account: Option<&str>) {
+        *self
+            .profile_offer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = account.map(str::to_owned);
+    }
+
     /// The error for Ctrl-C. It claims a write may continue only when one may have been sent,
     /// and never claims that the write was cancelled. A sent write outranks a session change,
     /// which always comes first.
@@ -1207,7 +1218,16 @@ impl SubmissionState {
                     "Interrupted while revoking the replaced session for {account}; the new login is saved"
                 ))
                 .with_hint("Account global signout ends the replaced session if it is still active."),
-                None => Error::interrupted("Interrupted before any resource change was submitted"),
+                None => match &*self
+                    .profile_offer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                {
+                    Some(account) => profile_offer_interrupted(account),
+                    None => {
+                        Error::interrupted("Interrupted before any resource change was submitted")
+                    }
+                },
             };
         };
         let message = match write.resource_id {
@@ -1222,6 +1242,17 @@ impl SubmissionState {
             write.environment_ids.clone(),
         ))
     }
+}
+
+/// Ctrl-C during the profile offer: the login was saved before the offer began.
+pub(crate) fn profile_offer_interrupted(account: &str) -> Error {
+    let account = shell_word(account);
+    Error::interrupted(format!(
+        "Interrupted while saving a profile; the login for {account} is saved"
+    ))
+    .with_hint(format!(
+        "Create one later with `voltage profiles create NAME --account {account}`."
+    ))
 }
 
 /// A read can establish acceptance without sending the mutation again. A missing
@@ -1979,6 +2010,33 @@ mod tests {
         assert_eq!(detail["resource_id"], json!(id));
         assert_eq!(detail["organization_id"], json!(ORG));
         assert_eq!(detail["outcome"], "unknown");
+    }
+
+    #[test]
+    fn interruption_during_a_profile_offer_says_the_login_is_saved_until_it_ends() {
+        let submission = SubmissionState::default();
+        submission.offering_profile(Some("my team"));
+        // The offer's own token refresh settles without ending the offer.
+        submission.session_changing(SessionChange::Refresh {
+            account: "my team".into(),
+        });
+        submission.session_settled();
+        let during = submission.interrupted();
+        assert_eq!(
+            during.message,
+            "Interrupted while saving a profile; the login for 'my team' is saved"
+        );
+        assert_eq!(
+            during.hint.as_deref(),
+            Some("Create one later with `voltage profiles create NAME --account 'my team'`.")
+        );
+        assert!(during.detail.is_none());
+
+        submission.offering_profile(None);
+        assert_eq!(
+            submission.interrupted().message,
+            "Interrupted before any resource change was submitted"
+        );
     }
 
     #[test]

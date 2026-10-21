@@ -2,7 +2,7 @@
 //! errors are written by `output`.
 
 use crate::{Error, Result, secret::Secret};
-use inquire::{InquireError, Select};
+use inquire::{InquireError, Select, Text};
 use std::{
     fmt::{self, Display},
     io::{ErrorKind, IsTerminal, Write},
@@ -77,6 +77,18 @@ impl Terminal {
         )
     }
 
+    /// Ask for a line of text, offering `default` for an empty answer. `None` means Esc.
+    pub async fn text(
+        self,
+        question: &'static str,
+        default: &'static str,
+    ) -> Result<Option<String>> {
+        #[cfg(unix)]
+        let _modes = TerminalModes::save();
+        let _screen = PickerScreen;
+        answered(read_detached(move || Text::new(question).with_default(default).prompt()).await?)
+    }
+
     /// Read a secret without echo.
     pub async fn read_hidden(self, prompt: &'static str) -> Result<Secret> {
         // The detached read restores echo only when it returns, and Ctrl-C does not wait for
@@ -93,11 +105,15 @@ impl Terminal {
     }
 }
 
-/// What the picker's answer means: a choice, Esc as `None`, Ctrl-C as an interruption, and
-/// any other failure, such as a terminal that cannot be read, as a transport error.
 fn picked(answer: std::result::Result<Choice, InquireError>) -> Result<Option<Uuid>> {
+    Ok(answered(answer)?.map(|choice| choice.id))
+}
+
+/// What a prompt's answer means: the answer, Esc as `None`, Ctrl-C as an interruption, and
+/// any other failure, such as a terminal that cannot be read, as a transport error.
+fn answered<T>(answer: std::result::Result<T, InquireError>) -> Result<Option<T>> {
     match answer {
-        Ok(choice) => Ok(Some(choice.id)),
+        Ok(answer) => Ok(Some(answer)),
         Err(InquireError::OperationCanceled) => Ok(None),
         Err(InquireError::OperationInterrupted) => Err(Error::interrupted(
             "Interrupted before any resource change was submitted",
@@ -144,6 +160,10 @@ impl Choice {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn id(&self) -> Uuid {
+        self.id
     }
 }
 

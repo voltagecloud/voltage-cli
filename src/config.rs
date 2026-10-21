@@ -380,6 +380,25 @@ impl Settings {
         Ok(())
     }
 
+    /// Save a new profile under the credential lock, after re-reading the configuration, so a
+    /// change another command made meanwhile is kept and a name it took is refused. `build`
+    /// makes the profile from the re-read settings.
+    pub async fn create_profile(
+        &mut self,
+        name: &str,
+        terminal: Terminal,
+        build: impl FnOnce(&Self) -> Result<Profile>,
+    ) -> Result<()> {
+        let _lock = self.lock(terminal).await?;
+        self.reload()?;
+        if self.config.profiles.contains_key(name) {
+            return Err(Error::usage(format!("Profile {name} already exists")));
+        }
+        let profile = build(self)?;
+        self.config.profiles.insert(name.to_owned(), profile);
+        self.save()
+    }
+
     pub fn save(&self) -> Result<()> {
         private_dir(&self.dir)?;
         let text = toml::to_string_pretty(&self.config)

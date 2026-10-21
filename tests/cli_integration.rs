@@ -4593,6 +4593,19 @@ async fn on_a_terminal(
     args: &[&str],
     steps: &[(&'static str, &'static [u8])],
 ) -> TerminalRun {
+    on_a_terminal_with(dir, server, args, steps, |_| {}).await
+}
+
+/// `on_a_terminal`, calling `meanwhile` with each step's index once its prompt is shown and
+/// before its keys are typed, as another command could run while a prompt is open.
+#[cfg(unix)]
+async fn on_a_terminal_with(
+    dir: &Path,
+    server: &MockServer,
+    args: &[&str],
+    steps: &[(&'static str, &'static [u8])],
+    mut meanwhile: impl FnMut(usize),
+) -> TerminalRun {
     use std::io::{Read, Write};
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -4642,11 +4655,12 @@ async fn on_a_terminal(
         }
         String::from_utf8_lossy(&shown).into_owned()
     });
-    for &(_, keys) in steps {
+    for (index, &(_, keys)) in steps.iter().enumerate() {
         tokio::time::timeout(Duration::from_secs(10), shown_prompt.recv())
             .await
             .unwrap()
             .unwrap();
+        meanwhile(index);
         if keys.is_empty() {
             interrupt(&child);
         } else {
@@ -4898,7 +4912,7 @@ async fn a_missing_credential_is_reported_before_the_missing_scope() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_login_picks_an_organization_then_an_environment() {
+async fn a_login_takes_the_only_organization_and_environment_without_asking() {
     let auth = MockServer::start().await;
     let (api, dir) = fixture().await;
     let mut settings = seeded_login(dir.path(), &auth, false);
@@ -4925,9 +4939,15 @@ async fn a_login_picks_an_organization_then_an_environment() {
         "--output",
         "table",
     ];
-    let steps: &[(&str, &[u8])] = &[("Organization:", b"\r"), ("Environment:", b"\r")];
-    let run = on_a_terminal(dir.path(), &api, &args, steps).await;
+    // The only organization and environment are taken without asking, and say so.
+    let run = on_a_terminal(dir.path(), &api, &args, &[]).await;
     assert_eq!(run.code, Some(0), "{}", run.shown);
+    for taken in [
+        format!("Organization: Acme  {ORG} (the only one)"),
+        format!("Environment: prod  {ENV} (the only one)"),
+    ] {
+        assert!(run.shown.contains(&taken), "{}", run.shown);
+    }
     assert!(
         run.shown
             .contains(&format!("Next time, pass --org {ORG} --env {ENV}.")),
@@ -4950,7 +4970,7 @@ async fn a_login_picks_an_organization_then_an_environment() {
         "--output",
         "table",
     ];
-    let run = on_a_terminal(dir.path(), &api, &args, &[("Organization:", b"\r")]).await;
+    let run = on_a_terminal(dir.path(), &api, &args, &[]).await;
     assert_eq!(run.code, Some(0), "{}", run.shown);
     assert!(!run.shown.contains("Environment:"), "{}", run.shown);
     auth.verify().await;
@@ -5010,13 +5030,7 @@ async fn a_failed_listing_or_exchange_ends_the_pick_with_its_own_error() {
         ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"})),
     )
     .await;
-    let run = on_a_terminal(
-        dir.path(),
-        &api,
-        &CREATE_PROFILE,
-        &[("Organization:", b"\r")],
-    )
-    .await;
+    let run = on_a_terminal(dir.path(), &api, &CREATE_PROFILE, &[]).await;
     assert_failed_pick(
         &run,
         "The saved login for person has expired or was revoked",
@@ -5034,13 +5048,7 @@ async fn a_failed_listing_or_exchange_ends_the_pick_with_its_own_error() {
         ResponseTemplate::new(500),
     )
     .await;
-    let run = on_a_terminal(
-        dir.path(),
-        &api,
-        &CREATE_PROFILE,
-        &[("Organization:", b"\r")],
-    )
-    .await;
+    let run = on_a_terminal(dir.path(), &api, &CREATE_PROFILE, &[]).await;
     assert_failed_pick(&run, "Authentication failed (HTTP 500");
     assert!(!run.shown.contains("Environment:"), "{}", run.shown);
     auth.verify().await;
@@ -5052,13 +5060,16 @@ async fn esc_at_the_organization_or_environment_picker_keeps_the_missing_scope_e
     let auth = MockServer::start().await;
     let (api, dir) = fixture().await;
     seeded_login(dir.path(), &auth, false);
-    let organizations = json!({"organizations": [{"id": ORG, "name": "Acme"}]});
+    // Two of each, so each picker asks rather than taking the only one.
+    let organizations = json!({"organizations": [
+        {"id": ORG, "name": "Acme"}, {"id": OTHER_ORG, "name": "Beta"}
+    ]});
     respond(&auth, route("GET", "/users/current"), ok(organizations), 2).await;
     organization_exchange(&auth, LOGIN_ACCESS, ORG, "picker-access", 1).await;
     respond_once(
         &auth,
         route("GET", format!("/organizations/{ORG}/environments")),
-        ok(json!([{"id": ENV, "name": "prod"}])),
+        ok(json!([{"id": ENV, "name": "prod"}, {"id": RESOURCE, "name": "staging"}])),
     )
     .await;
 
@@ -5829,4 +5840,429 @@ async fn wallets_list_all_orgs_refuses_an_api_key_and_a_named_organization() {
         );
     }
     assert!(api.received_requests().await.unwrap().is_empty());
+}
+
+/// `voltage login` on a terminal against `server` as both auth service and API, whose user
+/// sees `organizations`, each with the environment `ENV` (prod). The profile offer lists
+/// the organizations with the same request as the login's identity.
+#[cfg(unix)]
+async fn login_on_a_terminal(
+    dir: &Path,
+    organizations: Value,
+    environments: Value,
+    steps: &[(&'static str, &'static [u8])],
+) -> (TerminalRun, MockServer) {
+    login_on_a_terminal_with(dir, organizations, ok(environments), steps, |_| {}).await
+}
+
+#[cfg(unix)]
+async fn login_on_a_terminal_with(
+    dir: &Path,
+    organizations: Value,
+    environments: ResponseTemplate,
+    steps: &[(&'static str, &'static [u8])],
+    meanwhile: impl FnMut(usize),
+) -> (TerminalRun, MockServer) {
+    let server = MockServer::start().await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/device_authorization"),
+        ok(json!({
+            "device_code":"device-secret","user_code":"ABCD-EFGH",
+            "verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/token").and(body_string_contains("device_code=device-secret")),
+        ok(json!({
+            "access_token":"login-access-secret","refresh_token":"login-refresh-secret",
+            "token_type":"Bearer","expires_in":600
+        })),
+    )
+    .await;
+    route("GET", "/users/current")
+        .respond_with(ok(
+            json!({"id": RESOURCE, "email": LOGIN_EMAIL, "organizations": organizations}),
+        ))
+        .mount(&server)
+        .await;
+    for org in [ORG, OTHER_ORG] {
+        route("POST", "/oauth/token")
+            .and(body_string_contains(format!("audience={org}")))
+            .respond_with(ok(json!({
+                "access_token": "picker-access",
+                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "token_type": "Bearer", "expires_in": 600, "scope": "read write"
+            })))
+            .mount(&server)
+            .await;
+        route("GET", format!("/organizations/{org}/environments"))
+            .respond_with(environments.clone())
+            .mount(&server)
+            .await;
+    }
+    let uri = server.uri();
+    let args = [
+        "login",
+        "--auth-url",
+        &uri,
+        "--no-browser",
+        "--account",
+        LOGIN_NAME,
+        "--credential-store",
+        "file",
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal_with(dir, &server, &args, steps, meanwhile).await;
+    (run, server)
+}
+
+#[cfg(unix)]
+fn saved_profiles(dir: &Path) -> std::collections::BTreeMap<String, Profile> {
+    let settings = Settings::open(dir.to_path_buf()).unwrap();
+    settings.config.profiles
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_on_a_terminal_saves_a_profile_pinned_to_the_only_organization() {
+    let dir = private_tempdir();
+    let (run, _server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        json!([{"id": ENV, "name": "prod"}]),
+        &[("Profile name:", b"prod\r")],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    for shown in [
+        "Save a profile for this login, so later commands need only --profile NAME.",
+        &format!("Organization: Acme  {ORG} (the only one)"),
+        &format!("Environment: prod  {ENV} (the only one)"),
+        "Saved profile prod. Use it with --profile prod.",
+    ] {
+        assert!(run.shown.contains(shown), "{shown}: {}", run.shown);
+    }
+    let profiles = saved_profiles(dir.path());
+    let profile = &profiles["prod"];
+    assert_eq!(
+        (
+            profile.organization_id,
+            profile.environment_id,
+            profile.account.as_str()
+        ),
+        (uuid(ORG), uuid(ENV), LOGIN_NAME)
+    );
+    assert!(run.stdout.contains("prod"), "{}", run.stdout);
+    assert_eq!(run.modes.0, run.modes.1);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_on_a_terminal_asks_between_organizations_and_esc_saves_no_profile() {
+    let dir = private_tempdir();
+    let (run, _server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}, {"id": OTHER_ORG, "name": "Beta"}]),
+        json!([{"id": ENV, "name": "prod"}]),
+        &[("Organization:", b"\r"), ("Profile name:", b"\x1b")],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown.contains(&format!(
+            "No profile was saved. Create one later with `voltage profiles create NAME --account {LOGIN_NAME}`."
+        )),
+        "{}",
+        run.shown
+    );
+    assert!(saved_profiles(dir.path()).is_empty());
+    // The login itself is saved.
+    assert!(
+        Settings::open(dir.path().to_path_buf())
+            .unwrap()
+            .config
+            .accounts
+            .contains_key(LOGIN_NAME)
+    );
+    assert_eq!(run.modes.0, run.modes.1);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_on_a_terminal_reports_why_no_profile_was_saved_and_still_succeeds() {
+    // A profile of that name already belongs to another login.
+    let dir = private_tempdir();
+    let mut settings = settings_at(dir.path());
+    settings.config.profiles.insert(
+        "default".into(),
+        Profile {
+            organization_id: uuid(ORG),
+            environment_id: uuid(ENV),
+            account: "someone-else".into(),
+        },
+    );
+    settings.save().unwrap();
+    let (run, _server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        json!([{"id": ENV, "name": "prod"}]),
+        &[("Profile name:", b"\r")],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("No profile was saved: Profile default already exists. Create one later"),
+        "{}",
+        run.shown
+    );
+    assert_eq!(
+        saved_profiles(dir.path())["default"].account,
+        "someone-else"
+    );
+
+    // A blank name is refused the same way.
+    let dir = private_tempdir();
+    let (run, _server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        json!([{"id": ENV, "name": "prod"}]),
+        &[("Profile name:", b"  \r")],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("No profile was saved: A profile name cannot be empty."),
+        "{}",
+        run.shown
+    );
+
+    // Ctrl-C at the name ends the command as an interruption, though the login is saved.
+    let dir = private_tempdir();
+    let (run, _server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        json!([{"id": ENV, "name": "prod"}]),
+        &[("Profile name:", b"\x03")],
+    )
+    .await;
+    assert_eq!(run.code, Some(130), "{}", run.shown);
+    for shown in [
+        format!("Interrupted while saving a profile; the login for {LOGIN_NAME} is saved"),
+        format!("Create one later with `voltage profiles create NAME --account {LOGIN_NAME}`."),
+    ] {
+        assert!(run.shown.contains(&shown), "{shown}: {}", run.shown);
+    }
+    assert!(!run.shown.contains("No profile was saved"), "{}", run.shown);
+    assert!(saved_profiles(dir.path()).is_empty());
+    assert_eq!(run.modes.0, run.modes.1);
+
+    // Ctrl-C while the offer lists environments is a signal, not a key at a prompt, and
+    // reports the saved login the same way.
+    let dir = private_tempdir();
+    let (run, _server) = login_on_a_terminal_with(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        ok(json!([{"id": ENV, "name": "prod"}])).set_delay(Duration::from_secs(10)),
+        &[("(the only one)", b"")],
+        |_| {},
+    )
+    .await;
+    assert_eq!(run.code, Some(130), "{}", run.shown);
+    for shown in [
+        format!("Interrupted while saving a profile; the login for {LOGIN_NAME} is saved"),
+        format!("Create one later with `voltage profiles create NAME --account {LOGIN_NAME}`."),
+    ] {
+        assert!(run.shown.contains(&shown), "{shown}: {}", run.shown);
+    }
+    assert!(saved_profiles(dir.path()).is_empty());
+    assert!(
+        Settings::open(dir.path().to_path_buf())
+            .unwrap()
+            .config
+            .accounts
+            .contains_key(LOGIN_NAME)
+    );
+
+    // No environment to pin: nothing to save.
+    let dir = private_tempdir();
+    let (run, _server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        json!([]),
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown.contains("No environments to choose from."),
+        "{}",
+        run.shown
+    );
+    assert!(run.shown.contains("No profile was saved."), "{}", run.shown);
+    assert!(saved_profiles(dir.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_on_a_terminal_offers_no_profile_when_one_already_uses_the_login() {
+    let dir = private_tempdir();
+    let mut settings = settings_at(dir.path());
+    settings.config.profiles.insert(
+        "prod".into(),
+        Profile {
+            organization_id: uuid(ORG),
+            environment_id: uuid(ENV),
+            account: LOGIN_NAME.into(),
+        },
+    );
+    settings.save().unwrap();
+    let (run, server) = login_on_a_terminal(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        json!([{"id": ENV, "name": "prod"}]),
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(!run.shown.contains("Save a profile"), "{}", run.shown);
+    // Only the login's own identity request; nothing is listed for a profile.
+    let requests = server.received_requests().await.unwrap();
+    let listed = requests
+        .iter()
+        .filter(|request| request.url.path() == "/users/current")
+        .count();
+    assert_eq!(listed, 1);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.url.path().ends_with("/environments"))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_only_wallet_is_still_asked_for_because_a_payment_spends_from_it() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)).and(query_param("environment_id", ENV)),
+        ok(json!([{"id": WALLET, "name": "ops", "balances": [{"currency": "btc"}]}])),
+    )
+    .await;
+    let send = [
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--currency",
+        "btc",
+        "--invoice",
+        "lnbc1",
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"\r")]).await;
+    assert_eq!(run.code, Some(6), "{}", run.shown);
+    assert!(!run.shown.contains("(the only one)"), "{}", run.shown);
+    assert!(run.stdout.contains(WALLET), "{}", run.stdout);
+    assert_eq!(run.modes.0, run.modes.1);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_profile_saved_after_login_keeps_changes_made_while_its_prompt_was_open() {
+    let other = |account: &str| Profile {
+        organization_id: uuid(ORG),
+        environment_id: uuid(ENV),
+        account: account.into(),
+    };
+    // While the name prompt is open, another command saves a profile.
+    let dir = private_tempdir();
+    let path = dir.path().to_path_buf();
+    let (run, _server) = login_on_a_terminal_with(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        ok(json!([{"id": ENV, "name": "prod"}])),
+        &[("Profile name:", b"prod\r")],
+        |_| {
+            let mut settings = Settings::open(path.clone()).unwrap();
+            settings
+                .config
+                .profiles
+                .insert("ci".into(), other("ci-key"));
+            settings.save().unwrap();
+        },
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let profiles = saved_profiles(dir.path());
+    assert_eq!(profiles["ci"].account, "ci-key");
+    assert_eq!(profiles["prod"].account, LOGIN_NAME);
+    // The login, saved before the prompt, is kept as well.
+    assert!(
+        Settings::open(dir.path().to_path_buf())
+            .unwrap()
+            .config
+            .accounts
+            .contains_key(LOGIN_NAME)
+    );
+
+    // A name another command takes while the prompt is open is refused, and theirs is kept.
+    let dir = private_tempdir();
+    let path = dir.path().to_path_buf();
+    let (run, _server) = login_on_a_terminal_with(
+        dir.path(),
+        json!([{"id": ORG, "name": "Acme"}]),
+        ok(json!([{"id": ENV, "name": "prod"}])),
+        &[("Profile name:", b"prod\r")],
+        |_| {
+            let mut settings = Settings::open(path.clone()).unwrap();
+            settings
+                .config
+                .profiles
+                .insert("prod".into(), other("ci-key"));
+            settings.save().unwrap();
+        },
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(
+        run.shown
+            .contains("No profile was saved: Profile prod already exists."),
+        "{}",
+        run.shown
+    );
+    assert_eq!(saved_profiles(dir.path())["prod"].account, "ci-key");
+}
+
+#[tokio::test]
+async fn profiles_create_refuses_a_name_already_saved() {
+    let (server, dir) = fixture().await;
+    seeded_api_key(dir.path(), "saved", ACCOUNT_KEY);
+    let create = || {
+        cli(dir.path(), &server)
+            .args([
+                "profiles",
+                "create",
+                "prod",
+                "--account",
+                "saved",
+                "--org",
+                ORG,
+                "--env",
+                ENV,
+            ])
+            .assert()
+    };
+    create().success();
+    let error = json_error(&create().code(2));
+    assert_eq!(error["error"]["message"], "Profile prod already exists");
 }
