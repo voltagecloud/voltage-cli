@@ -58,9 +58,9 @@ An imported API key belongs to one organization and environment, and the command
 
 `error: Saved credentials cannot be refreshed at a different auth URL`. A browser login refreshes only at the auth URL it was saved with. Omit `--auth-url` to use that URL, which `voltage context` shows. To move the login to the new URL, run `voltage logout --account NAME`, then `voltage login --account NAME --auth-url URL`.
 
-### The saved login has expired or was revoked
+### `login_expired`
 
-Sign in again with the command in the hint:
+`error: The saved login for NAME has expired or was revoked`. The auth service rejected the login's refresh or token exchange with `invalid_grant`. `--json` reports `"credential_problem": "login_expired"` in `error.detail`. Sign in again with the command in the hint:
 
 ```sh
 voltage login --account NAME
@@ -68,13 +68,15 @@ voltage login --account NAME
 
 When you sign in as the same user, the new login replaces the saved one, and the CLI revokes the replaced session. Keep the same `NAME` so profiles that select it keep working. If you sign in as a different user, `voltage login` refuses the name; run `voltage logout --local --account NAME` first, or choose another name. It refuses the name the same way when the saved login's secret cannot be read, for example from a locked OS credential store or a damaged credential file. `voltage logout --local --account NAME` removes that account even when its secret cannot be removed, and warns you to remove the secret yourself.
 
+`voltage context` cannot report this problem. It reads no saved secret and makes no network request, so it cannot see that the auth service rejects the login. An expired access token alone is not this problem, because the next command refreshes it. `voltage auth status` shows whether the access token has expired, and the next command that uses the login reports `login_expired`.
+
 ### needs a browser login
 
 `organizations list` and `environments list` need a browser login; an API key cannot list them. Pass `--account NAME` for a saved login, or unset `VOLTAGE_API_KEY`.
 
 ### HTTP 401
 
-The API did not accept the credential. `voltage auth status` shows the selected one and whether it has expired. For a saved login, replace it as described in [The saved login has expired or was revoked](#the-saved-login-has-expired-or-was-revoked).
+The API did not accept the credential. `voltage auth status` shows the selected one and whether it has expired. For a saved login, replace it as described in [`login_expired`](#login_expired).
 
 A checkout command presents its session or stream token, not the account credential. Check the token in `--token-file`, `VOLTAGE_CHECKOUT_TOKEN`, or `VOLTAGE_STREAM_TOKEN`.
 

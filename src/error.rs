@@ -83,6 +83,20 @@ pub enum ErrorDetail {
     },
     /// A payment's terminal state, as the API reported it.
     Payment(Value),
+    /// The auth service rejected a saved credential.
+    Credential {
+        credential_problem: CredentialRejection,
+    },
+}
+
+/// Why the auth service rejected a saved credential. `voltage context` reads no secret and
+/// makes no request, so it cannot report these; they appear only on a command's error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialRejection {
+    /// The auth service answered a saved login's refresh or token exchange with
+    /// `invalid_grant`: the login expired, was revoked, or its grant was already spent.
+    LoginExpired,
 }
 
 /// Where the credential and the organization of a request came from. A 403 reports it for
@@ -119,7 +133,7 @@ impl ErrorDetail {
     pub fn redact(&mut self, secrets: &[&str]) {
         match self {
             Self::Http { data, .. } | Self::Payment(data) => redact(data, secrets),
-            Self::UncertainSubmission { .. } | Self::Pending { .. } => {}
+            Self::UncertainSubmission { .. } | Self::Pending { .. } | Self::Credential { .. } => {}
         }
     }
 }
@@ -291,6 +305,13 @@ mod tests {
                 "outcome": "unknown",
                 "action": "Query the original resource ID before deciding whether to resubmit"
             })
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorDetail::Credential {
+                credential_problem: CredentialRejection::LoginExpired
+            })
+            .unwrap(),
+            json!({"credential_problem": "login_expired"})
         );
         let http = Error::api("failed").with_detail(ErrorDetail::Http {
             http_status: 404,
