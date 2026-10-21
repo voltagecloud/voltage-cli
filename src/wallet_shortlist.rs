@@ -25,6 +25,9 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+/// How many excluded wallets the hint names; `--json` lists every one.
+const EXCLUDED_IN_HINT: usize = 5;
+
 /// What the shortlist does and does not promise, in the hint and in `--json`.
 const BASIS: &str = "These wallets match the invoice's network and currency and have funds, counting their credit limit; a BTC wallet's funds also cover the invoice's amount. That is a shortlist, not a guarantee: fees and line-of-credit rules are checked only when the payment is sent.";
 
@@ -49,7 +52,7 @@ pub async fn require(
     check_payment(flags, invocation.alias)?;
     let Some(invoice) = Invoice::parse(invoice) else {
         return Err(Error::usage(WALLET_REQUIRED).with_hint(format!(
-            "The invoice does not start with a BOLT11 prefix (lnbc, lntb, lntbs, or lnbcrt), so no wallet can be matched to it. {WALLET_HINT}"
+            "The invoice is not a BOLT11 invoice the CLI can read: it must start with lnbc, lntb, lntbs, or lnbcrt, then an optional amount. No wallet can be matched to it. {WALLET_HINT}"
         )));
     };
     let skip = "Or pass --wallet ID to skip listing wallets.";
@@ -202,7 +205,6 @@ pub struct Shortlist {
 
 impl Shortlist {
     fn new(invoice: Invoice, currency: Option<Currency>, listed: &Value, scope: &Scope) -> Self {
-        let scope = api::scope_flags(scope);
         let items = listed
             .as_array()
             .or_else(|| listed.get("items").and_then(Value::as_array))
@@ -227,6 +229,9 @@ impl Shortlist {
             let network = text(wallet, "network").map(str::to_owned);
             match shortlist.qualify(wallet) {
                 Ok(currency) => {
+                    // Without --env the listing spans the organization, and a payment or a
+                    // quote needs the wallet's own environment.
+                    let scope = api::scope_flags_in(scope, text(wallet, "environment_id"));
                     let needs_quote = currency != "btc";
                     let quote = needs_quote.then(|| shortlist.quote(wallet, &scope));
                     shortlist.candidates.push(Candidate {
@@ -343,9 +348,10 @@ impl Shortlist {
         if self.excluded.is_empty() {
             return "No wallets are in this scope. Create one with `voltage wallets create`, or choose another scope with --org and --env.".into();
         }
-        let reasons: Vec<String> = self
+        let mut reasons: Vec<String> = self
             .excluded
             .iter()
+            .take(EXCLUDED_IN_HINT)
             .map(|excluded| {
                 let why = match excluded.reason {
                     Exclusion::Inactive => "is inactive".to_owned(),
@@ -362,6 +368,14 @@ impl Shortlist {
                 format!("{} ({}) {why}", excluded.name, excluded.wallet_id)
             })
             .collect();
+        if let Some(more) = self
+            .excluded
+            .len()
+            .checked_sub(EXCLUDED_IN_HINT)
+            .filter(|n| *n > 0)
+        {
+            reasons.push(format!("and {more} more, listed in --json as `excluded`"));
+        }
         format!(
             "No wallet in this scope is active on {network} with {} funds: {}. Fund a matching wallet, create one with `voltage wallets create`, or choose another scope with --org and --env.",
             self.currencies(),
@@ -394,6 +408,7 @@ mod tests {
 
     const A: &str = "11111111-1111-4111-8111-111111111111";
     const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
 
     fn invoice(text: &str) -> Option<Invoice> {
         Invoice::parse(text)
@@ -657,6 +672,57 @@ mod tests {
 
         let empty = Shortlist::new(signet(), None, &json!([]), &scope);
         assert!(empty.hint().starts_with("No wallets are in this scope."));
+
+        // Without --env the listing spans the organization, so each candidate's flags, and a
+        // USD candidate's quote, name the wallet's own environment.
+        let mut placed = wallet(A, "signet", json!([balance("usd", 1_000, false)]));
+        placed["environment_id"] = json!(C);
+        let found = Shortlist::new(signet(), None, &json!([placed]), &scope);
+        let candidate = &found.candidates[0];
+        assert_eq!(candidate.flags, format!("--wallet {A} --org {B} --env {C}"));
+        assert!(
+            candidate
+                .quote
+                .as_deref()
+                .unwrap()
+                .ends_with(&format!(" --org {B} --env {C} --execute")),
+            "{candidate:?}"
+        );
+        // An --env given is kept, not replaced by the wallet's.
+        let chosen = Scope {
+            org: Some(uuid(B)),
+            envs: vec![uuid(A)],
+            ..Scope::default()
+        };
+        let mut placed = wallet(A, "signet", json!([balance("btc", 1_000, false)]));
+        placed["environment_id"] = json!(C);
+        let found = Shortlist::new(signet(), None, &json!([placed]), &chosen);
+        assert_eq!(
+            found.candidates[0].flags,
+            format!("--wallet {A} --org {B} --env {A}")
+        );
+
+        // A long list of excluded wallets is cut short in the hint, and kept whole in --json.
+        let many: Vec<Value> = (0..EXCLUDED_IN_HINT + 2)
+            .map(|_| wallet(A, "mainnet", json!([])))
+            .collect();
+        let capped = Shortlist::new(signet(), None, &json!(many), &scope);
+        let hint = capped.hint();
+        assert_eq!(
+            hint.matches("is on mainnet").count(),
+            EXCLUDED_IN_HINT,
+            "{hint}"
+        );
+        assert!(
+            hint.contains("and 2 more, listed in --json as `excluded`"),
+            "{hint}"
+        );
+        assert_eq!(capped.excluded.len(), EXCLUDED_IN_HINT + 2);
+        let exact: Vec<Value> = (0..EXCLUDED_IN_HINT)
+            .map(|_| wallet(A, "mainnet", json!([])))
+            .collect();
+        let hint = Shortlist::new(signet(), None, &json!(exact), &scope).hint();
+        assert!(!hint.contains("more, listed"), "{hint}");
 
         let mut inactive = wallet(B, "signet", json!([]));
         inactive["active"] = json!(false);
