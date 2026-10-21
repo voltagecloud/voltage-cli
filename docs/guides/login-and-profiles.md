@@ -15,6 +15,8 @@ voltage logout --local                          # removes local credentials only
 
 A login grants the permissions your account already has. Profiles do not restrict them.
 
+Signing in again under a saved name replaces that login when it is the same user at the same auth URL, and revokes the replaced session. A different user, or a name used by an imported API key, is refused. With `--account NAME`, an API key or a login at another auth URL is refused before the browser step. Without `--credential-store`, the new login stays in the replaced login's credential store; a new name uses the keychain. With `--json`, the output has `replaced: true` when the login replaced a saved one.
+
 ## API keys
 
 For automation, use an environment API key. Import one so it never lands in shell history, or pass it through `VOLTAGE_API_KEY`:
@@ -69,7 +71,7 @@ voltage profiles delete staging
 
 ## See the effective scope
 
-`voltage context` shows the effective profile, account, organization, environments, wallet, API and auth URLs, and configuration directory, and where each came from (`flag`, `profile`, `environment`, `default`, or `unset`). It reports why commands would reject the credential selection as `credential_problem` (`empty_api_key`, `no_credential`, `multiple_credentials`, `unknown_credential`, `bound_elsewhere` for an API key used outside its organization or environment, or `auth_url_mismatch` for a browser login used with a different `--auth-url`), using the same selection commands use. It also lists `VOLTAGE_*` variables that are set but ignored because a flag or the selected profile takes precedence. It reads no saved secret, makes no network request, and creates no files:
+`voltage context` shows the effective profile, account, organization, environments, wallet, API and auth URLs, and configuration directory, and where each came from (`flag`, `profile`, `environment`, `default`, or `unset`). It reports why commands would reject the credential selection as `credential_problem` (`empty_api_key`, `no_credential`, `multiple_credentials`, `unknown_credential`, `bound_elsewhere` for an API key used outside its organization or environment, or `auth_url_mismatch` for a browser login used with a different `--auth-url`), using the same selection commands use. It cannot report `login_expired`, a login the auth service no longer accepts: that needs a network request, so the next command that uses the login reports it in `error.detail.credential_problem`. It also lists `VOLTAGE_*` variables that are set but ignored because a flag or the selected profile takes precedence. It reads no saved secret, makes no network request, and creates no files:
 
 ```sh
 voltage context --profile staging

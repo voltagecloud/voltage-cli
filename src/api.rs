@@ -11,11 +11,11 @@ use crate::{
     backoff::{Backoff, POLL_CEILING},
     cli::{ApiInvocation, GlobalFlags, Origin, Requested},
     config::{
-        API_URL, EXECUTE_VARIABLE, Scope, Settings, new_private, private_dir, read_private,
-        read_secret,
+        API_URL, EXECUTE_VARIABLE, Scope, Settings, Source, new_private, private_dir, read_private,
+        read_secret, shell_word,
     },
     dry_run,
-    error::{ErrorDetail, ErrorKind},
+    error::{CredentialSources, ErrorDetail, ErrorKind},
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output},
     payment::{
@@ -29,6 +29,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     io::Write,
     sync::{Mutex, OnceLock, PoisonError},
@@ -56,7 +57,8 @@ const JOURNAL_DIR: &str = "requests";
 
 /// Credential the client presents, decided once from the operation's auth scheme.
 enum Authorization {
-    Account(ApiCredential),
+    /// An account credential, with its sources when it is `VOLTAGE_API_KEY`.
+    Account(ApiCredential, Option<CredentialSources>),
     CheckoutSession(Secret),
     CheckoutStream(Secret),
     None,
@@ -72,7 +74,10 @@ impl Authorization {
     ) -> Result<Self> {
         let scheme = invocation.operation.auth;
         Ok(match scheme {
-            AuthScheme::Account => Self::Account(resolver.resolve_organization(scope).await?),
+            AuthScheme::Account => Self::Account(
+                resolver.resolve_organization(scope).await?,
+                resolver.credential_sources,
+            ),
             AuthScheme::CheckoutSession => {
                 Self::CheckoutSession(checkout_token(invocation, "VOLTAGE_CHECKOUT_TOKEN").await?)
             }
@@ -86,8 +91,8 @@ impl Authorization {
     /// Text that must never appear in output.
     fn secrets(&self) -> Vec<&str> {
         match self {
-            Self::Account(ApiCredential::ApiKey(secret))
-            | Self::Account(ApiCredential::OrganizationToken(secret))
+            Self::Account(ApiCredential::ApiKey(secret), _)
+            | Self::Account(ApiCredential::OrganizationToken(secret), _)
             | Self::CheckoutSession(secret)
             | Self::CheckoutStream(secret) => vec![secret.expose()],
             Self::None => Vec::new(),
@@ -96,26 +101,52 @@ impl Authorization {
 
     /// The next step when the API rejects this credential (401) or what it can reach (403).
     /// Checkout tokens are never the account credential, so they name their own source.
-    fn rejection_hint(&self, status: u16) -> Option<&'static str> {
-        match (self, status) {
-            (Self::Account(ApiCredential::ApiKey(_)), 401) => {
-                Some("Check the key with `voltage auth status`; the API does not accept it.")
+    fn rejection_hint(&self, status: u16) -> Option<Cow<'static, str>> {
+        let hint = match (self, status) {
+            (Self::Account(ApiCredential::ApiKey(_), _), 401) => {
+                "Check the key with `voltage auth status`; the API does not accept it."
             }
-            (Self::Account(ApiCredential::OrganizationToken(_)), 401) => Some(
-                "Check the credential with `voltage auth status`. To sign in again, run `voltage logout --local --account NAME`, then `voltage login --account NAME`.",
-            ),
-            (Self::Account(_), 403) => Some(
-                "Check the organization, environment, and credential in use with `voltage context`.",
-            ),
-            (Self::CheckoutSession(_), 401 | 403) => Some(
-                "Check that --token-file or VOLTAGE_CHECKOUT_TOKEN holds this checkout session's token; checkout never uses the account credential.",
-            ),
-            (Self::CheckoutStream(_), 401 | 403) => Some(
-                "Check that --token-file or VOLTAGE_STREAM_TOKEN holds this checkout stream's token; checkout never uses the account credential.",
-            ),
+            (Self::Account(ApiCredential::OrganizationToken(_), _), 401) => {
+                "Check the credential with `voltage auth status`. To sign in again, run `voltage login --account NAME`."
+            }
+            (Self::Account(_, Some(sources)), 403) => {
+                return Some(environment_key_hint(sources.organization).into());
+            }
+            (Self::Account(_, None), 403) => {
+                "Check the organization, environment, and credential in use with `voltage context`."
+            }
+            (Self::CheckoutSession(_), 401 | 403) => {
+                "Check that --token-file or VOLTAGE_CHECKOUT_TOKEN holds this checkout session's token; checkout never uses the account credential."
+            }
+            (Self::CheckoutStream(_), 401 | 403) => {
+                "Check that --token-file or VOLTAGE_STREAM_TOKEN holds this checkout stream's token; checkout never uses the account credential."
+            }
+            _ => return None,
+        };
+        Some(hint.into())
+    }
+
+    /// Where an environment key and its organization came from, reported with a 403.
+    fn credential_sources(&self, status: u16) -> Option<CredentialSources> {
+        match (self, status) {
+            (Self::Account(_, sources), 403) => *sources,
             _ => None,
         }
     }
+}
+
+/// A 403 to `VOLTAGE_API_KEY` names it and where the organization came from, because the key
+/// takes precedence over a saved login. A key is used only without a profile, so the
+/// organization comes from `--org` or `VOLTAGE_ORGANIZATION_ID`.
+fn environment_key_hint(organization: Source) -> String {
+    let organization = match organization {
+        Source::Flag => " and the organization from --org",
+        Source::Environment => " and the organization from VOLTAGE_ORGANIZATION_ID",
+        Source::Profile | Source::Default | Source::Unset => "",
+    };
+    format!(
+        "The API key came from VOLTAGE_API_KEY{organization}. Check that the key can reach the organization, environment, and wallet in use, which `voltage context` shows, or pass --account NAME or unset VOLTAGE_API_KEY to use a saved login."
+    )
 }
 
 /// A checkout credential from `--token-file`, else from `variable`.
@@ -176,10 +207,10 @@ impl Api {
             .request(method, format!("{}{path}", self.base))
             .query(query);
         request = match &self.authorization {
-            Authorization::Account(ApiCredential::ApiKey(key)) => {
+            Authorization::Account(ApiCredential::ApiKey(key), _) => {
                 request.header("x-api-key", key.expose())
             }
-            Authorization::Account(ApiCredential::OrganizationToken(token))
+            Authorization::Account(ApiCredential::OrganizationToken(token), _)
             | Authorization::CheckoutSession(token) => request.bearer_auth(token.expose()),
             Authorization::CheckoutStream(token) => {
                 request.query(&[("stream_token", token.expose())])
@@ -243,10 +274,19 @@ impl Api {
                 } else {
                     ErrorKind::for_http_status(status)
                 };
-                let error = Error::new(kind, format!("HTTP {status}: non-JSON response omitted"));
-                match self.authorization.rejection_hint(status) {
-                    Some(hint) => error.with_hint(hint),
-                    None => error,
+                Error {
+                    hint: self.authorization.rejection_hint(status),
+                    // Only the sources are attached: an HTTP detail would make an HTML 404
+                    // read as a missing resource.
+                    detail: self
+                        .authorization
+                        .credential_sources(status)
+                        .map(|sources| ErrorDetail::Http {
+                            http_status: status,
+                            data: Value::Null,
+                            credential_sources: Some(sources),
+                        }),
+                    ..Error::new(kind, format!("HTTP {status}: non-JSON response omitted"))
                 }
             })?
         };
@@ -257,19 +297,21 @@ impl Api {
                 rejection.message(status),
             );
             // A credential the API does not recognize is a rejected credential, whatever
-            // the status, so it gets the same next step as a 401.
-            let hint = if rejection.kind == ApiErrorType::MissingCredentials {
-                self.authorization.rejection_hint(401)
+            // the status, so it gets the same next step as a 401 and no sources.
+            let rejected_as = if rejection.kind == ApiErrorType::MissingCredentials {
+                401
             } else {
-                self.authorization.rejection_hint(status)
+                status
             };
-            if let Some(hint) = hint.or_else(|| rejection.hint()) {
+            let hint = self.authorization.rejection_hint(rejected_as);
+            if let Some(hint) = hint.or_else(|| rejection.hint().map(Cow::Borrowed)) {
                 error = error.with_hint(hint);
             }
             return Err(error
                 .with_detail(ErrorDetail::Http {
                     http_status: status,
                     data: body,
+                    credential_sources: self.authorization.credential_sources(rejected_as),
                 })
                 .redacted(&self.secrets()));
         }
@@ -586,11 +628,12 @@ pub async fn execute(
 pub async fn wallets(
     global: &GlobalFlags,
     credential: ApiCredential,
+    sources: Option<CredentialSources>,
     scope: &Scope,
 ) -> Result<Value> {
     let operation = operation(OperationId::GetAllOrganizationsWalletsAsUser);
     let request = Request::scoped(operation, scope)?;
-    let api = Api::new(global, None, Authorization::Account(credential))?;
+    let api = Api::new(global, None, Authorization::Account(credential, sources))?;
     Ok(api
         .send(operation.method, &request.path, &request.query, None)
         .await?
@@ -603,10 +646,11 @@ pub async fn wallets(
 pub async fn wallet_currency(
     global: &GlobalFlags,
     credential: ApiCredential,
+    sources: Option<CredentialSources>,
     org: Uuid,
     wallet: Uuid,
 ) -> Result<Currency> {
-    let api = Api::new(global, None, Authorization::Account(credential))?;
+    let api = Api::new(global, None, Authorization::Account(credential, sources))?;
     let path = format!("/organizations/{org}/wallets/{wallet}");
     let read = api.send(Method::Get, &path, &[], None).await?.body;
     let unknown = || {
@@ -907,7 +951,7 @@ fn scope_flags(scope: &Scope) -> String {
     let account = scope
         .account
         .as_deref()
-        .map(|account| format!(" --account {}", auth::shell_word(account)));
+        .map(|account| format!(" --account {}", shell_word(account)));
     org.into_iter().chain(envs).chain(account).collect()
 }
 
@@ -1072,6 +1116,8 @@ pub(crate) enum SessionChange {
     Login,
     /// The server may have revoked the session, but the saved login is not yet removed.
     Logout { account: String },
+    /// A new login is saved, and the session of the login it replaced may not be revoked yet.
+    RevokeReplaced { account: String },
 }
 
 struct SubmittedWrite {
@@ -1123,6 +1169,10 @@ impl SubmissionState {
                     "Interrupted while logging out {account}; its session may already be revoked"
                 ))
                 .with_hint("Rerun the logout with --local to remove the saved login."),
+                Some(SessionChange::RevokeReplaced { account }) => Error::interrupted(format!(
+                    "Interrupted while revoking the replaced session for {account}; the new login is saved"
+                ))
+                .with_hint("Account global signout ends the replaced session if it is still active."),
                 None => Error::interrupted("Interrupted before any resource change was submitted"),
             };
         };
@@ -1516,14 +1566,16 @@ mod tests {
                 .build()
                 .unwrap()
         };
-        let key = build(Authorization::Account(ApiCredential::ApiKey(Secret::new(
-            "key".into(),
-        ))));
+        let key = build(Authorization::Account(
+            ApiCredential::ApiKey(Secret::new("key".into())),
+            None,
+        ));
         assert_eq!(key.headers()["x-api-key"], "key");
         assert!(key.headers().get("authorization").is_none());
-        let org = build(Authorization::Account(ApiCredential::OrganizationToken(
-            Secret::new("org".into()),
-        )));
+        let org = build(Authorization::Account(
+            ApiCredential::OrganizationToken(Secret::new("org".into())),
+            None,
+        ));
         assert_eq!(org.headers()["authorization"], "Bearer org");
         let session = build(Authorization::CheckoutSession(Secret::new(
             "session".into(),
@@ -1561,20 +1613,23 @@ mod tests {
 
     #[test]
     fn credential_rejections_name_the_next_step_for_their_own_credential() {
-        let account = Authorization::Account(ApiCredential::ApiKey(Secret::new("key".into())));
+        let account =
+            Authorization::Account(ApiCredential::ApiKey(Secret::new("key".into())), None);
         let hint = |authorization: &Authorization, status| authorization.rejection_hint(status);
         assert!(hint(&account, 401).unwrap().contains("voltage auth status"));
         // Signing in again cannot fix a rejected key, so only a login names `voltage login`.
         assert!(!hint(&account, 401).unwrap().contains("voltage login"));
-        let login =
-            Authorization::Account(ApiCredential::OrganizationToken(Secret::new("t".into())));
+        let login = Authorization::Account(
+            ApiCredential::OrganizationToken(Secret::new("t".into())),
+            None,
+        );
         let renew = hint(&login, 401).unwrap();
         assert!(
-            renew.contains("voltage logout --local --account NAME")
-                && renew.contains("voltage login --account NAME"),
+            renew.contains("voltage login --account NAME") && !renew.contains("voltage logout"),
             "{renew}"
         );
         assert!(hint(&account, 403).unwrap().contains("voltage context"));
+        assert_eq!(account.credential_sources(403), None);
         assert_eq!(hint(&account, 404), None);
         assert_eq!(hint(&account, 500), None);
         let session = Authorization::CheckoutSession(Secret::new("session".into()));
@@ -1587,6 +1642,56 @@ mod tests {
         assert!(hint(&stream, 401).unwrap().contains("VOLTAGE_STREAM_TOKEN"));
         assert_eq!(hint(&session, 404), None);
         assert_eq!(hint(&Authorization::None, 401), None);
+    }
+
+    #[test]
+    fn a_forbidden_environment_key_names_its_sources() {
+        let environment_key = |organization| {
+            Authorization::Account(
+                ApiCredential::ApiKey(Secret::new("key".into())),
+                Some(CredentialSources {
+                    credential: Source::Environment,
+                    organization,
+                }),
+            )
+        };
+        let flagged = environment_key(Source::Flag);
+        let next = flagged.rejection_hint(403).unwrap();
+        assert!(
+            next.starts_with(
+                "The API key came from VOLTAGE_API_KEY and the organization from --org."
+            ) && next.contains("pass --account NAME or unset VOLTAGE_API_KEY"),
+            "{next}"
+        );
+        assert_eq!(
+            flagged
+                .credential_sources(403)
+                .map(|sources| sources.organization),
+            Some(Source::Flag)
+        );
+        // A rejected key is not a scope problem, so a 401 reports no sources.
+        assert!(
+            flagged
+                .rejection_hint(401)
+                .unwrap()
+                .contains("voltage auth status")
+        );
+        assert_eq!(flagged.credential_sources(401), None);
+        assert!(
+            environment_key(Source::Environment)
+                .rejection_hint(403)
+                .unwrap()
+                .contains("the organization from VOLTAGE_ORGANIZATION_ID.")
+        );
+        // Without a known organization source, the hint names only the key.
+        assert!(
+            environment_key(Source::Unset)
+                .rejection_hint(403)
+                .unwrap()
+                .starts_with(
+                    "The API key came from VOLTAGE_API_KEY. Check that the key can reach the organization, environment, and wallet in use"
+                )
+        );
     }
 
     /// The parsed `error` object of a rejection body.
@@ -1840,6 +1945,13 @@ mod tests {
                 },
                 "Interrupted while logging out person; its session may already be revoked",
                 "--local",
+            ),
+            (
+                SessionChange::RevokeReplaced {
+                    account: "person".into(),
+                },
+                "Interrupted while revoking the replaced session for person; the new login is saved",
+                "global signout",
             ),
         ] {
             submission.session_changing(change);

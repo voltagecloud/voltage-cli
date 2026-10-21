@@ -9,9 +9,11 @@ use crate::{
     api::{SessionChange, SubmissionState},
     cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
-        AUTH_URL, Account, AccountKind, Credential, CredentialProblem, InputSource, LOCK_TIMEOUT,
-        Login, Scope, Settings, name_in_use, read_secret,
+        AUTH_URL, Account, AccountKind, Credential, CredentialProblem, CredentialStore,
+        InputSource, LOCK_TIMEOUT, Login, Scope, ScopeSources, Settings, Source, name_in_use,
+        read_secret, shell_word, unreadable_name,
     },
+    error::{CredentialRejection, CredentialSources, ErrorDetail},
     secret::Secret,
     terminal::{self, Terminal},
 };
@@ -504,6 +506,8 @@ pub struct LoginOutcome {
     pub account: String,
     pub email: Option<String>,
     pub authenticated: bool,
+    /// The login replaced a saved login of the same user under this name.
+    pub replaced: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -544,6 +548,18 @@ fn ambient_api_key(flags: &GlobalFlags) -> Option<Secret> {
         return None;
     }
     std::env::var("VOLTAGE_API_KEY").ok().map(Secret::new)
+}
+
+/// Where `VOLTAGE_API_KEY` and the organization came from, when this command sends that key.
+/// A saved credential returns `None`.
+pub(crate) fn environment_key_sources(
+    flags: &GlobalFlags,
+    sources: &ScopeSources,
+) -> Option<CredentialSources> {
+    ambient_api_key(flags).map(|_| CredentialSources {
+        credential: Source::Environment,
+        organization: sources.org,
+    })
 }
 
 /// `VOLTAGE_API_KEY` is set, but a profile or account selection takes precedence over it.
@@ -649,10 +665,18 @@ pub async fn login(
 ) -> Result<LoginOutcome> {
     let terminal = global.terminal();
     let auth = AuthService::new(global.auth_url.as_deref().unwrap_or(AUTH_URL), terminal)?;
+    // Only a login of the same user replaces a saved one. That user is known only after
+    // the browser step, so a name that cannot be a login at this auth URL is refused first.
+    // A saved login whose secret cannot be read cannot be shown to be the same user either.
     if let Some(name) = &global.account
-        && settings.config.accounts.contains_key(name)
+        && let Some(saved) = settings.config.accounts.get(name)
     {
-        return Err(name_in_use(name));
+        if !is_login_at(saved, &auth.url) {
+            return Err(name_in_use(name));
+        }
+        settings
+            .read_credential(name)
+            .map_err(|_| unreadable_name(name, saved.store))?;
     }
     let device = auth.device_authorization().await?;
     let verification = device.verification_url()?;
@@ -666,7 +690,7 @@ pub async fn login(
     let token = auth.poll_device_grant(&device, submission).await?;
     let login = token.into_login(None, None)?;
     let session = Secret::new(login.refresh_token.expose().to_owned());
-    let saved = save_login(settings, &auth, login, flags, global).await;
+    let saved = save_login(settings, &auth, login, flags, global, submission).await;
     if saved.is_err() {
         // A local storage/discovery failure must not silently orphan a remote session.
         if auth.revoke(&session).await.is_err() {
@@ -687,6 +711,7 @@ async fn save_login(
     mut login: Login,
     flags: &LoginFlags,
     global: &GlobalFlags,
+    submission: &SubmissionState,
 ) -> Result<LoginOutcome> {
     let user = auth.current_user(&login.access_token).await?;
     login.user_id = Some(user.id);
@@ -698,22 +723,66 @@ async fn save_login(
         .or_else(|| login.user_id.clone())
         .ok_or_else(|| Error::auth("User response has no account identity"))?;
     let email = login.email.clone();
+    let user_id = login.user_id.clone();
+    // Without `--credential-store`, a replaced login keeps its store and a new one uses the
+    // keychain. `put_account` reads the account again under the lock; if another process
+    // changed it in between, the replacement is a store change, which it handles.
+    let store = flags.credential_store.unwrap_or_else(|| {
+        settings
+            .config
+            .accounts
+            .get(&name)
+            .filter(|saved| is_login_at(saved, &auth.url))
+            .map_or(CredentialStore::Keychain, |saved| saved.store)
+    });
     let account = Account {
-        store: flags.credential_store,
+        store,
         kind: AccountKind::User,
         email: email.clone(),
         organization_id: None,
         environment_id: None,
         auth_url: auth.url.clone(),
     };
-    settings
-        .add_account(&name, account, &Credential::Login(login), auth.terminal)
+    let replaced = settings
+        .put_account(
+            &name,
+            account,
+            &Credential::Login(login),
+            auth.terminal,
+            |saved| is_login_at(saved, &auth.url),
+            // A saved login without a user ID cannot be shown to be the same user.
+            |credential| {
+                matches!(credential, Credential::Login(old) if old.user_id.is_some() && old.user_id == user_id)
+            },
+        )
         .await?;
+    // The new login is saved, so only the replaced session's revoke is still in flight.
+    match &replaced {
+        Some(_) => submission.session_changing(SessionChange::RevokeReplaced {
+            account: name.clone(),
+        }),
+        None => submission.session_settled(),
+    }
+    if let Some(Credential::Login(old)) = &replaced {
+        auth.terminal
+            .notice(format!("Replaced the saved login for {name}."));
+        if auth.revoke(&old.refresh_token).await.is_err() {
+            auth.terminal.important(
+                "Could not revoke the replaced CLI session. Use account global signout to invalidate its refresh session.",
+            );
+        }
+    }
     Ok(LoginOutcome {
         account: name,
         email,
         authenticated: true,
+        replaced: replaced.is_some(),
     })
+}
+
+/// A saved browser login against the auth service at `url`, which a new login can replace.
+fn is_login_at(account: &Account, url: &str) -> bool {
+    account.kind == AccountKind::User && account.auth_url == url
 }
 
 fn saved_login(settings: &Settings, name: &str) -> Result<Login> {
@@ -735,23 +804,13 @@ fn expired_login(account: &str, url: &str) -> Error {
     Error::auth(format!(
         "The saved login for {account} has expired or was revoked"
     ))
-    // `login` refuses to replace a saved credential, so the stale one goes first.
+    .with_detail(ErrorDetail::Credential {
+        credential_problem: CredentialRejection::LoginExpired,
+    })
+    // A login of the same user replaces the stale one, so nothing has to be removed first.
     .with_hint(format!(
-        "Remove it with `voltage logout --local --account {account}`, then sign in again with `voltage login --account {account}{auth_url}`."
+        "Sign in again with `voltage login --account {account}{auth_url}`."
     ))
-}
-
-/// `value` as one word a POSIX shell reads back unchanged, for a hint's copyable command.
-pub(crate) fn shell_word(value: &str) -> String {
-    let plain = !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@%+,-./:=_".contains(c));
-    if plain {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', r"'\''"))
-    }
 }
 
 /// Resolves, refreshes, and exchanges one command's credential, and lists what it can see.
@@ -763,6 +822,9 @@ pub struct Resolver<'a> {
     pub flags: &'a GlobalFlags,
     /// Records a refresh in flight, so an interruption can report it.
     pub submission: &'a SubmissionState,
+    /// Where `VOLTAGE_API_KEY` and the organization came from, when this command sends that
+    /// key, from [`environment_key_sources`].
+    pub credential_sources: Option<CredentialSources>,
 }
 
 impl Resolver<'_> {
@@ -772,6 +834,7 @@ impl Resolver<'_> {
             settings,
             flags,
             submission,
+            ..
         } = self;
         let (name, account) = match select(settings, scope, flags)
             .map_err(|rejected| rejected.problem.error(scope, settings))?
@@ -918,7 +981,13 @@ pub async fn logout(
         });
         auth.revoke(&login.refresh_token).await?;
     }
-    settings.delete_credential(&name)?;
+    // `--local` is how a person removes a login whose secret cannot be removed, so a failed
+    // removal there is only a warning.
+    if local {
+        settings.discard_credential(&name, terminal)?;
+    } else {
+        settings.delete_credential(&name)?;
+    }
     settings.config.accounts.remove(&name);
     settings.save()?;
     submission.session_settled();
@@ -1070,9 +1139,16 @@ mod tests {
     fn expired_logins_name_commands_that_can_be_pasted() {
         let hint = |account, url| expired_login(account, url).hint.unwrap();
         let default = base_url(AUTH_URL).unwrap();
+        // Agents detect a dead login by its problem, not by parsing the message.
+        assert!(matches!(
+            expired_login("me", &default).detail,
+            Some(ErrorDetail::Credential {
+                credential_problem: CredentialRejection::LoginExpired
+            })
+        ));
         assert_eq!(
             hint("me@example.com", &default),
-            "Remove it with `voltage logout --local --account me@example.com`, then sign in again with `voltage login --account me@example.com`."
+            "Sign in again with `voltage login --account me@example.com`."
         );
         // `--auth-url` is never saved, so another auth service is named again.
         assert!(hint("me", "https://auth.staging.example.test").ends_with(

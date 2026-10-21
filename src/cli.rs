@@ -204,9 +204,9 @@ pub struct LoginFlags {
     /// Print the approval URL without opening it
     #[arg(long)]
     pub no_browser: bool,
-    /// Where to save credentials
-    #[arg(long, value_enum, default_value_t = CredentialStore::Keychain)]
-    pub credential_store: CredentialStore,
+    /// Where to save credentials; by default the keychain, or the store of the login it replaces
+    #[arg(long, value_enum)]
+    pub credential_store: Option<CredentialStore>,
 }
 
 #[derive(Debug, Args)]
@@ -1248,7 +1248,7 @@ fn leaf(matches: &ArgMatches) -> (Vec<String>, &ArgMatches) {
 mod tests {
     use super::*;
     use crate::config::CredentialProblem as Problem;
-    use crate::error::ErrorKind as Kind;
+    use crate::error::{CredentialRejection, ErrorKind as Kind};
     use std::path::Path;
 
     const ENV: &str = "22222222-2222-4222-8222-222222222222";
@@ -1542,7 +1542,7 @@ mod tests {
             panic!("expected login");
         };
         assert!(flags.no_browser);
-        assert_eq!(flags.credential_store, CredentialStore::File);
+        assert_eq!(flags.credential_store, Some(CredentialStore::File));
         let profile =
             Invocation::try_parse_from(["voltage", "profiles", "delete", "stage"]).unwrap();
         assert!(matches!(
@@ -1883,6 +1883,15 @@ mod tests {
             assert_eq!(serde_json::to_value(problem).unwrap(), name);
             assert!(text.contains(&format!("\n### `{name}`\n")), "{name}");
         }
+        let rejected = |rejection: CredentialRejection| match rejection {
+            CredentialRejection::LoginExpired => "login_expired",
+        };
+        let name = rejected(CredentialRejection::LoginExpired);
+        assert_eq!(
+            serde_json::to_value(CredentialRejection::LoginExpired).unwrap(),
+            name
+        );
+        assert!(text.contains(&format!("\n### `{name}`\n")), "{name}");
     }
 
     /// Every command below `cmd`, by path, with its rendered long help.

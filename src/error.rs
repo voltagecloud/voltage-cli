@@ -1,6 +1,9 @@
 //! Failure categories, their documented exit codes, and the typed detail reported with them.
 
-use crate::output::{redact, redact_text};
+use crate::{
+    config::Source,
+    output::{redact, redact_text},
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -58,7 +61,13 @@ pub enum SubmissionOutcome {
 #[serde(untagged)]
 pub enum ErrorDetail {
     /// The API answered with a non-success status.
-    Http { http_status: u16, data: Value },
+    Http {
+        http_status: u16,
+        data: Value,
+        /// Present when a 403 was answered to `VOLTAGE_API_KEY`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        credential_sources: Option<CredentialSources>,
+    },
     /// A mutation was sent, but the transport failed before a result arrived.
     UncertainSubmission {
         resource_id: Option<Uuid>,
@@ -74,6 +83,28 @@ pub enum ErrorDetail {
     },
     /// A payment's terminal state, as the API reported it.
     Payment(Value),
+    /// The auth service rejected a saved credential.
+    Credential {
+        credential_problem: CredentialRejection,
+    },
+}
+
+/// Why the auth service rejected a saved credential. `voltage context` reads no secret and
+/// makes no request, so it cannot report these; they appear only on a command's error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialRejection {
+    /// The auth service answered a saved login's refresh or token exchange with
+    /// `invalid_grant`: the login expired, was revoked, or its grant was already spent.
+    LoginExpired,
+}
+
+/// Where the credential and the organization of a request came from. A 403 reports it for
+/// `VOLTAGE_API_KEY`, because that key takes precedence over a saved login without saying so.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CredentialSources {
+    pub(crate) credential: Source,
+    pub(crate) organization: Source,
 }
 
 impl ErrorDetail {
@@ -102,7 +133,7 @@ impl ErrorDetail {
     pub fn redact(&mut self, secrets: &[&str]) {
         match self {
             Self::Http { data, .. } | Self::Payment(data) => redact(data, secrets),
-            Self::UncertainSubmission { .. } | Self::Pending { .. } => {}
+            Self::UncertainSubmission { .. } | Self::Pending { .. } | Self::Credential { .. } => {}
         }
     }
 }
@@ -275,15 +306,39 @@ mod tests {
                 "action": "Query the original resource ID before deciding whether to resubmit"
             })
         );
+        assert_eq!(
+            serde_json::to_value(ErrorDetail::Credential {
+                credential_problem: CredentialRejection::LoginExpired
+            })
+            .unwrap(),
+            json!({"credential_problem": "login_expired"})
+        );
         let http = Error::api("failed").with_detail(ErrorDetail::Http {
             http_status: 404,
             data: json!({"api_key": "secret"}),
+            credential_sources: None,
         });
         assert_eq!(http.http_status(), Some(404));
         let redacted = serde_json::to_value(http.redacted(&[]).detail).unwrap();
         assert_eq!(
             redacted,
             json!({"http_status": 404, "data": {"api_key": "[REDACTED]"}})
+        );
+        let forbidden = ErrorDetail::Http {
+            http_status: 403,
+            data: Value::Null,
+            credential_sources: Some(CredentialSources {
+                credential: Source::Environment,
+                organization: Source::Flag,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(forbidden).unwrap(),
+            json!({
+                "http_status": 403,
+                "data": null,
+                "credential_sources": {"credential": "environment", "organization": "flag"}
+            })
         );
         let echoed = Error::api("HTTP 400: Bad key key-1").redacted(&["key-1", ""]);
         assert_eq!(echoed.message, "HTTP 400: Bad key [REDACTED]");

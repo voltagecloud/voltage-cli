@@ -58,16 +58,17 @@ An imported API key belongs to one organization and environment, and the command
 
 `error: Saved credentials cannot be refreshed at a different auth URL`. A browser login refreshes only at the auth URL it was saved with. Omit `--auth-url` to use that URL, which `voltage context` shows. To move the login to the new URL, run `voltage logout --account NAME`, then `voltage login --account NAME --auth-url URL`.
 
-### The saved login has expired or was revoked
+### `login_expired`
 
-Replace the saved login with the two commands in the hint. `voltage login` refuses to overwrite a saved credential, so remove the stale one first:
+`error: The saved login for NAME has expired or was revoked`. The auth service rejected the login's refresh or token exchange with `invalid_grant`. `--json` reports `"credential_problem": "login_expired"` in `error.detail`. Sign in again with the command in the hint:
 
 ```sh
-voltage logout --local --account NAME
 voltage login --account NAME
 ```
 
-`--local` skips server revocation, which a revoked or expired login cannot complete. Keep the same `NAME` so profiles that select it keep working.
+When you sign in as the same user, the new login replaces the saved one, and the CLI revokes the replaced session. Keep the same `NAME` so profiles that select it keep working. If you sign in as a different user, `voltage login` refuses the name; run `voltage logout --local --account NAME` first, or choose another name. It refuses the name the same way when the saved login's secret cannot be read, for example from a locked OS credential store or a damaged credential file. `voltage logout --local --account NAME` removes that account even when its secret cannot be removed, and warns you to remove the secret yourself.
+
+`voltage context` cannot report this problem. It reads no saved secret and makes no network request, so it cannot see that the auth service rejects the login. An expired access token alone is not this problem, because the next command refreshes it. `voltage auth status` shows whether the access token has expired, and the next command that uses the login reports `login_expired`.
 
 ### needs a browser login
 
@@ -75,7 +76,7 @@ voltage login --account NAME
 
 ### HTTP 401
 
-The API did not accept the credential. `voltage auth status` shows the selected one and whether it has expired. For a saved login, replace it as described in [The saved login has expired or was revoked](#the-saved-login-has-expired-or-was-revoked).
+The API did not accept the credential. `voltage auth status` shows the selected one and whether it has expired. For a saved login, replace it as described in [`login_expired`](#login_expired).
 
 A checkout command presents its session or stream token, not the account credential. Check the token in `--token-file`, `VOLTAGE_CHECKOUT_TOKEN`, or `VOLTAGE_STREAM_TOKEN`.
 
@@ -83,7 +84,13 @@ A checkout command presents its session or stream token, not the account credent
 
 The credential is valid but cannot reach the selected organization or environment. `voltage context` shows which scope and credential the command used.
 
-If `voltage context` shows the credential's location as `environment`, the command used `VOLTAGE_API_KEY` instead of a saved login. Check that the key belongs to the selected organization, or unset `VOLTAGE_API_KEY` (or pass `--account NAME`) to use a saved login.
+When the command used `VOLTAGE_API_KEY` instead of a saved login, the hint says so, and names where the organization came from:
+
+```text
+hint: The API key came from VOLTAGE_API_KEY and the organization from VOLTAGE_ORGANIZATION_ID. Check that the key can reach the organization, environment, and wallet in use, which `voltage context` shows, or pass --account NAME or unset VOLTAGE_API_KEY to use a saved login.
+```
+
+With `--json`, `error.detail.credential_sources` holds the same sources, as `{"credential": "environment", "organization": "environment"}`. The credential is always `environment`. The organization is `environment` for `VOLTAGE_ORGANIZATION_ID`, `flag` for `--org`, and `unset` when neither supplies it.
 
 ### Cannot read OS credential store
 
