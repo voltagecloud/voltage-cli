@@ -32,6 +32,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ### Fixed
 
+- TLS certificate checks reject the distrusted emSign intermediates: `rustls-webpki` 0.103.16 and `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0382, RUSTSEC-2026-0383).
 - Help and README examples for changes include `--execute`, so copying one sends it.
 - `voltage auth import-key` removes the saved key again when it cannot save the configuration, as `voltage login` does, and reports a name in use with the same message.
 
