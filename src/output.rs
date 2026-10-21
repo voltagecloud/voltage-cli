@@ -322,7 +322,10 @@ pub fn report_error(error: &Error, format: OutputFormat) {
             // Hints can name saved credentials and profiles, so they are scrubbed like messages.
             eprintln!("hint: {}", scrub_line(hint));
         }
-        if let Some(detail) = human_detail(&body["error"]["detail"], &error.message) {
+        let repeated = error.detail.as_ref().is_some_and(ErrorDetail::repeats_hint);
+        if let Some(detail) =
+            human_detail(&body["error"]["detail"], &error.message).filter(|_| !repeated)
+        {
             let mut lines = Vec::new();
             if human::detail(&mut lines, &detail).is_ok() {
                 eprintln!("details:");

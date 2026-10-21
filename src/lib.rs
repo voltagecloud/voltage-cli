@@ -21,6 +21,7 @@ pub mod secret;
 mod startup;
 mod terminal;
 mod wallet_currency;
+mod wallet_shortlist;
 
 pub(crate) use error::{Error, Result};
 pub use startup::run;

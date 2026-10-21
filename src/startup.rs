@@ -15,7 +15,7 @@ use crate::{
     pick,
     price::{PRICE_URL, PriceService},
     terminal::Terminal,
-    wallet_currency,
+    wallet_currency, wallet_shortlist,
 };
 use serde::Serialize;
 use std::process::ExitCode;
@@ -119,6 +119,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             // `VOLTAGE_EXECUTE` and every local check run before the wallet is read.
             let execution = Execution::resolve(&api, config::execute_variable()?);
             let resolver = session.resolver();
+            wallet_shortlist::require(&api, &global, resolver, &session.scope).await?;
             wallet_currency::fill(&mut api, &global, resolver, &session.scope).await?;
             let mut out = output(!execution.describes())?;
             api::execute(&api, execution, &global, resolver, &session.scope, &mut out).await
