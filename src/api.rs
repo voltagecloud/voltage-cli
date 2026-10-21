@@ -946,8 +946,20 @@ fn next_step(invocation: &ApiInvocation, scope: &Scope, id: Option<Uuid>) -> Opt
 /// The effective scope as flags, so a command in a hint reaches the same organization,
 /// environment, and saved credential however the original command selected them.
 pub(crate) fn scope_flags(scope: &Scope) -> String {
+    scope_flags_in(scope, None)
+}
+
+/// `scope_flags`, naming `env` when the scope selects no environment: a resource listed
+/// across an organization lives in one environment, which a later command must name.
+pub(crate) fn scope_flags_in(scope: &Scope, env: Option<&str>) -> String {
     let org = scope.org.map(|org| format!(" --org {org}"));
-    let envs = scope.envs.iter().map(|env| format!(" --env {env}"));
+    let fallback = env.filter(|_| scope.envs.is_empty()).map(str::to_owned);
+    let envs = scope
+        .envs
+        .iter()
+        .map(Uuid::to_string)
+        .chain(fallback)
+        .map(|env| format!(" --env {env}"));
     let account = scope
         .account
         .as_deref()
@@ -1609,6 +1621,30 @@ mod tests {
             format!(" --org {org} --env {env} --account 'my login'")
         );
         assert_eq!(scope_flags(&Scope::default()), "");
+    }
+
+    #[test]
+    fn scope_flags_name_a_listed_environment_only_when_none_is_selected() {
+        let org = Uuid::from_u128(1);
+        let chosen = Uuid::from_u128(2);
+        let none = Scope {
+            org: Some(org),
+            ..Scope::default()
+        };
+        assert_eq!(
+            scope_flags_in(&none, Some("env-3")),
+            format!(" --org {org} --env env-3")
+        );
+        assert_eq!(scope_flags_in(&none, None), format!(" --org {org}"));
+        let selected = Scope {
+            org: Some(org),
+            envs: vec![chosen],
+            ..Scope::default()
+        };
+        assert_eq!(
+            scope_flags_in(&selected, Some("env-3")),
+            format!(" --org {org} --env {chosen}")
+        );
     }
 
     #[test]

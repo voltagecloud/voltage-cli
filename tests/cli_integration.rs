@@ -2950,6 +2950,51 @@ async fn a_bolt11_send_without_a_wallet_shortlists_the_wallets_that_could_pay() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_bolt11_send_without_an_environment_names_each_candidates_environment() {
+    let (server, dir) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path(wallets_path(ORG)))
+        .respond_with(ok(json!([
+            {"id": WALLET, "name": "ops", "active": true, "network": "mutinynet",
+             "environment_id": ENV,
+             "balances": [{"currency": "btc", "available": {"amount": 5_000, "negative": false}}]}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args([
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--invoice",
+            "lntbs10n1qqq",
+        ])
+        .assert()
+        .code(2);
+    let error = json_error(&output);
+    let flags = format!("--wallet {WALLET} --org {ORG} --env {ENV}");
+    assert_eq!(error["error"]["detail"]["candidates"][0]["flags"], flags);
+    // The listing spanned the organization: no environment was sent.
+    let listed = server.received_requests().await.unwrap();
+    let listing = listed
+        .iter()
+        .find(|request| request.url.path() == wallets_path(ORG))
+        .unwrap();
+    assert!(
+        !listing
+            .url
+            .query_pairs()
+            .any(|(key, _)| key == "environment_id"),
+        "{}",
+        listing.url
+    );
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_bolt11_send_without_a_wallet_fails_before_listing_when_it_cannot_shortlist() {
     let (server, dir) = fixture().await;
     let send = |args: &[&str]| {
@@ -2971,7 +3016,15 @@ async fn a_bolt11_send_without_a_wallet_fails_before_listing_when_it_cannot_shor
         error["error"]["hint"]
             .as_str()
             .unwrap()
-            .starts_with("The invoice does not start with a BOLT11 prefix")
+            .starts_with("The invoice is not a BOLT11 invoice the CLI can read")
+    );
+    // So is one with a BOLT11 prefix but an amount it cannot read.
+    let error = json_error(&send(&["--org", ORG, "--invoice", "lnbc1p1qqq"]).code(2));
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("The invoice is not a BOLT11 invoice the CLI can read")
     );
     // A local mistake is reported first.
     let error = json_error(&send(&["--org", ORG, "--invoice", "lnbc1", "--unit", "sats"]).code(2));
