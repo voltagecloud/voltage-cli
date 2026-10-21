@@ -19,7 +19,12 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          # The pinned toolchain, plus llvm-tools for `scripts/crap-report.sh`. CI and
+          # rustup users install only the components in rust-toolchain.toml.
+          toolchain = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
+          rust = pkgs.rust-bin.fromRustupToolchain (toolchain // {
+            components = toolchain.components ++ [ "llvm-tools-preview" ];
+          });
         in {
           default = pkgs.mkShell {
             packages = [
