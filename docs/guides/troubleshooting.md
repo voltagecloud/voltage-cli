@@ -60,14 +60,13 @@ An imported API key belongs to one organization and environment, and the command
 
 ### The saved login has expired or was revoked
 
-Replace the saved login with the two commands in the hint. `voltage login` refuses to overwrite a saved credential, so remove the stale one first:
+Sign in again with the command in the hint:
 
 ```sh
-voltage logout --local --account NAME
 voltage login --account NAME
 ```
 
-`--local` skips server revocation, which a revoked or expired login cannot complete. Keep the same `NAME` so profiles that select it keep working.
+When you sign in as the same user, the new login replaces the saved one, and the CLI revokes the replaced session. Keep the same `NAME` so profiles that select it keep working. If you sign in as a different user, `voltage login` refuses the name; run `voltage logout --local --account NAME` first, or choose another name. It refuses the name the same way when the saved login's secret cannot be read, for example from a locked OS credential store or a damaged credential file. `voltage logout --local --account NAME` removes that account even when its secret cannot be removed, and warns you to remove the secret yourself.
 
 ### needs a browser login
 

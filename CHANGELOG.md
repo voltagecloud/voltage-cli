@@ -21,6 +21,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ### Changed
 
+- `voltage login` under a saved name replaces that login when it is the same user at the same auth URL, and revokes the replaced session. A different user is still refused. With `--account NAME`, a name saved for an API key or for another auth URL is refused before the browser step. An expired or revoked login's hint is now only `voltage login --account NAME`. A saved login whose secret cannot be read is refused, also before the browser step, with a hint that names `voltage logout --local --account NAME`, and `logout --local` removes an account whose secret is already gone or cannot be removed, with a warning for the latter. Without `--credential-store`, a replaced login keeps its credential store, and a new login uses the keychain. `voltage login --json` reports `replaced: true` when the login replaced a saved one. When a replacement cannot be saved, the replaced login stays saved, and the error says so if it could not be restored.
 - Human tables fit the terminal width, and all API text is scrubbed of terminal control characters.
 - Each item of a string list gets its own line in human output.
 - Errors name the next command: missing scope names the command that lists IDs, credential and profile errors list the saved names, HTTP 401 and 403 point to `voltage auth status` and `voltage context`, and `quote_required` points to `voltage quotes create`.

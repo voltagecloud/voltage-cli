@@ -1588,6 +1588,223 @@ async fn logout_retains_credentials_on_revocation_failure_and_local_is_explicit(
     assert!(settings.read_credential(LOGIN_NAME).is_err());
 }
 
+/// A device login that is approved at once and signs in as `user_id`.
+async fn approved_device_login(server: &MockServer, user_id: &str) {
+    respond_once(
+        server,
+        route("POST", "/oauth/device_authorization"),
+        ok(json!({
+            "device_code":"device-secret","user_code":"ABCD-EFGH",
+            "verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5
+        })),
+    )
+    .await;
+    respond_once(
+        server,
+        route("POST", "/oauth/token"),
+        ok(json!({
+            "access_token":"new-access","refresh_token":"new-refresh",
+            "token_type":"Bearer","expires_in":600
+        })),
+    )
+    .await;
+    respond_once(
+        server,
+        route("GET", "/users/current").and(header("authorization", "Bearer new-access")),
+        ok(json!({"id":user_id,"email":LOGIN_EMAIL})),
+    )
+    .await;
+}
+
+fn login_as(dir: &Path, server: &MockServer, auth_url: &str) -> Command {
+    let mut cmd = replacing_login(dir, server, auth_url);
+    cmd.args(["--credential-store", "file"]);
+    cmd
+}
+
+/// A login under the saved name without `--credential-store`, so it keeps the saved store.
+fn replacing_login(dir: &Path, server: &MockServer, auth_url: &str) -> Command {
+    let mut cmd = cli(dir, server);
+    cmd.args([
+        "login",
+        "--auth-url",
+        auth_url,
+        "--no-browser",
+        "--account",
+        LOGIN_NAME,
+    ]);
+    cmd
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_login_of_the_same_user_replaces_the_saved_one_and_revokes_it() {
+    for revoked in [true, false] {
+        let (server, dir) = fixture().await;
+        let mut settings = seeded_login(dir.path(), &server, true);
+        approved_device_login(&server, RESOURCE).await;
+        respond_once(
+            &server,
+            route("POST", "/oauth/revoke")
+                .and(body_string_contains(format!("token={LOGIN_REFRESH}"))),
+            if revoked {
+                ResponseTemplate::new(200)
+            } else {
+                ResponseTemplate::new(503).set_body_json(json!({"error":"unavailable"}))
+            },
+        )
+        .await;
+        // Without `--credential-store`, the file-stored login stays in its file.
+        let login = replacing_login(dir.path(), &server, &server.uri())
+            .assert()
+            .success();
+        assert_eq!(
+            json_stdout(&login)["data"],
+            json!({"account":LOGIN_NAME,"email":LOGIN_EMAIL,"authenticated":true,"replaced":true})
+        );
+        settings.reload().unwrap();
+        assert_eq!(
+            settings.account(LOGIN_NAME).unwrap().store,
+            CredentialStore::File
+        );
+        assert_eq!(
+            login_tokens(&settings, LOGIN_NAME),
+            ("new-access".to_owned(), "new-refresh".to_owned())
+        );
+        // A failed revocation keeps the new login and says how to end the old session.
+        assert_eq!(
+            stderr(&login).contains("Could not revoke the replaced CLI session"),
+            !revoked,
+            "{}",
+            stderr(&login)
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_login_of_another_user_keeps_the_saved_one_and_revokes_the_new_session() {
+    let (server, dir) = fixture().await;
+    let settings = seeded_login(dir.path(), &server, true);
+    approved_device_login(&server, ORG).await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/revoke").and(body_string_contains("token=new-refresh")),
+        ResponseTemplate::new(200),
+    )
+    .await;
+    let login = login_as(dir.path(), &server, &server.uri())
+        .assert()
+        .code(2);
+    assert_eq!(
+        json_error(&login)["error"]["message"],
+        format!(
+            "Credential {LOGIN_NAME} already exists; log it out first or use a different --account name"
+        )
+    );
+    assert_eq!(
+        login_tokens(&settings, LOGIN_NAME),
+        (LOGIN_ACCESS.to_owned(), LOGIN_REFRESH.to_owned())
+    );
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_login_at_another_auth_url_is_refused_before_the_browser_step() {
+    let (server, dir) = fixture().await;
+    let settings = seeded_login(dir.path(), &server, true);
+    let other = MockServer::start().await;
+    let login = login_as(dir.path(), &server, &other.uri()).assert().code(2);
+    assert_eq!(
+        json_error(&login)["error"]["message"],
+        format!(
+            "Credential {LOGIN_NAME} already exists; log it out first or use a different --account name"
+        )
+    );
+    assert!(other.received_requests().await.unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(login_tokens(&settings, LOGIN_NAME).1, LOGIN_REFRESH);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_login_without_a_user_id_is_not_replaced() {
+    let (server, dir) = fixture().await;
+    let settings = seeded_login(dir.path(), &server, true);
+    settings
+        .write_credential(
+            LOGIN_NAME,
+            CredentialStore::File,
+            &Credential::Login(Login {
+                access_token: Secret::new(LOGIN_ACCESS.into()),
+                refresh_token: Secret::new(LOGIN_REFRESH.into()),
+                expires_at: 0,
+                user_id: None,
+                email: Some(LOGIN_EMAIL.into()),
+            }),
+        )
+        .unwrap();
+    approved_device_login(&server, RESOURCE).await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/revoke").and(body_string_contains("token=new-refresh")),
+        ResponseTemplate::new(200),
+    )
+    .await;
+    let login = login_as(dir.path(), &server, &server.uri())
+        .assert()
+        .code(2);
+    assert_eq!(
+        json_error(&login)["error"]["message"],
+        format!(
+            "Credential {LOGIN_NAME} already exists; log it out first or use a different --account name"
+        )
+    );
+    assert_eq!(login_tokens(&settings, LOGIN_NAME).1, LOGIN_REFRESH);
+    server.verify().await;
+}
+
+/// A saved login whose secret is corrupt or gone is refused before the browser step, with
+/// the command that removes it, and that command works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_login_that_cannot_be_read_is_refused_before_the_browser_step() {
+    for corrupt in [true, false] {
+        let (server, dir) = fixture().await;
+        seeded_login(dir.path(), &server, true);
+        let mut files = std::fs::read_dir(dir.path().join("credentials")).unwrap();
+        let file = files.next().unwrap().unwrap().path();
+        assert!(files.next().is_none());
+        if corrupt {
+            std::fs::write(&file, "not json").unwrap();
+        } else {
+            std::fs::remove_file(&file).unwrap();
+        }
+        let login = login_as(dir.path(), &server, &server.uri())
+            .assert()
+            .code(2);
+        let report = json_error(&login);
+        assert_eq!(
+            report["error"]["message"],
+            format!(
+                "Credential {LOGIN_NAME} already exists; log it out first or use a different --account name"
+            )
+        );
+        assert_eq!(
+            report["error"]["hint"],
+            format!(
+                "Its saved secret cannot be read. Remove it with `voltage logout --local --account {LOGIN_NAME}`."
+            )
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        cli(dir.path(), &server)
+            .args(["logout", "--account", LOGIN_NAME, "--local"])
+            .assert()
+            .success();
+        assert!(!file.exists());
+        let mut settings = settings_at(dir.path());
+        settings.reload().unwrap();
+        assert!(settings.config.accounts.is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Payments: submission, confirmation, waits, and reconciliation
 // ---------------------------------------------------------------------------------------
@@ -2074,6 +2291,47 @@ async fn interrupt_before_a_new_login_is_saved_says_a_session_may_exist() {
             .accounts
             .contains_key(LOGIN_NAME)
     );
+    server.verify().await;
+}
+
+/// Once the new login is saved, an interruption while the replaced session is revoked says
+/// the new login is saved, not that a session may have gone unsaved.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_while_revoking_a_replaced_login_says_the_new_one_is_saved() {
+    let (server, dir) = fixture().await;
+    let mut settings = seeded_login(dir.path(), &server, true);
+    approved_device_login(&server, RESOURCE).await;
+    let (responder, arrived) = announced(ok(json!({})).set_delay(Duration::from_secs(10)));
+    respond_once(
+        &server,
+        route("POST", "/oauth/revoke").and(body_string_contains(format!("token={LOGIN_REFRESH}"))),
+        responder,
+    )
+    .await;
+    let output = interrupt_in_flight(
+        dir.path(),
+        &server,
+        &arrived,
+        &[
+            "login",
+            "--auth-url",
+            &server.uri(),
+            "--no-browser",
+            "--account",
+            LOGIN_NAME,
+        ],
+    )
+    .await;
+    let report = error_report(&output.stderr);
+    assert_eq!(
+        report["error"]["message"],
+        format!(
+            "Interrupted while revoking the replaced session for {LOGIN_NAME}; the new login is saved"
+        )
+    );
+    settings.reload().unwrap();
+    assert_eq!(login_tokens(&settings, LOGIN_NAME).1, "new-refresh");
     server.verify().await;
 }
 
@@ -3610,7 +3868,7 @@ async fn a_revoked_login_names_the_command_that_renews_it() {
         assert_eq!(
             error["error"]["hint"],
             format!(
-                "Remove it with `voltage logout --local --account {LOGIN_NAME}`, then sign in again with `voltage login --account {LOGIN_NAME} --auth-url {}`.",
+                "Sign in again with `voltage login --account {LOGIN_NAME} --auth-url {}`.",
                 server.uri()
             ),
             "expiring={expiring}"

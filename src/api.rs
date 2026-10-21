@@ -12,7 +12,7 @@ use crate::{
     cli::{ApiInvocation, GlobalFlags, Origin, Requested},
     config::{
         API_URL, EXECUTE_VARIABLE, Scope, Settings, Source, new_private, private_dir, read_private,
-        read_secret,
+        read_secret, shell_word,
     },
     dry_run,
     error::{CredentialSources, ErrorDetail, ErrorKind},
@@ -107,7 +107,7 @@ impl Authorization {
                 "Check the key with `voltage auth status`; the API does not accept it."
             }
             (Self::Account(ApiCredential::OrganizationToken(_), _), 401) => {
-                "Check the credential with `voltage auth status`. To sign in again, run `voltage logout --local --account NAME`, then `voltage login --account NAME`."
+                "Check the credential with `voltage auth status`. To sign in again, run `voltage login --account NAME`."
             }
             (Self::Account(_, Some(sources)), 403) => {
                 return Some(environment_key_hint(sources.organization).into());
@@ -951,7 +951,7 @@ fn scope_flags(scope: &Scope) -> String {
     let account = scope
         .account
         .as_deref()
-        .map(|account| format!(" --account {}", auth::shell_word(account)));
+        .map(|account| format!(" --account {}", shell_word(account)));
     org.into_iter().chain(envs).chain(account).collect()
 }
 
@@ -1116,6 +1116,8 @@ pub(crate) enum SessionChange {
     Login,
     /// The server may have revoked the session, but the saved login is not yet removed.
     Logout { account: String },
+    /// A new login is saved, and the session of the login it replaced may not be revoked yet.
+    RevokeReplaced { account: String },
 }
 
 struct SubmittedWrite {
@@ -1167,6 +1169,10 @@ impl SubmissionState {
                     "Interrupted while logging out {account}; its session may already be revoked"
                 ))
                 .with_hint("Rerun the logout with --local to remove the saved login."),
+                Some(SessionChange::RevokeReplaced { account }) => Error::interrupted(format!(
+                    "Interrupted while revoking the replaced session for {account}; the new login is saved"
+                ))
+                .with_hint("Account global signout ends the replaced session if it is still active."),
                 None => Error::interrupted("Interrupted before any resource change was submitted"),
             };
         };
@@ -1619,8 +1625,7 @@ mod tests {
         );
         let renew = hint(&login, 401).unwrap();
         assert!(
-            renew.contains("voltage logout --local --account NAME")
-                && renew.contains("voltage login --account NAME"),
+            renew.contains("voltage login --account NAME") && !renew.contains("voltage logout"),
             "{renew}"
         );
         assert!(hint(&account, 403).unwrap().contains("voltage context"));
@@ -1940,6 +1945,13 @@ mod tests {
                 },
                 "Interrupted while logging out person; its session may already be revoked",
                 "--local",
+            ),
+            (
+                SessionChange::RevokeReplaced {
+                    account: "person".into(),
+                },
+                "Interrupted while revoking the replaced session for person; the new login is saved",
+                "global signout",
             ),
         ] {
             submission.session_changing(change);
