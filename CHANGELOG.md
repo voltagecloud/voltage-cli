@@ -22,6 +22,8 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - Errors name the next command: missing scope names the command that lists IDs, credential and profile errors list the saved names, HTTP 401 and 403 point to `voltage auth status` and `voltage context`, and `quote_required` points to `voltage quotes create`.
 - An API rejection's error leads with the API's reason, and human output shows the rest of the API error as field/value lines instead of JSON.
 - `-h` shows usage and options; `--help` adds notes, examples, and the guide link.
+- A USD payment without a quote names `--quote QUOTE_ID` and how to create one, and an `invalid_currency` rejection of a quoted amount says how to quote the payment's exact amount.
+- `quotes create` rejects a `--unit` already in the `--to` currency before sending it, and its help says which currency each flag names.
 
 ### Fixed
 

@@ -41,6 +41,10 @@ voltage payments receive --profile prod --wallet WALLET_ID \
   --currency usd --kind bolt11 --amount 10 --unit usd --quote QUOTE_ID --wait ready --execute
 ```
 
+A quote converts `--amount` from the currency of its `--unit` into the `--to` currency, so the two must differ. With `--unit` and `--to`, the CLI rejects a quote whose `--unit` is already in the `--to` currency before sending it. A complete `--data` body is sent as is, and the API rejects it with `mismatch_currency`.
+
+The quote must convert to exactly the payment's amount, or the API rejects the payment with `invalid_currency`. `voltage quotes get QUOTE_ID` shows what a quote converts to. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount with `--unit sats --to usd`. To receive a USD amount, quote it with `--unit usd --to btc`, as above.
+
 A quote is single-use and expires; a quoted receive's expiration is capped by the quote's remaining life.
 
 On-chain and BIP21 payments and treasury movements are features Voltage enables per organization; the API rejects them with `feature_flag_disabled` until then, and the CLI says so.
