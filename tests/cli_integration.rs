@@ -4059,8 +4059,8 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
         .and(path(wallets_path(ORG)))
         .and(query_param("environment_id", ENV))
         .respond_with(ok(json!([
-            {"id": RESOURCE, "name": "ops"},
-            {"id": WALLET, "name": "Payroll"}
+            {"id": RESOURCE, "name": "ops", "balances": [{"currency": "usd"}]},
+            {"id": WALLET, "name": "Payroll", "balances": [{"currency": "btc"}]}
         ])))
         .mount(&server)
         .await;
@@ -4088,9 +4088,15 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
             .count()
     };
 
-    // Typing filters the list, and Enter picks; the change is still only described.
-    let picked = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"Pay\r")]).await;
+    // Each wallet shows its currency, typing filters on it, and Enter picks; the change is
+    // still only described.
+    let picked = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"btc\r")]).await;
     assert_eq!(picked.code, Some(6), "{}", picked.shown);
+    assert!(
+        picked.shown.contains(&format!("ops  USD  {RESOURCE}")),
+        "{}",
+        picked.shown
+    );
     assert!(
         picked.stdout.contains("body.wallet_id"),
         "{}",

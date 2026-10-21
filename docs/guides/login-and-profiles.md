@@ -45,14 +45,14 @@ Only endpoints that filter by environment receive `--env`. Organization-wide com
 
 ## Pick the scope interactively
 
-On a terminal, a command that lacks the organization, environment, or wallet it needs asks for it instead of failing. The picker lists each choice as `name  UUID`; type to filter, use the arrow keys, and press Enter. Afterwards, the CLI prints the flags that select the same scope, so you can pass them next time or save a profile.
+On a terminal, a command that lacks the organization, environment, or wallet it needs asks for it instead of failing. The picker lists each choice as `name  UUID`, and each wallet as `name  CURRENCY  UUID` when all of its balances are in one currency. Type to filter, by name or currency, use the arrow keys, and press Enter. Afterwards, the CLI prints the flags that select the same scope, so you can pass them next time or save a profile.
 
 ```sh
 voltage wallets list                            # asks for the organization
 voltage payments receive --currency btc --kind bolt11 --amount 1000 --unit sats --execute   # asks for the wallet
 ```
 
-The picker offers every wallet in the environment. For this example, pick a wallet on a BTC line of credit. A wallet on a USD line of credit needs a quote for every payment, so the API rejects the receive with `quote_required` unless you pass `--quote QUOTE_ID` from `voltage quotes create`.
+The picker offers every wallet in the environment and shows a wallet's currency when its balances report one. A wallet with no balance yet shows no currency. For this example, pick a BTC wallet. Typing filters on the whole label, so `btc` matches wallets that show `BTC` and any wallet with `btc` in its name. A wallet on a USD line of credit needs a quote for every payment, so the API rejects the receive with `quote_required` unless you pass `--quote QUOTE_ID` from `voltage quotes create`.
 
 An API key cannot list organizations or environments, so with a key the CLI offers only wallets; pass `--org` and `--env` or use a profile. Esc leaves the scope unchanged, and the command then reports what is missing. Ctrl-C exits with code 130. Picking a scope never sends a change: changes still need `--execute`. The CLI never asks when stdin or stderr is not a terminal, when stdout is piped without `--output table` (as in `voltage wallets list | jq`), or with `--no-input`, `--json`, or `--output json|ndjson`. In those cases, the command fails with the same error as before.
 

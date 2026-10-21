@@ -124,6 +124,7 @@ impl Drop for PickerScreen {
 pub struct Choice {
     id: Uuid,
     name: String,
+    currency: Option<String>,
 }
 
 impl Choice {
@@ -131,7 +132,14 @@ impl Choice {
         Self {
             id,
             name: scrub_line(name),
+            currency: None,
         }
+    }
+
+    /// Show a wallet's currency between its name and ID, where typing can filter on it.
+    pub fn with_currency(mut self, currency: &str) -> Self {
+        self.currency = Some(scrub_line(&currency.to_uppercase()));
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -141,7 +149,10 @@ impl Choice {
 
 impl Display for Choice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}  {}", self.name, self.id)
+        match &self.currency {
+            Some(currency) => write!(f, "{}  {currency}  {}", self.name, self.id),
+            None => write!(f, "{}  {}", self.name, self.id),
+        }
     }
 }
 
