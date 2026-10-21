@@ -2,10 +2,12 @@
 //! a person at a terminal picks one instead of copying a UUID. Scripts never see a prompt.
 
 use crate::{
-    Result, api,
+    Error, Result, api,
+    api::{SubmissionState, profile_offer_interrupted},
     auth::{ApiCredential, Discovery, Resolver},
     cli::{BodySource, Command, GlobalFlags, LocalCommand, ProfileCommand},
-    config::{Credential, Scope},
+    config::{Credential, Profile, Scope, Settings, shell_word},
+    error::ErrorKind,
     output::OutputFormat,
     registry::{OperationId, ParameterLocation, ScopeParameter},
     terminal::{Choice, Terminal},
@@ -114,6 +116,101 @@ pub fn can_ask(global: &GlobalFlags) -> bool {
     global.output_format() == OutputFormat::Table && global.terminal().can_pick()
 }
 
+/// After `voltage login` on a terminal, offer to save a profile that pins the login to an
+/// organization and environment, so later commands need only `--profile NAME`. Nothing is
+/// offered off a terminal, or when a profile already uses this login. The login is already
+/// saved, so a failure here is a notice and never fails the login. Ctrl-C ends the command,
+/// and its error says that the login is saved.
+pub async fn offer_profile(
+    settings: &mut Settings,
+    account: &str,
+    global: &GlobalFlags,
+    submission: &SubmissionState,
+) -> Result<Option<String>> {
+    let used = settings
+        .config
+        .profiles
+        .values()
+        .any(|profile| profile.account == account);
+    if used || !can_ask(global) {
+        return Ok(None);
+    }
+    let terminal = global.terminal();
+    terminal.notice(
+        "Save a profile for this login, so later commands need only --profile NAME. Press Esc to skip.",
+    );
+    let later = format!(
+        "Create one later with `voltage profiles create NAME --account {}`.",
+        shell_word(account)
+    );
+    let skipped = |why: String| terminal.notice(format!("{why}{later}"));
+    // Ctrl-C from here on, at a prompt or during a request, reports the saved login.
+    submission.offering_profile(Some(account));
+    let pinned = pin(settings, account, global, submission).await;
+    submission.offering_profile(None);
+    match pinned {
+        Ok(Some(name)) => {
+            terminal.notice(format!(
+                "Saved profile {name}. Use it with --profile {name}."
+            ));
+            Ok(Some(name))
+        }
+        Ok(None) => {
+            skipped("No profile was saved. ".into());
+            Ok(None)
+        }
+        Err(error) if error.kind == ErrorKind::Interrupted => {
+            Err(profile_offer_interrupted(account))
+        }
+        Err(error) => {
+            skipped(format!("No profile was saved: {}. ", error.message));
+            Ok(None)
+        }
+    }
+}
+
+/// Pick the organization and environment, taking each when it is the only one, then ask for
+/// the profile's name and save it. `None` means Esc.
+async fn pin(
+    settings: &mut Settings,
+    account: &str,
+    global: &GlobalFlags,
+    submission: &SubmissionState,
+) -> Result<Option<String>> {
+    let mut scope = Scope {
+        account: Some(account.to_owned()),
+        ..Scope::default()
+    };
+    let resolver = Resolver {
+        settings,
+        flags: global,
+        submission,
+        credential_sources: None,
+    };
+    ask(Needs::new(true, true, false), global, resolver, &mut scope).await?;
+    let (Some(organization_id), [environment_id]) = (scope.org, scope.envs.as_slice()) else {
+        return Ok(None);
+    };
+    let Some(name) = global.terminal().text("Profile name:", "default").await? else {
+        return Ok(None);
+    };
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err(Error::usage("A profile name cannot be empty"));
+    }
+    let profile = Profile {
+        organization_id,
+        environment_id: *environment_id,
+        account: account.to_owned(),
+    };
+    // The prompts can stay open for a long time, so the configuration is re-read under the
+    // lock before the profile is added.
+    settings
+        .create_profile(&name, global.terminal(), |_| Ok(profile))
+        .await?;
+    Ok(Some(name))
+}
+
 /// The pickers themselves, with one credential resolution and at most one organization token
 /// exchange. An API key cannot list organizations or environments, so only its wallets are
 /// offered. Returns the flags for what was picked, which Esc or an empty list can cut short.
@@ -136,7 +233,8 @@ async fn ask(
         let listed = resolver
             .list(scope, Discovery::Organizations, &login.access_token)
             .await?;
-        let Some(org) = choose(terminal, "Organization:", "organizations", &listed).await? else {
+        let Some(org) = choose(terminal, "Organization:", "organizations", &listed, true).await?
+        else {
             return Ok(picked);
         };
         scope.org = Some(org);
@@ -152,7 +250,8 @@ async fn ask(
             return Ok(picked);
         };
         let listed = resolver.list(scope, Discovery::Environments, token).await?;
-        let Some(env) = choose(terminal, "Environment:", "environments", &listed).await? else {
+        let Some(env) = choose(terminal, "Environment:", "environments", &listed, true).await?
+        else {
             return Ok(picked);
         };
         scope.envs = vec![env];
@@ -160,7 +259,7 @@ async fn ask(
     }
     if missing.wallet {
         let listed = api::wallets(global, credential, resolver.credential_sources, scope).await?;
-        let Some(wallet) = choose(terminal, "Wallet:", "wallets", &listed).await? else {
+        let Some(wallet) = choose(terminal, "Wallet:", "wallets", &listed, false).await? else {
             return Ok(picked);
         };
         scope.wallet = Some(wallet);
@@ -169,17 +268,25 @@ async fn ask(
     Ok(picked)
 }
 
-/// Pick from a listing, or say why there is nothing to pick.
+/// Pick from a listing, or say why there is nothing to pick. With `take_only`, the only
+/// choice is taken without asking. A wallet is always asked for, because a payment spends
+/// from it.
 async fn choose(
     terminal: Terminal,
     question: &'static str,
     plural: &str,
     listed: &Value,
+    take_only: bool,
 ) -> Result<Option<Uuid>> {
-    let choices = choices(listed);
+    let mut choices = choices(listed);
     if choices.is_empty() {
         terminal.notice(format!("No {plural} to choose from."));
         return Ok(None);
+    }
+    if take_only && choices.len() == 1 {
+        let only = choices.remove(0);
+        terminal.notice(format!("{question} {only} (the only one)"));
+        return Ok(Some(only.id()));
     }
     terminal.pick(question, choices).await
 }

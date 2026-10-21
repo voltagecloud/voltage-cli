@@ -508,6 +508,9 @@ pub struct LoginOutcome {
     pub authenticated: bool,
     /// The login replaced a saved login of the same user under this name.
     pub replaced: bool,
+    /// The profile saved for this login on a terminal, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -777,6 +780,7 @@ async fn save_login(
         email,
         authenticated: true,
         replaced: replaced.is_some(),
+        profile: None,
     })
 }
 

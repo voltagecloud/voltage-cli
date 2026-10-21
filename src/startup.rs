@@ -187,7 +187,12 @@ impl<'a> Session<'a> {
         let (global, scope, submission) = (self.global, &self.scope, self.submission);
         match command {
             LocalCommand::Login(flags) => {
-                Envelope::local(auth::login(&mut self.settings, &flags, global, submission).await?)
+                let mut outcome =
+                    auth::login(&mut self.settings, &flags, global, submission).await?;
+                outcome.profile =
+                    pick::offer_profile(&mut self.settings, &outcome.account, global, submission)
+                        .await?;
+                Envelope::local(outcome)
             }
             LocalCommand::Logout(flags) => Envelope::local(
                 auth::logout(
@@ -286,48 +291,49 @@ struct ProfileDeleted {
     deleted: bool,
 }
 
-/// Profile edits take the credential lock and re-read the configuration first, so two
-/// concurrent commands never overwrite each other's changes.
+/// Profile commands take the credential lock and re-read the configuration first, so two
+/// concurrent commands never overwrite each other's changes. `Settings::create_profile`
+/// takes the lock itself, because a login's profile offer saves through it too.
 async fn profiles(
     command: ProfileCommand,
     settings: &mut Settings,
     scope: &Scope,
     terminal: Terminal,
 ) -> Result<Envelope> {
+    if let ProfileCommand::Create { name } = command {
+        settings
+            .create_profile(&name, terminal, |settings| {
+                Ok(Profile {
+                    account: settings.account_name(scope)?,
+                    organization_id: scope.require_org()?,
+                    environment_id: scope.single_env()?,
+                })
+            })
+            .await?;
+        return Envelope::local(ProfileCreated {
+            profile: name,
+            created: true,
+        });
+    }
     let _lock = settings.lock(terminal).await?;
     settings.reload()?;
+    if let ProfileCommand::Delete { name } = command {
+        if settings.config.profiles.remove(&name).is_none() {
+            return Err(settings.unknown_profile(&name));
+        }
+        settings.save()?;
+        return Envelope::local(ProfileDeleted {
+            profile: name,
+            deleted: true,
+        });
+    }
     match command {
-        ProfileCommand::List => Envelope::local(&settings.config.profiles),
         ProfileCommand::Get { name } => {
             let profile = settings.config.profiles.get(&name);
             Envelope::local(profile.ok_or_else(|| settings.unknown_profile(&name))?)
         }
-        ProfileCommand::Create { name } => {
-            if settings.config.profiles.contains_key(&name) {
-                return Err(Error::usage("Profile already exists"));
-            }
-            let profile = Profile {
-                account: settings.account_name(scope)?,
-                organization_id: scope.require_org()?,
-                environment_id: scope.single_env()?,
-            };
-            settings.config.profiles.insert(name.clone(), profile);
-            settings.save()?;
-            Envelope::local(ProfileCreated {
-                profile: name,
-                created: true,
-            })
-        }
-        ProfileCommand::Delete { name } => {
-            if settings.config.profiles.remove(&name).is_none() {
-                return Err(settings.unknown_profile(&name));
-            }
-            settings.save()?;
-            Envelope::local(ProfileDeleted {
-                profile: name,
-                deleted: true,
-            })
-        }
+        // List; Create and Delete returned above.
+        _ => Envelope::local(&settings.config.profiles),
     }
 }
 

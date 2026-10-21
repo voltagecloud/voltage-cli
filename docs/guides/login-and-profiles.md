@@ -15,6 +15,8 @@ voltage logout --local                          # removes local credentials only
 
 A login grants the permissions your account already has. Profiles do not restrict them.
 
+On a terminal, a login then offers to save a [profile](#profiles) pinned to an organization and environment, so later commands need only `--profile NAME`. It takes the organization and the environment when there is only one of each, and otherwise asks, as the [picker](#pick-the-scope-interactively) does. Then it asks for the profile's name (`default` when you press Enter). Esc skips the profile. When a profile already uses this login, or when stdout is not a terminal, as with `--json`, or with `--no-input`, nothing is offered. A failure while offering, such as a name that is already used, leaves the login saved and says how to create the profile later with `voltage profiles create`. Ctrl-C exits with code 130 and says that the login is saved. The profile is saved under the same lock as `voltage profiles create`, after the configuration is read again, so a change another command made while the prompt was open is kept. With table output, the result shows `profile` when one was saved.
+
 Signing in again under a saved name replaces that login when it is the same user at the same auth URL, and revokes the replaced session. A different user, or a name used by an imported API key, is refused. With `--account NAME`, an API key or a login at another auth URL is refused before the browser step. Without `--credential-store`, the new login stays in the replaced login's credential store; a new name uses the keychain. With `--json`, the output has `replaced: true` when the login replaced a saved one.
 
 ## API keys
@@ -47,7 +49,7 @@ Only endpoints that filter by environment receive `--env`. Organization-wide com
 
 ## Pick the scope interactively
 
-On a terminal, a command that lacks the organization, environment, or wallet it needs asks for it instead of failing. The picker lists each choice as `name  UUID`, and each wallet as `name  CURRENCY  UUID` when all of its balances are in one currency. Type to filter, by name or currency, use the arrow keys, and press Enter. Afterwards, the CLI prints the flags that select the same scope, so you can pass them next time or save a profile.
+On a terminal, a command that lacks the organization, environment, or wallet it needs asks for it instead of failing. The picker lists each choice as `name  UUID`, and each wallet as `name  CURRENCY  UUID` when all of its balances are in one currency. Type to filter, by name or currency, use the arrow keys, and press Enter. When there is only one organization or environment, the CLI takes it without asking and says so. A wallet is always asked for, also when there is only one, because a payment spends from it. Afterwards, the CLI prints the flags that select the same scope, so you can pass them next time or save a profile.
 
 ```sh
 voltage wallets list                            # asks for the organization
