@@ -2766,6 +2766,139 @@ async fn payment_timeout_preserves_id_and_does_not_retry() {
     server.verify().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accepted_receive_or_quote_names_the_command_that_shows_it() {
+    let (server, dir) = fixture().await;
+    route("POST", payments_path())
+        .respond_with(accepted())
+        .expect(4)
+        .mount(&server)
+        .await;
+    let quotes = format!("/organizations/{ORG}/environments/{ENV}/quotes");
+    route("POST", quotes)
+        .respond_with(accepted())
+        .expect(2)
+        .mount(&server)
+        .await;
+    let receive = |extra: &[&str]| {
+        let mut process = human_process_at(dir.path(), &server.uri());
+        let mut args = vec!["--wallet", WALLET, "--amount", "1000", "--unit", "sats"];
+        args.extend_from_slice(extra);
+        process.args(receive_args(&args));
+        Command::from_std(process).assert().success()
+    };
+    let shown = receive(&["--output", "table"]);
+    assert!(stdout(&shown).contains("accepted"));
+    assert!(stderr(&shown).contains(&format!(
+        "hint: Show the invoice or address with `voltage payments get {RESOURCE} --org {ORG} --env {ENV}`, or pass --wait ready next time"
+    )));
+    // --quiet and machine-readable output leave the hint out.
+    assert!(!stderr(&receive(&["--output", "table", "--quiet"])).contains("hint:"));
+    assert!(!stderr(&receive(&["--output", "json"])).contains("hint:"));
+
+    // A new ID: the receives' recovery record already holds RESOURCE.
+    let quote_id = "55555555-5555-4555-8555-555555555555";
+    let mut quote = human_process_at(dir.path(), &server.uri());
+    quote.args([
+        "quotes",
+        "create",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--id",
+        quote_id,
+        "--credit-line",
+        WALLET,
+        "--network",
+        "mutinynet",
+        "--amount",
+        "10",
+        "--unit",
+        "usd",
+        "--to",
+        "btc",
+        "--output",
+        "table",
+    ]);
+    let quoted = Command::from_std(quote).assert().success();
+    assert!(stderr(&quoted).contains(&format!(
+        "hint: Show the quote with `voltage quotes get {quote_id} --org {ORG} --env {ENV}` once it is ready."
+    )));
+
+    // A body without an ID gives no ID to name, so there is no hint.
+    let body = dir.path().join("quote.json");
+    std::fs::write(&body, r#"{"amount":10}"#).unwrap();
+    let mut unnamed = human_process_at(dir.path(), &server.uri());
+    unnamed.args([
+        "quotes", "create", "--org", ORG, "--env", ENV, "--output", "table",
+    ]);
+    unnamed.arg("--data").arg(format!("@{}", body.display()));
+    let unnamed = Command::from_std(unnamed).assert().success();
+    assert!(!stderr(&unnamed).contains("hint:"), "{}", stderr(&unnamed));
+
+    // An accepted send creates nothing to show, so it names no next step.
+    let mut send = human_process_at(dir.path(), &server.uri());
+    send.args([
+        "payments",
+        "send",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--id",
+        "66666666-6666-4666-8666-666666666666",
+        "--wallet",
+        WALLET,
+        "--currency",
+        "btc",
+        "--invoice",
+        "lnbc1",
+        "--output",
+        "table",
+    ]);
+    let sent = Command::from_std(send).assert().success();
+    assert!(stdout(&sent).contains("accepted"));
+    assert!(!stderr(&sent).contains("hint:"), "{}", stderr(&sent));
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_get_takes_its_id_as_a_flag_too_but_not_both() {
+    let (server, dir) = fixture().await;
+    let quote = format!("/organizations/{ORG}/environments/{ENV}/quotes/{RESOURCE}");
+    route("GET", quote)
+        .respond_with(ok(json!({"id": RESOURCE})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "quotes", "get", "--org", ORG, "--env", ENV, "--id", RESOURCE,
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["data"]["id"], RESOURCE);
+    let both = cli(dir.path(), &server)
+        .args([
+            "quotes", "get", RESOURCE, "--org", ORG, "--env", ENV, "--id", RESOURCE,
+        ])
+        .assert()
+        .code(2);
+    assert!(stderr(&both).contains("cannot be used with"));
+    let neither = cli(dir.path(), &server)
+        .args(["quotes", "get", "--org", ORG, "--env", ENV])
+        .assert()
+        .code(2);
+    assert!(stderr(&neither).contains("<QUOTE_ID|--id <ID>>"));
+    let help = cli(dir.path(), &server)
+        .args(["quotes", "get", "-h"])
+        .assert()
+        .success();
+    assert!(stdout(&help).contains("Usage: voltage quotes get [OPTIONS] <QUOTE_ID|--id <ID>>\n"));
+    server.verify().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ambiguous_payment_is_reconciled_by_reading_the_same_id_without_resubmission() {
     let (server, dir) = fixture().await;
@@ -3926,8 +4059,8 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
         .and(path(wallets_path(ORG)))
         .and(query_param("environment_id", ENV))
         .respond_with(ok(json!([
-            {"id": RESOURCE, "name": "ops"},
-            {"id": WALLET, "name": "Payroll"}
+            {"id": RESOURCE, "name": "ops", "balances": [{"currency": "usd"}]},
+            {"id": WALLET, "name": "Payroll", "balances": [{"currency": "btc"}]}
         ])))
         .mount(&server)
         .await;
@@ -3955,9 +4088,15 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
             .count()
     };
 
-    // Typing filters the list, and Enter picks; the change is still only described.
-    let picked = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"Pay\r")]).await;
+    // Each wallet shows its currency, typing filters on it, and Enter picks; the change is
+    // still only described.
+    let picked = on_a_terminal(dir.path(), &server, &send, &[("Wallet:", b"btc\r")]).await;
     assert_eq!(picked.code, Some(6), "{}", picked.shown);
+    assert!(
+        picked.shown.contains(&format!("ops  USD  {RESOURCE}")),
+        "{}",
+        picked.shown
+    );
     assert!(
         picked.stdout.contains("body.wallet_id"),
         "{}",

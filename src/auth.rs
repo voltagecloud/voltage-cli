@@ -742,7 +742,7 @@ fn expired_login(account: &str, url: &str) -> Error {
 }
 
 /// `value` as one word a POSIX shell reads back unchanged, for a hint's copyable command.
-fn shell_word(value: &str) -> String {
+pub(crate) fn shell_word(value: &str) -> String {
     let plain = !value.is_empty()
         && value
             .chars()

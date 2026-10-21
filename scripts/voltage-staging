@@ -24,13 +24,8 @@ root = Path(__file__).resolve().parents[1]
 env_path = root / ".env"
 args = sys.argv[1:]
 
-# Building does not need or expose staging credentials.
-if args == ["--build"]:
-    build_env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
-    if not shutil.which("cargo") and (root / ".work/cargo/bin/cargo").exists():
-        build_env.update(CARGO_HOME=str(root / ".work/cargo"), RUSTUP_HOME=str(root / ".work/rustup"))
-        build_env["PATH"] = str(root / ".work/cargo/bin") + os.pathsep + build_env["PATH"]
-    sys.exit(subprocess.call(["cargo", "build", "--locked"], cwd=root, env=build_env))
+build = args[:1] == ["--build"]
+args = args[1:] if build else args
 
 for arg in args:
     if arg.split("=", 1)[0] in ("--config-dir", "--auth-url", "--api-url"):
@@ -38,6 +33,24 @@ for arg in args:
             "This staging wrapper takes its endpoints from .env and fixes its credential directory; "
             "use target/debug/voltage for other configurations."
         )
+
+
+def cargo_build():
+    """Build the CLI, exiting with cargo's status on failure. The build sees no VOLTAGE_ variables."""
+    build_env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
+    if not shutil.which("cargo") and (root / ".work/cargo/bin/cargo").exists():
+        build_env.update(CARGO_HOME=str(root / ".work/cargo"), RUSTUP_HOME=str(root / ".work/rustup"))
+        build_env["PATH"] = str(root / ".work/cargo/bin") + os.pathsep + build_env["PATH"]
+    status = subprocess.call(["cargo", "build", "--locked"], cwd=root, env=build_env)
+    if status:
+        sys.exit(status)
+
+
+# A leading --build builds, then runs the rest of the arguments, if any. --build alone does
+# not need .env. With a command, .env is checked first so a bad .env fails before the build.
+if build and not args:
+    cargo_build()
+    sys.exit(0)
 
 if not env_path.exists():
     sys.exit("Missing .env. Copy .env.example to .env and set the staging endpoints.")
@@ -81,6 +94,9 @@ if missing:
 for key in sorted(ENDPOINT_ENV):
     if not loaded[key].startswith("https://"):
         sys.exit(f".env variable {key} must be an https:// URL")
+
+if build:
+    cargo_build()
 
 env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
 env.update({key: value for key, value in loaded.items() if key in CLI_ENV})
