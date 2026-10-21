@@ -24,6 +24,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - `voltage login` under a saved name replaces that login when it is the same user at the same auth URL, and revokes the replaced session. A different user is still refused. With `--account NAME`, a name saved for an API key or for another auth URL is refused before the browser step. An expired or revoked login's hint is now only `voltage login --account NAME`. A saved login whose secret cannot be read is refused, also before the browser step, with a hint that names `voltage logout --local --account NAME`, and `logout --local` removes an account whose secret is already gone or cannot be removed, with a warning for the latter. Without `--credential-store`, a replaced login keeps its credential store, and a new login uses the keychain. `voltage login --json` reports `replaced: true` when the login replaced a saved one. When a replacement cannot be saved, the replaced login stays saved, and the error says so if it could not be restored.
 - Human tables fit the terminal width, and all API text is scrubbed of terminal control characters.
 - Each item of a string list gets its own line in human output.
+- A saved login the auth service no longer accepts reports `credential_problem: login_expired` in `--json` `error.detail`. `voltage context` cannot detect it, because it makes no network request.
 - Errors name the next command: missing scope names the command that lists IDs, credential and profile errors list the saved names, HTTP 401 and 403 point to `voltage auth status` and `voltage context`, and `quote_required` points to `voltage quotes create`.
 - An API rejection's error leads with the API's reason, and human output shows the rest of the API error as field/value lines instead of JSON.
 - `-h` shows usage and options; `--help` adds notes, examples, and the guide link.
@@ -32,6 +33,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ### Fixed
 
+- TLS certificate checks reject the distrusted emSign intermediates: `rustls-webpki` 0.103.16 and `webpki-root-certs` 1.0.10 (RUSTSEC-2026-0382, RUSTSEC-2026-0383).
 - Help and README examples for changes include `--execute`, so copying one sends it.
 - `voltage auth import-key` removes the saved key again when it cannot save the configuration, as `voltage login` does, and reports a name in use with the same message.
 
