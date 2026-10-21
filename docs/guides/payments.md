@@ -13,6 +13,19 @@ voltage payments send --profile prod --wallet WALLET_ID \
 
 Amounts are decimals in the unit you name with `--unit` (`msats`, `sats`, `btc`, `cents`, `usd`) and are converted to the API's integer base units exactly; a value with more precision than the unit allows is rejected. Without `--unit`, an amount is in the currency's base unit: msats for BTC and cents for USD, so `--amount 1000` is 1 sat. `--max-fee` without `--fee-unit` is in msats. `--currency` is the wallet currency for sends and the receive currency for open-amount receives. Without it, the payment reads the wallet and uses its line of credit's currency. That read needs a credential, also when the change is only described, and stderr says which currency was used. A `--unit` in another currency is then rejected, and a USD wallet's amount needs `--unit`: a cent is worth more than a sat, so an amount meant in sats would overpay. A wallet that holds an asset needs the complete body with `--data`. Fee limits cover network and provider fees only. A send notes on stderr that its fee limit excludes processing fees.
 
+## Choose a wallet for an invoice
+
+On a terminal, a payment without `--wallet` offers a wallet picker. Elsewhere, such as with `--json`, `--no-input`, or in a script, `payments send --invoice` without `--wallet` lists the organization's wallets (in the `--env` environment when one is given) and names those that could pay. A wallet qualifies when it is active, is on the invoice's network, holds the `--currency` currency (or BTC or USD without `--currency`), and has funds: its available balance plus its credit limit (`limit`) is positive, since the API lets a payment draw the balance down to minus the limit. A BTC balance's funds must also cover the invoice's amount. A USD balance pays through a quote, so its amount is not compared, and the candidate has `needs_quote: true` and a `quote` command that converts the invoice's amount with `--unit sats --to usd`; add `--quote QUOTE_ID` to the send. The invoice prefix gives the network: `lnbc` is mainnet, `lntb` testnet, `lntbs` signet, which includes mutinynet, and `lnbcrt` regtest, which no wallet uses. The error then exits with code 2. Its hint gives `--wallet ID` with the scope flags for each qualifying wallet, or says why each wallet does not qualify. `--json` reports the same in `error.detail`:
+
+```json
+{"invoice": {"network": "signet", "amount_msats": 1000},
+ "candidates": [{"wallet_id": "WALLET_ID", "name": "ops", "network": "mutinynet", "flags": "--wallet WALLET_ID --org ORG_ID", "needs_quote": false}],
+ "excluded": [{"wallet_id": "OTHER_ID", "name": "treasury", "network": "mainnet", "reason": "wrong_network"}],
+ "basis": "These wallets match the invoice's network and currency and have a balance. ..."}
+```
+
+`reason` is `inactive`, `wrong_network`, `wrong_currency`, `no_balance`, or `insufficient_balance` (a BTC wallet whose funds are below the invoice's amount). The list is a shortlist, not a guarantee: fees and line-of-credit rules are checked only when the payment is sent. Listing the wallets needs a credential, also when the change is only described. An on-chain send without `--wallet` reports only the missing flag.
+
 Run a change without `--execute` to see exactly what it would send, then add `--execute` to send it. There is no confirmation prompt. See the [safety model](../concepts/safety-model.md).
 
 ## Wait for a payment

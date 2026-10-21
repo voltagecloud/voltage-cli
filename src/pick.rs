@@ -92,10 +92,7 @@ pub async fn fill(
         wallet: needs.wallet && scope.wallet.is_none(),
     };
     let terminal = global.terminal();
-    if missing == Needs::default()
-        || global.output_format() != OutputFormat::Table
-        || !terminal.can_pick()
-    {
+    if missing == Needs::default() || !can_ask(global) {
         return Ok(());
     }
     let picked = ask(missing, global, resolver, scope).await?;
@@ -107,6 +104,12 @@ pub async fn fill(
         terminal.notice(format!("Next time, pass {}{profile}.", picked.join(" ")));
     }
     Ok(())
+}
+
+/// Whether a missing scope is picked rather than reported: only for table output on an
+/// interactive terminal without `--no-input`.
+pub fn can_ask(global: &GlobalFlags) -> bool {
+    global.output_format() == OutputFormat::Table && global.terminal().can_pick()
 }
 
 /// The pickers themselves, with one credential resolution and at most one organization token

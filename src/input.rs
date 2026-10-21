@@ -515,10 +515,13 @@ fn send_body(
     })?)
 }
 
+/// The error for a payment without a wallet, which a BOLT11 send extends with a shortlist.
+pub(crate) const WALLET_REQUIRED: &str = "--wallet is required for payment creation";
+
 fn payment(flags: &PaymentFlags, alias: Option<PaymentDirection>, scope: &Scope) -> Result<Value> {
-    let wallet = scope.wallet.ok_or_else(|| {
-        Error::usage("--wallet is required for payment creation").with_hint(WALLET_HINT)
-    })?;
+    let wallet = scope
+        .wallet
+        .ok_or_else(|| Error::usage(WALLET_REQUIRED).with_hint(WALLET_HINT))?;
     let checked = checked_payment(flags, alias)?;
     let currency = require(flags.currency, "currency")?;
     match checked {

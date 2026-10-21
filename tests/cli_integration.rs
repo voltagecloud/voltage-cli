@@ -2810,6 +2810,209 @@ async fn serve_line_of_credit(
     respond(server, route("GET", summary_path), summary, times).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bolt11_send_without_a_wallet_shortlists_the_wallets_that_could_pay() {
+    let (server, dir) = fixture().await;
+    const USD: &str = "55555555-5555-4555-8555-555555555555";
+    const MAINNET: &str = "66666666-6666-4666-8666-666666666666";
+    const SHORT: &str = "77777777-7777-4777-8777-777777777777";
+    let funded = |currency: &str| json!([{"currency": currency, "available": {"amount": 5_000, "negative": false}}]);
+    Mock::given(method("GET"))
+        .and(path(wallets_path(ORG)))
+        .and(query_param("environment_id", ENV))
+        .respond_with(ok(json!([
+            {"id": WALLET, "name": "ops", "active": true, "network": "mutinynet",
+             "balances": funded("btc")},
+            {"id": USD, "name": "payroll", "active": true, "network": "signet",
+             "balances": funded("usd")},
+            {"id": MAINNET, "name": "treasury", "active": true, "network": "mainnet",
+             "balances": funded("btc")},
+            {"id": RESOURCE, "name": "empty", "active": true, "network": "mutinynet",
+             "balances": [{"currency": "btc", "available": {"amount": 9, "negative": true}}]},
+            {"id": SHORT, "name": "short", "active": true, "network": "signet", "limit": 500,
+             "balances": [{"currency": "btc", "available": {"amount": 400, "negative": false}}]}
+        ])))
+        .mount(&server)
+        .await;
+    let send = |extra: &[&str]| {
+        let mut args = vec![
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--invoice",
+            "lntbs10n1qqq",
+        ];
+        args.extend_from_slice(extra);
+        cli(dir.path(), &server)
+            .env_remove("VOLTAGE_EXECUTE")
+            .args(args)
+            .assert()
+    };
+    let listings = || async {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == wallets_path(ORG))
+            .count()
+    };
+
+    // Without --currency, a BTC and a USD wallet on the invoice's signet both qualify; the
+    // others say why not. A description lists the wallets as a real run would.
+    let error = json_error(&send(&[]).code(2));
+    assert_eq!(
+        error["error"]["message"],
+        "--wallet is required for payment creation"
+    );
+    let detail = &error["error"]["detail"];
+    assert_eq!(
+        detail["invoice"],
+        json!({"network": "signet", "amount_msats": 1000})
+    );
+    let flags = |id: &str| format!("--wallet {id} --org {ORG} --env {ENV}");
+    assert_eq!(
+        detail["candidates"],
+        json!([
+            {"wallet_id": WALLET, "name": "ops", "network": "mutinynet", "flags": flags(WALLET),
+             "needs_quote": false},
+            {"wallet_id": USD, "name": "payroll", "network": "signet", "flags": flags(USD),
+             "needs_quote": true,
+             "quote": format!("voltage quotes create --credit-line CREDIT_LINE_ID --network signet --amount 1 --unit sats --to usd --org {ORG} --env {ENV} --execute")}
+        ])
+    );
+    assert_eq!(
+        detail["excluded"],
+        json!([
+            {"wallet_id": MAINNET, "name": "treasury", "network": "mainnet", "reason": "wrong_network"},
+            {"wallet_id": RESOURCE, "name": "empty", "network": "mutinynet", "reason": "no_balance"},
+            {"wallet_id": SHORT, "name": "short", "network": "signet", "reason": "insufficient_balance"}
+        ])
+    );
+    assert!(
+        detail["basis"]
+            .as_str()
+            .unwrap()
+            .contains("a shortlist, not a guarantee")
+    );
+    let hint = error["error"]["hint"].as_str().unwrap();
+    assert!(
+        hint.contains(&format!("`{}` (ops)", flags(WALLET))),
+        "{hint}"
+    );
+    assert_eq!(listings().await, 1);
+
+    // --currency usd leaves only the USD wallet.
+    let error = json_error(&send(&["--currency", "usd"]).code(2));
+    let candidates = error["error"]["detail"]["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["wallet_id"], USD);
+    assert_eq!(listings().await, 2);
+
+    // When none qualifies, human output names each wallet's reason in the hint.
+    let human = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .env_remove("VOLTAGE_EXECUTE")
+        .args([
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--currency",
+            "usd",
+            "--invoice",
+            "lnbc10u1qqq",
+            "--output",
+            "table",
+        ])
+        .assert()
+        .code(2);
+    let shown = stderr(&human);
+    assert!(
+        shown.contains("No wallet in this scope is active on mainnet with usd funds"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!("treasury ({MAINNET}) holds no usd")),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!("ops ({WALLET}) is on mutinynet")),
+        "{shown}"
+    );
+    // The hint already gives the shortlist, so human output adds no details block.
+    assert!(!shown.contains("details:"), "{shown}");
+    assert_eq!(listings().await, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bolt11_send_without_a_wallet_fails_before_listing_when_it_cannot_shortlist() {
+    let (server, dir) = fixture().await;
+    let send = |args: &[&str]| {
+        let mut full = vec!["payments", "send", "--env", ENV];
+        full.extend_from_slice(args);
+        cli(dir.path(), &server)
+            .env_remove("VOLTAGE_EXECUTE")
+            .args(full)
+            .assert()
+    };
+
+    // An invoice without a BOLT11 prefix cannot be matched, so nothing is listed.
+    let error = json_error(&send(&["--org", ORG, "--invoice", "bitcoin:bc1q"]).code(2));
+    assert_eq!(
+        error["error"]["message"],
+        "--wallet is required for payment creation"
+    );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("The invoice does not start with a BOLT11 prefix")
+    );
+    // A local mistake is reported first.
+    let error = json_error(&send(&["--org", ORG, "--invoice", "lnbc1", "--unit", "sats"]).code(2));
+    assert_eq!(error["error"]["message"], "--unit requires --amount");
+    // Without an organization there is nothing to list; the payment reports what is missing.
+    let error = json_error(&send(&["--invoice", "lnbc1"]).code(2));
+    assert!(error["error"]["detail"].is_null(), "{error}");
+    // An on-chain send is not shortlisted.
+    let error = json_error(&send(&["--org", ORG, "--address", "bc1q"]).code(2));
+    assert_eq!(
+        error["error"]["message"],
+        "--wallet is required for payment creation"
+    );
+    assert!(error["error"]["detail"].is_null());
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // Without a credential, or when the listing fails, the error says how to skip listing.
+    let missing = cli(dir.path(), &server)
+        .env_remove("VOLTAGE_EXECUTE")
+        .env_remove("VOLTAGE_API_KEY")
+        .args([
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--invoice",
+            "lnbc1",
+        ])
+        .assert()
+        .code(3);
+    assert!(stderr(&missing).contains("Or pass --wallet ID to skip listing wallets."));
+    route("GET", wallets_path(ORG))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let failed = send(&["--org", ORG, "--invoice", "lnbc1"]).failure();
+    assert!(stderr(&failed).contains("Or pass --wallet ID to skip listing wallets."));
+}
+
 #[tokio::test]
 async fn a_wallet_whose_currency_cannot_be_read_fails_and_names_the_flag() {
     let (server, dir) = fixture().await;
@@ -4505,7 +4708,8 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
     assert_eq!(interrupted.modes.0, interrupted.modes.1);
     assert_eq!(listings().await, 3);
 
-    // JSON output and --no-input neither ask nor list.
+    // JSON output and --no-input never ask. Without a picker, the BOLT11 send lists the
+    // wallets once to say which could pay; these report no network, so none qualifies.
     for extra in ["--json", "--no-input"] {
         let mut args = send.to_vec();
         args.push(extra);
@@ -4516,9 +4720,10 @@ async fn a_terminal_picks_a_missing_wallet_and_scripts_are_never_asked() {
                 .contains("--wallet is required for payment creation"),
             "{extra}"
         );
+        assert!(run.shown.contains("is on an unknown network"), "{extra}");
         assert!(!run.shown.contains("Wallet:"), "{extra}");
     }
-    assert_eq!(listings().await, 3);
+    assert_eq!(listings().await, 5);
 
     // An empty list says so instead of opening the picker.
     Mock::given(method("GET"))

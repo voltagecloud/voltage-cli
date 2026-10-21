@@ -945,7 +945,7 @@ fn next_step(invocation: &ApiInvocation, scope: &Scope, id: Option<Uuid>) -> Opt
 
 /// The effective scope as flags, so a command in a hint reaches the same organization,
 /// environment, and saved credential however the original command selected them.
-fn scope_flags(scope: &Scope) -> String {
+pub(crate) fn scope_flags(scope: &Scope) -> String {
     let org = scope.org.map(|org| format!(" --org {org}"));
     let envs = scope.envs.iter().map(|env| format!(" --env {env}"));
     let account = scope

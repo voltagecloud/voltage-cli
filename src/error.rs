@@ -87,6 +87,9 @@ pub enum ErrorDetail {
     Credential {
         credential_problem: CredentialRejection,
     },
+    /// A BOLT11 send without `--wallet`: the wallets in scope that could pay, and why the
+    /// others cannot.
+    WalletShortlist(crate::wallet_shortlist::Shortlist),
 }
 
 /// Why the auth service rejected a saved credential. `voltage context` reads no secret and
@@ -129,11 +132,19 @@ impl ErrorDetail {
         }
     }
 
+    /// A detail the hint already gives in prose, which human output leaves out.
+    pub fn repeats_hint(&self) -> bool {
+        matches!(self, Self::WalletShortlist(_))
+    }
+
     /// API payloads embedded in a detail can echo credentials; scrub them before reporting.
     pub fn redact(&mut self, secrets: &[&str]) {
         match self {
             Self::Http { data, .. } | Self::Payment(data) => redact(data, secrets),
-            Self::UncertainSubmission { .. } | Self::Pending { .. } | Self::Credential { .. } => {}
+            Self::UncertainSubmission { .. }
+            | Self::Pending { .. }
+            | Self::Credential { .. }
+            | Self::WalletShortlist(_) => {}
         }
     }
 }
