@@ -343,6 +343,13 @@ struct PaginationFlags {
 }
 
 #[derive(Debug, Args)]
+struct AllOrgsFlags {
+    /// List the wallets in every organization the browser login can see
+    #[arg(long, conflicts_with_all = ["org", "env"], help_heading = "Scope")]
+    all_orgs: bool,
+}
+
+#[derive(Debug, Args)]
 struct CheckoutFlags {
     /// Read the checkout credential from a file or - for stdin
     #[arg(long, value_name = "PATH|-", value_parser = parse_token_source, help_heading = "Authentication")]
@@ -579,6 +586,8 @@ pub struct ApiInvocation {
     pub filters: Vec<Filter>,
     pub query: Vec<QueryOverride>,
     pub all: bool,
+    /// `wallets list --all-orgs`: every organization the login can see, not the scope's.
+    pub all_orgs: bool,
     pub token_file: Option<InputSource>,
     pub origin: Option<Origin>,
     pub wait: Option<WaitTarget>,
@@ -733,6 +742,7 @@ fn api_invocation(
     let query = parse::<QueryFlags>(m)?;
     let execute = parse_if::<ExecuteFlags>(operation.method != Method::Get, m)?;
     let pagination = parse_if::<PaginationFlags>(operation.has_parameter("limit"), m)?;
+    let all_orgs = parse_if::<AllOrgsFlags>(operation.id.lists_all_organizations(), m)?;
     let checkout = parse_if::<CheckoutFlags>(operation.auth.is_checkout(), m)?;
     let origin = parse_if::<OriginFlags>(takes_origin(operation), m)?;
     let wait = parse_if::<WaitFlags>(operation.id.supports_wait(), m)?;
@@ -752,6 +762,7 @@ fn api_invocation(
         filters,
         query: query.query,
         all: pagination.is_some_and(|flags| flags.all),
+        all_orgs: all_orgs.is_some_and(|flags| flags.all_orgs),
         token_file: checkout.and_then(|flags| flags.token_file),
         origin: origin.and_then(|flags| flags.origin),
         wait: wait.and_then(|flags| flags.wait),
@@ -940,6 +951,9 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     }
     if operation.has_parameter("limit") {
         cmd = PaginationFlags::augment_args(cmd);
+    }
+    if operation.id.lists_all_organizations() {
+        cmd = AllOrgsFlags::augment_args(cmd);
     }
     if operation.auth.is_checkout() {
         cmd = CheckoutFlags::augment_args(cmd);

@@ -90,6 +90,10 @@ pub enum ErrorDetail {
     /// A BOLT11 send without `--wallet`: the wallets in scope that could pay, and why the
     /// others cannot.
     WalletShortlist(crate::wallet_shortlist::Shortlist),
+    /// `wallets list --all-orgs`: the organizations whose wallets could not be listed.
+    FailedOrganizations {
+        failed_organizations: Vec<crate::all_orgs::FailedOrganization>,
+    },
 }
 
 /// Why the auth service rejected a saved credential. `voltage context` reads no secret and
@@ -144,7 +148,8 @@ impl ErrorDetail {
             Self::UncertainSubmission { .. }
             | Self::Pending { .. }
             | Self::Credential { .. }
-            | Self::WalletShortlist(_) => {}
+            | Self::WalletShortlist(_)
+            | Self::FailedOrganizations { .. } => {}
         }
     }
 }

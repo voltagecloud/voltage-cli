@@ -5553,3 +5553,280 @@ async fn price_reports_sats_per_dollar_and_surfaces_service_rejections() {
         .code(1);
     assert!(stderr(&rejected).contains("Unsupported currency pair"));
 }
+
+/// A second organization for `wallets list --all-orgs`.
+const OTHER_ORG: &str = "55555555-5555-4555-8555-555555555555";
+
+/// A login that sees `ORG` (Acme) and `OTHER_ORG` (Beta), with an exchange for each.
+async fn two_organizations(auth: &MockServer) {
+    let organizations = json!({"organizations": [
+        {"id": ORG, "name": "Acme"}, {"id": OTHER_ORG, "name": "Beta"}
+    ]});
+    respond_once(auth, route("GET", "/users/current"), ok(organizations)).await;
+    organization_exchange(auth, LOGIN_ACCESS, ORG, "acme-access", 1).await;
+    organization_exchange(auth, LOGIN_ACCESS, OTHER_ORG, "beta-access", 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallets_list_all_orgs_merges_every_organization_the_login_sees() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    two_organizations(&auth).await;
+    respond_once(
+        &api,
+        route("GET", wallets_path(ORG))
+            .and(header("authorization", "Bearer acme-access"))
+            .and(query_param("inactive", "true")),
+        ok(json!([{"id": WALLET, "name": "ops", "network": "signet"}])),
+    )
+    .await;
+    respond_once(
+        &api,
+        route("GET", wallets_path(OTHER_ORG))
+            .and(header("authorization", "Bearer beta-access"))
+            .and(query_param("inactive", "true")),
+        ok(json!([{"id": RESOURCE, "name": "treasury", "network": "mainnet"}])),
+    )
+    .await;
+
+    // The command's filters apply in each organization, and each wallet names its own.
+    let result = cli(dir.path(), &api)
+        .args([
+            "wallets",
+            "list",
+            "--account",
+            LOGIN_NAME,
+            "--all-orgs",
+            "--inactive",
+            "true",
+        ])
+        .assert()
+        .success();
+    let envelope: Value = serde_json::from_str(&stdout(&result)).unwrap();
+    assert_eq!(
+        envelope["data"],
+        json!([
+            {"id": WALLET, "name": "ops", "network": "signet",
+             "organization_id": ORG, "organization_name": "Acme"},
+            {"id": RESOURCE, "name": "treasury", "network": "mainnet",
+             "organization_id": OTHER_ORG, "organization_name": "Beta"}
+        ])
+    );
+    assert_eq!(envelope["outcome"], "retrieved");
+    auth.verify().await;
+    api.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallets_list_all_orgs_shows_an_organization_column_for_people() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    two_organizations(&auth).await;
+    for org in [ORG, OTHER_ORG] {
+        let id = if org == ORG { WALLET } else { RESOURCE };
+        respond_once(
+            &api,
+            route("GET", wallets_path(org)),
+            ok(json!([{"id": id, "name": "w"}])),
+        )
+        .await;
+    }
+    let result = Command::from_std(human_process_at(dir.path(), &api.uri()))
+        .args([
+            "wallets",
+            "list",
+            "--account",
+            LOGIN_NAME,
+            "--all-orgs",
+            "--output",
+            "table",
+        ])
+        .assert()
+        .success();
+    let shown = stdout(&result);
+    let header = shown.lines().next().unwrap();
+    assert!(header.contains("ORGANIZATION NAME"), "{shown}");
+    assert!(shown.contains("Acme") && shown.contains("Beta"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallets_list_all_orgs_lists_the_others_then_fails_for_an_organization_that_fails() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    two_organizations(&auth).await;
+    respond_once(
+        &api,
+        route("GET", wallets_path(ORG)),
+        ok(json!([{"id": WALLET, "name": "ops"}])),
+    )
+    .await;
+    respond_once(
+        &api,
+        route("GET", wallets_path(OTHER_ORG)),
+        ResponseTemplate::new(403),
+    )
+    .await;
+    let args = ["wallets", "list", "--account", LOGIN_NAME, "--all-orgs"];
+
+    // The listed wallets are written, and the exit code is the failure's (403 is 3).
+    let result = cli(dir.path(), &api).args(args).assert().code(3);
+    let envelope: Value = serde_json::from_str(&stdout(&result)).unwrap();
+    assert_eq!(envelope["data"].as_array().unwrap().len(), 1);
+    assert_eq!(envelope["data"][0]["organization_name"], "Acme");
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["message"],
+        format!("Could not list wallets in 1 of 2 organizations: Beta ({OTHER_ORG})")
+    );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("The other organizations' wallets are listed.")
+    );
+    let failed = &error["error"]["detail"]["failed_organizations"];
+    assert_eq!(failed.as_array().unwrap().len(), 1);
+    assert_eq!(failed[0]["organization_id"], OTHER_ORG);
+    assert_eq!(failed[0]["name"], "Beta");
+    assert!(failed[0]["message"].as_str().is_some(), "{failed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallets_list_all_orgs_writes_nothing_when_every_organization_fails() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    two_organizations(&auth).await;
+    // Two different failures: each organization is named.
+    respond_once(
+        &api,
+        route("GET", wallets_path(ORG)),
+        ResponseTemplate::new(500),
+    )
+    .await;
+    respond_once(
+        &api,
+        route("GET", wallets_path(OTHER_ORG)),
+        ResponseTemplate::new(404),
+    )
+    .await;
+    let result = cli(dir.path(), &api)
+        .args(["wallets", "list", "--account", LOGIN_NAME, "--all-orgs"])
+        .assert()
+        .code(1);
+    assert!(stdout(&result).is_empty());
+    let error = json_error(&result);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Could not list wallets in 2 of 2 organizations"),
+        "{error}"
+    );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("voltage auth status")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallets_list_all_orgs_reports_a_revoked_login_as_itself() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    let organizations = json!({"organizations": [
+        {"id": ORG, "name": "Acme"}, {"id": OTHER_ORG, "name": "Beta"}
+    ]});
+    respond_once(&auth, route("GET", "/users/current"), ok(organizations)).await;
+    // The access token still lists organizations, but every exchange is refused.
+    respond(
+        &auth,
+        route("POST", "/oauth/token"),
+        ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"})),
+        2,
+    )
+    .await;
+    let result = cli(dir.path(), &api)
+        .args(["wallets", "list", "--account", LOGIN_NAME, "--all-orgs"])
+        .assert()
+        .code(3);
+    assert!(stdout(&result).is_empty());
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["message"],
+        "The saved login for person has expired or was revoked"
+    );
+    assert_eq!(
+        error["error"]["detail"]["credential_problem"],
+        "login_expired"
+    );
+    assert_eq!(
+        error["error"]["hint"],
+        format!(
+            "Sign in again with `voltage login --account person --auth-url {}`.",
+            auth.uri()
+        )
+    );
+    assert!(api.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallets_list_all_orgs_with_no_organizations_is_an_empty_list() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    respond_once(
+        &auth,
+        route("GET", "/users/current"),
+        ok(json!({"organizations": []})),
+    )
+    .await;
+    let result = cli(dir.path(), &api)
+        .args(["wallets", "list", "--account", LOGIN_NAME, "--all-orgs"])
+        .assert()
+        .success();
+    let envelope: Value = serde_json::from_str(&stdout(&result)).unwrap();
+    assert_eq!(envelope["data"], json!([]));
+    assert!(api.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wallets_list_all_orgs_refuses_an_api_key_and_a_named_organization() {
+    let (api, dir) = fixture().await;
+    // An API key belongs to one organization.
+    let result = cli(dir.path(), &api)
+        .args(["wallets", "list", "--all-orgs"])
+        .assert()
+        .code(3);
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["message"],
+        "--all-orgs needs a browser login, but the selected credential is an API key"
+    );
+    assert!(
+        error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--org ID")
+    );
+    // --org or --env names one organization, which --all-orgs contradicts.
+    for scope in ["--org", "--env"] {
+        let result = cli(dir.path(), &api)
+            .args(["wallets", "list", "--all-orgs", scope, ORG])
+            .assert()
+            .code(2);
+        assert!(
+            json_error(&result)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be used with"),
+            "{scope}"
+        );
+    }
+    assert!(api.received_requests().await.unwrap().is_empty());
+}

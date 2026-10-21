@@ -888,13 +888,26 @@ impl Resolver<'_> {
             Credential::ApiKey(key) => return Ok(ApiCredential::ApiKey(key)),
             Credential::Login(login) => login,
         };
-        let organization = scope.require_org()?;
-        let name = self.settings.account_name(scope)?;
         let token = self
-            .account_auth(scope)?
-            .exchange(&login.access_token, organization, &name)
+            .organization_token(scope, &login.access_token, self.flags.terminal())
             .await?;
         Ok(ApiCredential::OrganizationToken(token))
+    }
+
+    /// A login's access token traded for a token whose audience is the scope's organization.
+    /// `terminal` shows the exchange's progress; `wallets list --all-orgs` runs several side
+    /// by side, so it passes a quiet one and shows one progress line for all of them.
+    pub async fn organization_token(
+        self,
+        scope: &Scope,
+        access_token: &Secret,
+        terminal: Terminal,
+    ) -> Result<Secret> {
+        let organization = scope.require_org()?;
+        let name = self.settings.account_name(scope)?;
+        self.account_auth(scope, terminal)?
+            .exchange(access_token, organization, &name)
+            .await
     }
 
     /// List organizations visible to the login, or environments in the selected organization.
@@ -937,20 +950,17 @@ impl Resolver<'_> {
     /// One discovery listing with a token already in hand: the login's access token for
     /// organizations, or an organization token for environments.
     pub async fn list(self, scope: &Scope, what: Discovery, token: &Secret) -> Result<Value> {
-        let auth = self.account_auth(scope)?;
+        let auth = self.account_auth(scope, self.flags.terminal())?;
         match what {
             Discovery::Organizations => auth.organizations(token).await,
             Discovery::Environments => auth.environments(token, scope.require_org()?).await,
         }
     }
 
-    /// The auth service of the account the scope selects.
-    fn account_auth(self, scope: &Scope) -> Result<AuthService> {
+    /// The auth service of the account the scope selects, showing progress on `terminal`.
+    fn account_auth(self, scope: &Scope, terminal: Terminal) -> Result<AuthService> {
         let name = self.settings.account_name(scope)?;
-        AuthService::new(
-            &self.settings.account(&name)?.auth_url,
-            self.flags.terminal(),
-        )
+        AuthService::new(&self.settings.account(&name)?.auth_url, terminal)
     }
 }
 

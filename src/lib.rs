@@ -3,6 +3,7 @@
 //! `config`, `registry`, and `secret` are public so integration tests can seed saved
 //! credentials and walk the operation contract; everything else is process-internal.
 
+mod all_orgs;
 mod api;
 mod auth;
 mod backoff;
