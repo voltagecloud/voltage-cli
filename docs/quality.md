@@ -190,6 +190,10 @@ cargo install knots --version 1.16.0 --locked --root .work/tools
 KNOTS_BIN=.work/tools/bin/knots scripts/crap-report.sh
 ```
 
+`cargo-llvm-cov` also needs the `llvm-tools-preview` toolchain component. The
+`nix develop` shell includes it. With rustup, run
+`rustup component add llvm-tools-preview` once. CI does not install it.
+
 The script builds an instrumented binary and runs the whole test suite, which
 takes several minutes, and writes `crap.md` and `crap.json` below
 `target/crap/`. CI does not run it. Add meaningful tests or simplify risky code. Never game the score
