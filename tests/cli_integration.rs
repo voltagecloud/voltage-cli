@@ -3873,6 +3873,11 @@ async fn a_revoked_login_names_the_command_that_renews_it() {
             ),
             "expiring={expiring}"
         );
+        assert_eq!(
+            error["error"]["detail"],
+            json!({"credential_problem": "login_expired"}),
+            "expiring={expiring}"
+        );
     }
 }
 

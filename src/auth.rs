@@ -13,7 +13,7 @@ use crate::{
         InputSource, LOCK_TIMEOUT, Login, Scope, ScopeSources, Settings, Source, name_in_use,
         read_secret, shell_word, unreadable_name,
     },
-    error::CredentialSources,
+    error::{CredentialRejection, CredentialSources, ErrorDetail},
     secret::Secret,
     terminal::{self, Terminal},
 };
@@ -804,6 +804,9 @@ fn expired_login(account: &str, url: &str) -> Error {
     Error::auth(format!(
         "The saved login for {account} has expired or was revoked"
     ))
+    .with_detail(ErrorDetail::Credential {
+        credential_problem: CredentialRejection::LoginExpired,
+    })
     // A login of the same user replaces the stale one, so nothing has to be removed first.
     .with_hint(format!(
         "Sign in again with `voltage login --account {account}{auth_url}`."
@@ -1136,6 +1139,13 @@ mod tests {
     fn expired_logins_name_commands_that_can_be_pasted() {
         let hint = |account, url| expired_login(account, url).hint.unwrap();
         let default = base_url(AUTH_URL).unwrap();
+        // Agents detect a dead login by its problem, not by parsing the message.
+        assert!(matches!(
+            expired_login("me", &default).detail,
+            Some(ErrorDetail::Credential {
+                credential_problem: CredentialRejection::LoginExpired
+            })
+        ));
         assert_eq!(
             hint("me@example.com", &default),
             "Sign in again with `voltage login --account me@example.com`."

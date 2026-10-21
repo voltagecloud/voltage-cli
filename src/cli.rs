@@ -1248,7 +1248,7 @@ fn leaf(matches: &ArgMatches) -> (Vec<String>, &ArgMatches) {
 mod tests {
     use super::*;
     use crate::config::CredentialProblem as Problem;
-    use crate::error::ErrorKind as Kind;
+    use crate::error::{CredentialRejection, ErrorKind as Kind};
     use std::path::Path;
 
     const ENV: &str = "22222222-2222-4222-8222-222222222222";
@@ -1883,6 +1883,15 @@ mod tests {
             assert_eq!(serde_json::to_value(problem).unwrap(), name);
             assert!(text.contains(&format!("\n### `{name}`\n")), "{name}");
         }
+        let rejected = |rejection: CredentialRejection| match rejection {
+            CredentialRejection::LoginExpired => "login_expired",
+        };
+        let name = rejected(CredentialRejection::LoginExpired);
+        assert_eq!(
+            serde_json::to_value(CredentialRejection::LoginExpired).unwrap(),
+            name
+        );
+        assert!(text.contains(&format!("\n### `{name}`\n")), "{name}");
     }
 
     /// Every command below `cmd`, by path, with its rendered long help.
