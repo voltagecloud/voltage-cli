@@ -6,6 +6,18 @@ voltage wallets list --profile prod
 
 A wallet belongs to an organization and one environment. `--profile` (or `--org` and `--env`) selects them; see [log in and use profiles](login-and-profiles.md). Payment commands take the wallet with `--wallet WALLET_ID`, or `VOLTAGE_WALLET_ID` when no `--profile` is selected, and on a terminal they offer a picker when it is missing.
 
+## List wallets in every organization
+
+```sh
+voltage wallets list --all-orgs --account NAME
+```
+
+With a browser login, `--all-orgs` lists the wallets in every organization the login can see, in one table or JSON list. Each wallet carries `organization_id` and `organization_name`, and the table shows an organization column. The command's filters, such as `--inactive true`, apply in each organization. It ignores the organization and environment of a profile or of `VOLTAGE_ORGANIZATION_ID`, and it cannot be combined with `--org` or `--env`.
+
+The API lists one organization at a time, and each needs its own token. So the CLI lists the login's organizations, then exchanges a token and reads the wallets for each, four organizations at a time. An API key belongs to one organization, so `--all-orgs` refuses it; use `--org ID` instead.
+
+When some organizations fail, the wallets of the others are still written, and the command then fails with the first failure's exit code. The error names each failed organization, and `--json` lists them in `error.detail.failed_organizations`, each with `organization_id`, `name`, `message`, and the failure's `hint` and `detail` when it has them. When every organization fails, nothing is written. When they all fail the same way, as every token exchange does for a revoked login, the command reports that error itself, such as `credential_problem: login_expired` with its `voltage login` hint.
+
 ## Create a wallet
 
 A wallet is backed by a line of credit. Select one environment, then pass the name, the line of credit, the network, and the credit limit in the line of credit's integer base units:

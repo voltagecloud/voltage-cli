@@ -640,6 +640,28 @@ pub async fn wallets(
         .body)
 }
 
+/// One organization's wallets for `wallets list --all-orgs`, with the command's filters and
+/// `--query` overrides. It runs beside the other organizations' reads, so it shows no progress.
+pub async fn organization_wallets(
+    invocation: &ApiInvocation,
+    global: &GlobalFlags,
+    token: Secret,
+    organization: Uuid,
+) -> Result<Value> {
+    let scope = Scope {
+        org: Some(organization),
+        ..Scope::default()
+    };
+    let request = Request::build(invocation, &scope, None)?;
+    let credential = ApiCredential::OrganizationToken(token);
+    let mut api = Api::new(global, None, Authorization::Account(credential, None))?;
+    api.terminal = Terminal::new(true, global.no_input);
+    Ok(api
+        .send(Method::Get, &request.path, &request.query, None)
+        .await?
+        .body)
+}
+
 /// The currency of a wallet's line of credit, which decides how its payments are
 /// denominated and whether they need a quote. A wallet has no currency field of its own, so
 /// this reads the wallet for its line of credit, then the line of credit's summary.

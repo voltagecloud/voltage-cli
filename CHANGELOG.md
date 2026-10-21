@@ -19,6 +19,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - A 403 to `VOLTAGE_API_KEY` says that the key came from that variable and where the organization came from, and suggests `--account NAME` or unsetting the variable. `--json` reports both as `error.detail.credential_sources`.
 - Without a picker, `payments send --invoice` without `--wallet` names the wallets in scope that match the invoice's network and currency and have funds, counting their credit limit, with `--wallet ID` and the scope flags ready to paste, or says why each wallet does not qualify. A BTC wallet's funds must cover the invoice's amount, and a USD wallet comes with the quote it needs. `--json` reports them in `error.detail`. The list is a shortlist, not a guarantee.
 - Without `--env`, each wallet the shortlist names comes with its own `--env`, in its flags and its quote command, so the pasted command does not fail for a missing environment. The hint names at most five wallets that do not qualify; `--json` lists all of them.
+- `wallets list --all-orgs` lists the wallets in every organization a browser login can see, with an organization column, by reading the organizations in parallel. When some organizations fail, the others are listed and the command then fails, naming each failed organization in `error.detail.failed_organizations`.
 - The wallet picker shows a wallet's currency when its balances report one, and typing a currency filters on it. A wallet with no balance yet shows no currency.
 
 ### Changed

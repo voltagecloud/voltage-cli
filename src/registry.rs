@@ -132,6 +132,11 @@ impl OperationId {
         matches!(self, Self::CreatePayment | Self::CreateTreasuryMovement)
     }
 
+    /// `wallets list` can also list every organization the login can see (`--all-orgs`).
+    pub fn lists_all_organizations(self) -> bool {
+        self == Self::GetAllOrganizationsWalletsAsUser
+    }
+
     /// The request or response is a payment that `--wait` can follow to readiness or settlement.
     pub fn supports_wait(self) -> bool {
         self.submits_payment() || self == Self::GetPayment

@@ -14,9 +14,10 @@ use serde_json::{Map, Value};
 use std::io::Write;
 
 /// Preferred list columns, in display order.
-const COLUMNS: [&str; 12] = [
+const COLUMNS: [&str; 13] = [
     "id",
     "name",
+    "organization_name",
     "type",
     "direction",
     "payment_kind",

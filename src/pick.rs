@@ -34,6 +34,8 @@ impl Needs {
 
 fn needs(command: &Command) -> Needs {
     match command {
+        // `--all-orgs` lists every organization, so it needs none.
+        Command::Api(api) if api.all_orgs => Needs::default(),
         Command::Api(api) => {
             let operation = api.operation;
             let target = operation.target.map(|target| target.parameter_name());
@@ -238,6 +240,10 @@ mod tests {
         assert_eq!(
             needs_of(&["wallets", "list"]),
             Needs::new(true, false, false)
+        );
+        assert_eq!(
+            needs_of(&["wallets", "list", "--all-orgs"]),
+            Needs::default()
         );
         assert_eq!(
             needs_of(&["payments", "list"]),

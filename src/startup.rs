@@ -1,7 +1,7 @@
 //! Process composition: parse the command line, run one command, report, and exit.
 
 use crate::{
-    Error, Result,
+    Error, Result, all_orgs,
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery, Resolver},
     cli::{
@@ -115,6 +115,10 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
     };
     let mut session = Session::open(&command, &global, submission).await?;
     match command {
+        Command::Api(api) if api.all_orgs => {
+            let mut out = output(true)?;
+            all_orgs::wallets(&api, &global, session.resolver(), &session.scope, &mut out).await
+        }
         Command::Api(mut api) => {
             // `VOLTAGE_EXECUTE` and every local check run before the wallet is read.
             let execution = Execution::resolve(&api, config::execute_variable()?);
