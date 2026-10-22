@@ -30,7 +30,7 @@ voltage payments list --profile prod --statuses completed --statuses failed \
 
 `payments list --check-only true` returns payment checks; `false` returns ordinary payments. Omit the flag to include both.
 
-`wallets ledger list WALLET_ID --event-type adjustment` selects recorded balance adjustments, including deposits and withdrawals. These are accounting entries, not Bitcoin transfers. Use `--start-date` and `--end-date` for an explicit range; adjustment queries otherwise default to the past 30 days. `--event-type payment` selects payment entries. Combining adjustment entries with `--payment-id` returns an empty ledger.
+`wallets ledger list WALLET_ID --event-type adjustment` selects recorded balance adjustments, including deposits and withdrawals. These are accounting entries, not Bitcoin transfers. Use `--start-date` and `--end-date` for an explicit range; adjustment queries otherwise default to the past 30 days. Omit `--event-type` to select payment entries. Combining adjustment entries with `--payment-id` returns an empty ledger.
 
 ## Paging and timeouts
 

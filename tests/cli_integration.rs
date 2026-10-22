@@ -3819,6 +3819,41 @@ async fn payment_check_filter_is_optional_and_survives_cursor_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payment_ledger_omits_event_type_and_rejects_explicit_payment() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route(
+            "GET",
+            format!("/organizations/{ORG}/wallets/{WALLET}/ledger"),
+        )
+        .and(query_param_is_missing("event_type")),
+        ok(json!({"items": [{"id": RESOURCE}], "total": 1})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "ledger", "list", WALLET, "--org", ORG])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["data"]["items"][0]["id"], RESOURCE);
+    server.verify().await;
+    cli(dir.path(), &server)
+        .args([
+            "wallets",
+            "ledger",
+            "list",
+            WALLET,
+            "--org",
+            ORG,
+            "--event-type",
+            "payment",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adjustment_ledger_keeps_filters_when_paging_and_rejects_unknown_event_types() {
     let (server, dir) = fixture().await;
     for offset in [None, Some("1")] {

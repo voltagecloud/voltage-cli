@@ -4,7 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
-- Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type payment|adjustment`, from the refreshed API contract. Filters carry across pagination.
+- Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type adjustment`, from the refreshed API contract. Omit `--event-type` for payment ledger entries. Filters carry across pagination.
 
 ## 0.2.0 - 2026-10-22
 
