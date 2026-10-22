@@ -13,6 +13,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - `-o` is short for `--output`, as in `voltage wallets list -o json`.
 - Color on a terminal: help, `error:`, `hint:`, and `details:` labels. `--color auto|always|never` (or `--no-color`) decides, else `NO_COLOR`, `CLICOLOR_FORCE`, and `CLICOLOR`. JSON is never colored.
 - An animated spinner on interactive stderr, with the time waited after two seconds; `VOLTAGE_SPINNER=0` keeps it still. A payment wait on a terminal reads as a timeline: one line per status change and a closing `✓` or `✗` line.
+- `voltage login` on a terminal shows the verification URL as a clickable link, the code in bold, a countdown to the code's expiry, and a closing `✓ Logged in as EMAIL` line.
 
 ## 0.2.0 - 2026-10-22
 

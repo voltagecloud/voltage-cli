@@ -15,6 +15,7 @@ use crate::{
     },
     error::{CredentialRejection, CredentialSources, ErrorDetail, ResponseLimit},
     secret::Secret,
+    style::{Line, Role},
     terminal::Terminal,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -274,10 +275,15 @@ impl AuthService {
             if tokio::time::Instant::now() + Duration::from_secs(interval) >= deadline {
                 return Err(Error::timeout("Login expired; run voltage login again"));
             }
+            // Polling stops one interval before the deadline, so that is when the login ends.
+            let last_poll = deadline
+                .checked_sub(Duration::from_secs(interval))
+                .unwrap_or(deadline);
             self.terminal
-                .waiting(
-                    "Waiting for device approval...",
+                .expiring(
+                    "Waiting for approval in your browser...",
                     started,
+                    last_poll,
                     tokio::time::sleep(Duration::from_secs(interval)),
                 )
                 .await;
@@ -687,10 +693,7 @@ pub async fn login(
     }
     let device = auth.device_authorization().await?;
     let verification = device.verification_url()?;
-    terminal.important(format!(
-        "Open {verification}\nConfirm this code: {}",
-        device.user_code
-    ));
+    show_device_code(terminal, verification, &device.user_code);
     if !flags.no_browser && webbrowser::open(verification).is_err() {
         terminal.important("Could not open a browser; open the URL above manually.");
     }
@@ -698,6 +701,9 @@ pub async fn login(
     let login = token.into_login(None, None)?;
     let session = Secret::new(login.refresh_token.expose().to_owned());
     let saved = save_login(settings, &auth, login, flags, global, submission).await;
+    if let Ok(outcome) = &saved {
+        show_logged_in(terminal, outcome);
+    }
     if saved.is_err() {
         // A local storage/discovery failure must not silently orphan a remote session.
         if auth.revoke(&session).await.is_err() {
@@ -708,6 +714,44 @@ pub async fn login(
     }
     submission.session_settled();
     saved
+}
+
+/// Where to approve the login and the code to confirm there. A terminal gets a clickable link
+/// and a bold code; redirected stderr keeps the plain sentences.
+fn show_device_code(terminal: Terminal, verification: &str, code: &str) {
+    if !terminal.decorates() {
+        terminal.important(format!("Open {verification}\nConfirm this code: {code}"));
+        return;
+    }
+    let step = terminal.glyphs().step;
+    terminal.important_line(
+        Line::default()
+            .paint(Role::Hint, step)
+            .text(" Open ")
+            .link(verification),
+    );
+    terminal.important_line(
+        Line::default()
+            .paint(Role::Hint, step)
+            .text(" Confirm this code: ")
+            .styled(Role::Emphasis, code),
+    );
+}
+
+/// On a terminal, a closing line that names who signed in.
+fn show_logged_in(terminal: Terminal, outcome: &LoginOutcome) {
+    if !terminal.decorates() {
+        return;
+    }
+    let who = outcome.email.as_deref().unwrap_or(&outcome.account);
+    let mut line = Line::default()
+        .paint(Role::Success, terminal.glyphs().done)
+        .text(" Logged in as ")
+        .styled(Role::Emphasis, who);
+    if who != outcome.account {
+        line = line.text(&format!(" (account: {})", outcome.account));
+    }
+    terminal.notice_line(line);
 }
 
 /// Discover the identity behind a fresh login and save it; a local failure revokes the

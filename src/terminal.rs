@@ -64,7 +64,7 @@ impl Terminal {
     /// Optional status for a human, cleared when the guard drops; no control codes on
     /// redirected stderr.
     pub fn progress(self, label: impl Display) -> Progress {
-        self.status(label, None)
+        self.status(label, None, None)
     }
 
     /// Show `label` while `work` runs. The status cannot outlive the work: it clears on
@@ -81,11 +81,28 @@ impl Terminal {
         since: Instant,
         work: impl Future<Output = T>,
     ) -> T {
-        let _progress = self.status(label, Some(since));
+        let _progress = self.status(label, Some(since), None);
         work.await
     }
 
-    fn status(self, label: impl Display, since: Option<Instant>) -> Progress {
+    /// `waiting` for a wait that ends at `expires`: the line also counts down to it.
+    pub async fn expiring<T>(
+        self,
+        label: impl Display,
+        since: Instant,
+        expires: Instant,
+        work: impl Future<Output = T>,
+    ) -> T {
+        let _progress = self.status(label, Some(since), Some(expires));
+        work.await
+    }
+
+    fn status(
+        self,
+        label: impl Display,
+        since: Option<Instant>,
+        expires: Option<Instant>,
+    ) -> Progress {
         if self.quiet || !self.decorates() || !draws_control_codes() {
             return Progress::hidden();
         }
@@ -95,7 +112,7 @@ impl Terminal {
             glyphs: self.glyphs(),
         };
         // Labels are fixed text today; scrubbing keeps every escape the line's own.
-        Progress::show(scrub_line(&label.to_string()), since, look)
+        Progress::show(scrub_line(&label.to_string()), since, expires, look)
     }
 
     /// Optional information that `--quiet` suppresses.

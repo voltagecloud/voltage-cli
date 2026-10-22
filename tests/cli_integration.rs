@@ -1430,6 +1430,18 @@ async fn browser_device_login_handles_pending_and_slowdown_without_exposing_toke
     // Pending, then slow-down: the device grant interval is honored, never shortened.
     assert!(begin.elapsed() >= Duration::from_secs(20));
     assert_eq!(json_stdout(&login)["data"]["authenticated"], true);
+    // Redirected stderr keeps the plain lines, with no styles and no closing line.
+    let shown = stderr(&login);
+    assert!(
+        shown.contains(
+            "Open https://app.voltage.cloud/cli/authorize\nConfirm this code: ABCD-EFGH\n"
+        ),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("Logged in") && !shown.contains('\u{1b}'),
+        "{shown}"
+    );
     let combined = format!("{}{}", stdout(&login), stderr(&login));
     for secret in [
         "device-secret",
@@ -5773,7 +5785,57 @@ async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn device_approval_on_a_terminal_shows_how_long_it_has_waited() {
+async fn a_quiet_login_on_a_terminal_still_shows_the_code_but_no_closing_line() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/device_authorization"),
+        ok(json!({
+            "device_code":"device-secret","user_code":"ABCD-EFGH",
+            "verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/token"),
+        ok(json!({
+            "access_token":"login-access-secret","refresh_token":"login-refresh-secret",
+            "token_type":"Bearer","expires_in":600
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", "/users/current"),
+        ok(json!({"id":RESOURCE,"email":LOGIN_EMAIL})),
+    )
+    .await;
+    let uri = server.uri();
+    let args = [
+        "login",
+        "--auth-url",
+        &uri,
+        "--no-browser",
+        "--account",
+        LOGIN_NAME,
+        "--credential-store",
+        "file",
+        "--quiet",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    // The URL and code are needed to finish, so `--quiet` keeps them; the closing line goes.
+    assert!(shown.contains("› Confirm this code: ABCD-EFGH"), "{shown}");
+    assert!(!shown.contains("Logged in"), "{shown}");
+    assert!(!shown.contains("Waiting for approval"), "{shown}");
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn device_approval_on_a_terminal_links_the_url_and_counts_down() {
     let (server, dir) = fixture().await;
     respond_once(
         &server,
@@ -5812,10 +5874,25 @@ async fn device_approval_on_a_terminal_shows_how_long_it_has_waited() {
     ];
     let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
     assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    // The link's text is the whole URL it opens.
+    let url = "https://app.voltage.cloud/cli/authorize";
+    let link = format!("\u{1b}]8;;{url}\u{1b}\\{url}\u{1b}]8;;\u{1b}\\");
+    assert!(shown.contains(&format!("› Open {link}\r\n")), "{shown:?}");
     assert!(
-        run.shown.contains("Waiting for device approval... 0s"),
-        "{}",
-        run.shown
+        shown.contains("› Confirm this code: ABCD-EFGH\r\n"),
+        "{shown:?}"
+    );
+    assert!(run.shown.contains("\u{1b}[1mABCD-EFGH"), "{:?}", run.shown);
+    assert!(
+        shown.contains("Waiting for approval in your browser... 0s · expires in "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            "✓ Logged in as {LOGIN_EMAIL} (account: {LOGIN_NAME})"
+        )),
+        "{shown}"
     );
     server.verify().await;
 }
