@@ -4,6 +4,8 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- Promote an approved payment check using its original payment ID, request body, and scope. Recovery no longer mistakes the original check for an accepted send.
+
 ## 0.2.0 - 2026-10-22
 
 Commands that change something now only describe the change (exit code 6) unless `--execute` or `VOLTAGE_EXECUTE=1` asks to send them: add one of them to scripts that send payments or make other changes. Also new: `voltage context`, interactive pickers, `--no-input` and `--quiet`, and errors that name the next command.

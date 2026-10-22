@@ -11,8 +11,8 @@ use crate::{
     backoff::{Backoff, POLL_CEILING},
     cli::{ApiInvocation, GlobalFlags, Origin, Requested},
     config::{
-        API_URL, EXECUTE_VARIABLE, Scope, Settings, Source, new_private, private_dir, read_private,
-        read_secret, shell_word,
+        API_URL, EXECUTE_VARIABLE, Scope, Settings, Source, atomic_write, new_private, private_dir,
+        read_private, read_secret, shell_word,
     },
     dry_run,
     error::{CredentialSources, ErrorDetail, ErrorKind},
@@ -904,9 +904,23 @@ impl Call<'_> {
         if operation.id == OperationId::CreatePayment && self.request.is_consequential(operation) {
             self.api.terminal.important(PAYMENT_FEE_LIMIT_NOTE);
         }
-        if let (Some(id), Some(body)) = (mutation.journal_id, &self.request.body) {
-            journal(settings, operation, scope, body, id, self.api.terminal)?;
-        }
+        let promoted_check = if let (Some(id), Some(body)) =
+            (mutation.journal_id, &self.request.body)
+        {
+            let promotion =
+                authorize_check_promotion(&self.api, settings, operation, scope, body, id).await?;
+            journal(
+                settings,
+                operation,
+                scope,
+                body,
+                id,
+                promotion,
+                self.api.terminal,
+            )?
+        } else {
+            false
+        };
         submission.record(operation.id, self.request.resource_id, scope);
         let sent = self
             .api
@@ -920,7 +934,15 @@ impl Call<'_> {
         let (response, reconciled) = match sent {
             Ok(response) => (response, false),
             Err(error) if mutation.reconcile && error.is_transport() => {
-                match reconcile_payment(&self.api, &self.request, scope).await {
+                match reconcile_payment(
+                    &self.api,
+                    &self.request,
+                    scope,
+                    operation.id,
+                    promoted_check,
+                )
+                .await
+                {
                     Some(response) => (response, true),
                     None => return Err(uncertain(error, &self.request, scope)),
                 }
@@ -1076,16 +1098,80 @@ struct JournalRecord {
     environment_ids: Vec<Uuid>,
     request_sha256: String,
     created_at: u64,
+    /// A stale check projection cannot prove that its promotion was submitted.
+    #[serde(default)]
+    promoted_check: bool,
 }
 
 impl JournalRecord {
+    fn new(operation: &Operation, scope: &Scope, body: &Value, id: Uuid) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        Ok(Self {
+            resource_id: id,
+            operation: operation.id,
+            organization_id: scope.org,
+            environment_ids: scope.envs.clone(),
+            request_sha256: hex::encode(Sha256::digest(serde_json::to_vec(body)?)),
+            created_at: auth::now(),
+            promoted_check: false,
+        })
+    }
+
     /// The same ID may be resubmitted only with the same request in the same scope.
     fn describes_same_request(&self, other: &Self) -> bool {
-        self.request_sha256 == other.request_sha256
+        self.resource_id == other.resource_id
+            && self.request_sha256 == other.request_sha256
             && self.organization_id == other.organization_id
             && self.environment_ids == other.environment_ids
             && self.operation == other.operation
     }
+}
+
+/// Promotion requires the original payload/scope and an approved send check from the API.
+/// A local journal alone is never proof that a check can be sent.
+async fn authorize_check_promotion(
+    api: &Api,
+    settings: &Settings,
+    operation: &Operation,
+    scope: &Scope,
+    body: &Value,
+    id: Uuid,
+) -> Result<bool> {
+    if operation.id != OperationId::CreatePayment {
+        return Ok(false);
+    }
+    let path = settings.dir.join(JOURNAL_DIR).join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut previous: JournalRecord = serde_json::from_str(&read_private(&path)?)?;
+    if previous.operation != OperationId::CheckPayment {
+        return Ok(false);
+    }
+    previous.operation = OperationId::CreatePayment;
+    let candidate = JournalRecord::new(operation, scope, body, id)?;
+    if !previous.describes_same_request(&candidate) {
+        return Err(Error::usage(
+            "A check can only be promoted with its original request and scope",
+        ));
+    }
+    let path = format!(
+        "/organizations/{}/environments/{}/payments/{id}",
+        scope.require_org()?,
+        scope.single_env()?
+    );
+    let response = api.read(&path).await?;
+    let payment = PaymentView::from_body(&response.body);
+    if payment.id != Some(id)
+        || payment.direction != Some(PaymentDirection::Send)
+        || response.body.get("status").and_then(Value::as_str) != Some("approved")
+        || response.body.get("check_only").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(Error::usage(
+            "Promotion requires an approved send with check_only=true; reconcile this ID before proceeding",
+        ));
+    }
+    Ok(true)
 }
 
 /// Record an ID-bearing mutation before submission so an ambiguous outcome can be reconciled.
@@ -1095,29 +1181,29 @@ fn journal(
     scope: &Scope,
     body: &Value,
     id: Uuid,
+    promotion: bool,
     terminal: Terminal,
-) -> Result<()> {
-    use sha2::{Digest, Sha256};
+) -> Result<bool> {
     private_dir(&settings.dir)?;
     let dir = settings.dir.join(JOURNAL_DIR);
     private_dir(&dir)?;
-    let record = JournalRecord {
-        resource_id: id,
-        operation: operation.id,
-        organization_id: scope.org,
-        environment_ids: scope.envs.clone(),
-        request_sha256: hex::encode(Sha256::digest(serde_json::to_vec(body)?)),
-        created_at: auth::now(),
-    };
+    let mut record = JournalRecord::new(operation, scope, body, id)?;
     let path = dir.join(format!("{id}.json"));
     if path.exists() {
-        let previous: JournalRecord = serde_json::from_str(&read_private(&path)?)?;
+        let mut previous: JournalRecord = serde_json::from_str(&read_private(&path)?)?;
+        if promotion && previous.operation == OperationId::CheckPayment {
+            previous.operation = OperationId::CreatePayment;
+        }
         if !previous.describes_same_request(&record) {
             return Err(Error::usage(
                 "This resource ID was previously used for a different request; reconcile it before proceeding",
             ));
         }
-        return Ok(());
+        if promotion {
+            record.promoted_check = true;
+            atomic_write(&path, &serde_json::to_vec(&record)?)?;
+        }
+        return Ok(promotion || previous.promoted_check);
     }
     let mut file = new_private(&path)?;
     file.write_all(&serde_json::to_vec(&record)?)?;
@@ -1126,7 +1212,7 @@ fn journal(
         "Resource ID: {id}. Recovery record: {}",
         path.display()
     ));
-    Ok(())
+    Ok(false)
 }
 
 /// What this command may have changed, for reporting an interruption. A write is recorded
@@ -1257,7 +1343,13 @@ pub(crate) fn profile_offer_interrupted(account: &str) -> Error {
 
 /// A read can establish acceptance without sending the mutation again. A missing
 /// projection remains uncertain and keeps the original recovery record.
-async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Option<Response> {
+async fn reconcile_payment(
+    api: &Api,
+    request: &Request,
+    scope: &Scope,
+    operation: OperationId,
+    promoted_check: bool,
+) -> Option<Response> {
     let id = request.resource_id?;
     let org = scope.org?;
     let env = scope.single_env().ok()?;
@@ -1266,7 +1358,13 @@ async fn reconcile_payment(api: &Api, request: &Request, scope: &Scope) -> Optio
         .await
         .ok()?
         .ok()?;
-    if PaymentView::from_body(&found.body).id != Some(id) {
+    if PaymentView::from_body(&found.body).id != Some(id)
+        || (operation == OperationId::CreatePayment
+            && found.body.get("check_only").and_then(Value::as_bool) == Some(true))
+        || (promoted_check
+            && (found.body.get("check_only").and_then(Value::as_bool) != Some(false)
+                || PaymentView::from_body(&found.body).direction != Some(PaymentDirection::Send)))
+    {
         return None;
     }
     api.terminal.important(format!(
@@ -2125,17 +2223,54 @@ mod tests {
         let id = Uuid::nil();
         let body = json!({"id": id, "wallet_id": WALLET});
         let terminal = Terminal::new(false, false);
-        journal(&settings, create_payment, &scope(), &body, id, terminal).unwrap();
-        journal(&settings, create_payment, &scope(), &body, id, terminal).unwrap();
+        journal(
+            &settings,
+            create_payment,
+            &scope(),
+            &body,
+            id,
+            false,
+            terminal,
+        )
+        .unwrap();
+        journal(
+            &settings,
+            create_payment,
+            &scope(),
+            &body,
+            id,
+            false,
+            terminal,
+        )
+        .unwrap();
         let changed = json!({"id": id, "wallet_id": ORG});
-        let error =
-            journal(&settings, create_payment, &scope(), &changed, id, terminal).unwrap_err();
+        let error = journal(
+            &settings,
+            create_payment,
+            &scope(),
+            &changed,
+            id,
+            false,
+            terminal,
+        )
+        .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Usage);
         let other_scope = Scope {
             envs: Vec::new(),
             ..scope()
         };
-        assert!(journal(&settings, create_payment, &other_scope, &body, id, terminal).is_err());
+        assert!(
+            journal(
+                &settings,
+                create_payment,
+                &other_scope,
+                &body,
+                id,
+                false,
+                terminal
+            )
+            .is_err()
+        );
         let record: JournalRecord = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join(JOURNAL_DIR).join(format!("{id}.json")))
                 .unwrap(),
