@@ -9,6 +9,7 @@ use crate::{
     Error, Result,
     auth::{self, ApiCredential, Resolver},
     backoff::{Backoff, POLL_CEILING},
+    balance,
     cli::{ApiInvocation, GlobalFlags, Origin, Requested},
     config::{
         API_URL, EXECUTE_VARIABLE, Scope, Settings, Source, new_private, private_dir, read_private,
@@ -19,8 +20,10 @@ use crate::{
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output},
     payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
+    price::{PRICE_URL, PriceService, UsdPerBtc},
     registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
+    style::Depth,
     terminal::Terminal,
     timeline::Timeline,
 };
@@ -32,7 +35,7 @@ use std::{
     collections::BTreeSet,
     io::Write,
     sync::{Mutex, OnceLock, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -630,6 +633,7 @@ pub async fn execute(
     }
     let call = Call {
         api,
+        global,
         invocation,
         scope,
         deadline: Instant::now() + global.timeout,
@@ -862,6 +866,7 @@ impl Mutation {
 /// method, so the request and output are not handed from step to step.
 struct Call<'a> {
     api: Api,
+    global: &'a GlobalFlags,
     invocation: &'a ApiInvocation,
     scope: &'a Scope,
     deadline: Instant,
@@ -906,9 +911,68 @@ impl Call<'_> {
                 self.write_pages(response, Outcome::Retrieved, false).await
             }
             ReadThen::Pages { follow } => {
+                if operation.id == OperationId::GetWallet && self.out.on_terminal() {
+                    self.lead_with_balance(&response.body).await?;
+                }
                 self.write_pages(response, Outcome::Retrieved, follow).await
             }
         }
+    }
+
+    /// On a terminal, put the wallet's balance and recent activity above its fields. The
+    /// price and payments reads are best effort: a failure leaves its line out.
+    async fn lead_with_balance(&self, wallet: &Value) -> Result<()> {
+        let mut headline = balance::Headline::from_wallet(wallet);
+        if headline.priceable.is_some() {
+            let base = self.global.price_url.as_deref().unwrap_or(PRICE_URL);
+            if let Ok(service) =
+                PriceService::new(base, balance::READ_LIMIT.min(self.global.timeout))
+                && let Ok(quote) = self
+                    .api
+                    .terminal
+                    .during("Reading the BTC price...", service.quote(None))
+                    .await
+                && let Ok(rate) = UsdPerBtc::parse(&quote.price)
+            {
+                headline.price(rate);
+            }
+        }
+        // The wallet's completed payments, newest first, as `payments list` would ask.
+        let uuid = |name: &str| wallet.get(name)?.as_str()?.parse::<Uuid>().ok();
+        let scope = Scope {
+            org: uuid("organization_id"),
+            envs: uuid("environment_id").into_iter().collect(),
+            wallet: uuid("id"),
+            ..Scope::default()
+        };
+        if scope.wallet.is_some()
+            && let Ok(mut request) = Request::scoped(operation(OperationId::GetPayments), &scope)
+        {
+            request.query.extend(
+                [
+                    ("statuses[]", "completed"),
+                    // Payment checks are not payments, so they add no volume.
+                    ("check_only", "false"),
+                    ("sort_order", "DESC"),
+                    ("limit", balance::ACTIVITY_LIMIT),
+                ]
+                .map(|(name, value)| (name.to_owned(), value.to_owned())),
+            );
+            let read = self
+                .api
+                .send(Method::Get, &request.path, &request.query, None);
+            if let Ok(Ok(page)) = tokio::time::timeout(balance::READ_LIMIT, read).await {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |since| {
+                        i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+                    });
+                headline.activity = Some(balance::activity(&page.body, now, &headline.currency));
+            }
+        }
+        let glyphs = self.api.terminal.glyphs();
+        let depth = Depth::detect(|name| std::env::var(name).ok());
+        self.out.preface(&headline.lines(glyphs, depth))
     }
 
     /// Verify and journal, then send the mutation exactly once. A transport

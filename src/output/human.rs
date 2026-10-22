@@ -246,6 +246,16 @@ pub fn detail(out: &mut impl Write, detail: &Value) -> Result<()> {
     }
 }
 
+/// An API amount as human output shows it, such as `150,000 sats` or `-$2.50`.
+pub fn readable_amount(value: &Value) -> Option<String> {
+    amount(value)
+}
+
+/// An RFC 3339 UTC timestamp's seconds since the epoch.
+pub fn epoch_seconds(text: &str) -> Option<i64> {
+    timestamp(text).map(|(_, seconds)| seconds)
+}
+
 /// An outcome worth a color: what finished, what is still in flight, and what was not sent.
 fn outcome_role(outcome: Outcome) -> Option<Role> {
     match outcome {
