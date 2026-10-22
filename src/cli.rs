@@ -55,7 +55,7 @@ pub struct GlobalFlags {
     #[arg(long, global = true, help_heading = "Output")]
     pub json: bool,
     /// Output format
-    #[arg(long, global = true, value_enum, help_heading = "Output")]
+    #[arg(short = 'o', long, global = true, value_enum, help_heading = "Output")]
     pub output: Option<OutputFormat>,
     /// Save the complete response to a new owner-only file
     #[arg(long, global = true, value_name = "PATH", help_heading = "Output")]
@@ -1379,6 +1379,17 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn short_o_selects_the_output_format_before_or_after_the_subcommand() {
+        for args in [
+            ["voltage", "-o", "json", "wallets", "list"],
+            ["voltage", "wallets", "list", "-o", "json"],
+        ] {
+            let invocation = Invocation::try_parse_from(args).unwrap();
+            assert_eq!(invocation.global.output, Some(OutputFormat::Json));
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ Generated from the command definitions by `VOLTAGE_BLESS=1 cargo test`; do not e
 | Flag | Meaning |
 |---|---|
 | `--json` | Write a stable JSON result envelope |
-| `--output OUTPUT` | Output format (`table`, `json`, `ndjson`) |
+| `-o`, `--output OUTPUT` | Output format (`table`, `json`, `ndjson`) |
 | `--output-file PATH` | Save the complete response to a new owner-only file |
 | `--show-secrets` | Explicitly allow secrets in result output |
 | `-q`, `--quiet` | Hide optional progress and notices, not errors, results, or recovery IDs |
