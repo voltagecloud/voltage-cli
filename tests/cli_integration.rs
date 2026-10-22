@@ -2558,6 +2558,55 @@ async fn a_described_change_sends_nothing_records_nothing_and_omits_private_valu
 }
 
 #[tokio::test]
+async fn output_file_refusals_name_the_path_problem_and_send_nothing() {
+    let (server, dir) = fixture().await;
+    let existing = dir.path().join("result.json");
+    std::fs::write(&existing, "kept").unwrap();
+    let delete = ["wallets", "delete", WALLET, "--org", ORG, "--execute"];
+    let refused = cli(dir.path(), &server)
+        .args(delete)
+        .arg("--output-file")
+        .arg(&existing)
+        .assert()
+        .code(2);
+    let error = &json_error(&refused)["error"];
+    assert_eq!(
+        error["message"],
+        format!(
+            "{} already exists; --output-file writes only to a new file",
+            existing.display()
+        )
+    );
+    assert_eq!(
+        error["hint"],
+        "Pass a path that does not exist yet, or move the existing file. No change was sent."
+    );
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "kept");
+
+    // Any other failure keeps its cause and gets the same next step.
+    let missing_dir = dir.path().join("missing").join("result.json");
+    let refused = cli(dir.path(), &server)
+        .args(delete)
+        .arg("--output-file")
+        .arg(&missing_dir)
+        .assert()
+        .code(2);
+    let error = &json_error(&refused)["error"];
+    assert!(
+        error["message"].as_str().unwrap().starts_with(&format!(
+            "Cannot reserve output {}: ",
+            missing_dir.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(
+        error["hint"],
+        "Pass a path in a directory you can write to. No change was sent."
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn changes_are_described_unless_execute_or_voltage_execute_asks_to_send_them() {
     let (server, dir) = fixture().await;
     let output_file = dir.path().join("result.json");

@@ -4,6 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- `--output-file` on a path that already exists says so and suggests a new path, instead of showing an OS error; any other refusal keeps its cause and gets the same hint. Both say that no change was sent.
 - `-o` is short for `--output`, as in `voltage wallets list -o json`.
 
 ## 0.2.0 - 2026-10-22

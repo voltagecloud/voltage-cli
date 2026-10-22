@@ -188,6 +188,22 @@ pub struct Output {
     file: Option<File>,
 }
 
+/// Reserve `--output-file`. It is reserved before any request, so a refusal sent nothing; the
+/// error says why the path was refused and what to pass instead.
+fn reserve_output_file(path: &Path) -> Result<File> {
+    new_private(path).map_err(|error| {
+        if path.symlink_metadata().is_ok() {
+            Error::usage(format!(
+                "{} already exists; --output-file writes only to a new file",
+                path.display()
+            ))
+            .with_hint("Pass a path that does not exist yet, or move the existing file. No change was sent.")
+        } else {
+            error.and_hint("Pass a path in a directory you can write to. No change was sent.")
+        }
+    })
+}
+
 impl Output {
     /// `output_file` is reserved immediately as a new owner-only file so a secret never
     /// waits on a path that another process could create first.
@@ -196,7 +212,7 @@ impl Output {
         show_secrets: bool,
         output_file: Option<&Path>,
     ) -> Result<Self> {
-        let file = output_file.map(new_private).transpose()?;
+        let file = output_file.map(reserve_output_file).transpose()?;
         Ok(Self {
             format,
             show_secrets,
