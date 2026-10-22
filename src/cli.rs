@@ -546,6 +546,8 @@ pub enum FriendlyFlags {
     Quote(QuoteFlags),
     CreateWebhook(WebhookFlags),
     UpdateWebhook(UpdateWebhookFlags),
+    /// `webhooks test` without `--data` sends the contract's test event.
+    TestWebhook,
 }
 
 impl FriendlyFlags {
@@ -556,7 +558,7 @@ impl FriendlyFlags {
             Self::Payment(flags) => flags.id.is_none(),
             Self::Quote(flags) => flags.id.is_none(),
             Self::CreateWebhook(flags) => flags.id.is_none(),
-            Self::UpdateWallet(_) | Self::UpdateWebhook(_) => false,
+            Self::UpdateWallet(_) | Self::UpdateWebhook(_) | Self::TestWebhook => false,
         }
     }
 }
@@ -832,6 +834,7 @@ fn friendly_flags(id: OperationId, m: &ArgMatches) -> Result<Option<FriendlyFlag
         OperationId::RequestAQuote => FriendlyFlags::Quote(parse(m)?),
         OperationId::CreateWebhook => FriendlyFlags::CreateWebhook(parse(m)?),
         OperationId::UpdateWebhook => FriendlyFlags::UpdateWebhook(parse(m)?),
+        OperationId::TestWebhook => FriendlyFlags::TestWebhook,
         _ => return Ok(None),
     }))
 }
@@ -1079,6 +1082,9 @@ fn friendly_requirements(id: OperationId, command_name: &str) -> Option<&'static
         (OperationId::CreateWallet, "create") => Some(
             "Select one environment with --env or --profile, then pass --name, --credit-line, --network, and --limit.",
         ),
+        (OperationId::TestWebhook, _) => Some(
+            "Without --data, sends a test event: a new delivery_id and a payload of type test with event created.",
+        ),
         _ => None,
     }
 }
@@ -1155,7 +1161,10 @@ fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str
   voltage webhooks keys rotate WEBHOOK_ID --profile prod --output-file webhook-key.json --execute"
         }
         (OperationId::TestWebhook, _) => {
-            "  # Send a test delivery with a delivery_id and a sample payload
+            "  # Send the test event
+  voltage webhooks test WEBHOOK_ID --profile prod --execute
+
+  # Send your own delivery_id and payload
   voltage webhooks test WEBHOOK_ID --profile prod --data @test-delivery.json --execute"
         }
         (OperationId::StartWebhookAsUser, _) => {
