@@ -4,6 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- A command that acts on one wallet, such as `wallets get`, also takes the wallet as `--wallet ID`. If the argument and `--wallet` name different wallets, the command stops. Without either, the error names both ways to pass it. A profile's or `VOLTAGE_WALLET_ID`'s wallet is never used, so a delete always names its wallet.
 - A request that gets no response says why: a timeout (for the auth service, its fixed 30-second limit, which `--timeout` does not change), a connection not made within the 10-second connect limit (which `--timeout` does not change), a failed TLS connection, a connection that could not be made, or one that closed early. A hint names the next step. A write that timed out or closed early may have been applied, so its hint says to look up the resource ID before running the command again, never to retry. This covers API, auth, price, and checkout stream requests, which before said only that the request failed.
 - `--output-file` on a path that already exists says so and suggests a new path, instead of showing an OS error; any other refusal keeps its cause and gets the same hint. Both say that no change was sent.
 - `-o` is short for `--output`, as in `voltage wallets list -o json`.
