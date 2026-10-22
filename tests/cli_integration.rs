@@ -3758,6 +3758,131 @@ async fn cursor_pagination_is_the_default_and_carries_filters_across_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payment_check_filter_is_optional_and_survives_cursor_pages() {
+    for value in [None, Some("true"), Some("false")] {
+        let (server, dir) = fixture().await;
+        for cursor in [None, Some("next")] {
+            let mut matcher = route("GET", payments_path())
+                .and(query_param("pagination", "cursor"))
+                .and(query_param("statuses[]", "approved"));
+            matcher = match value {
+                Some(value) => matcher.and(query_param("check_only", value)),
+                None => matcher.and(query_param_is_missing("check_only")),
+            };
+            matcher = match cursor {
+                Some(cursor) => matcher.and(query_param("cursor", cursor)),
+                None => matcher.and(query_param_is_missing("cursor")),
+            };
+            respond_once(
+                &server,
+                matcher,
+                ok(json!({
+                    "items": [], "has_more": cursor.is_none(),
+                    "next_cursor": if cursor.is_none() { Some("next") } else { None }
+                })),
+            )
+            .await;
+        }
+        let mut command = cli(dir.path(), &server);
+        command.args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--statuses",
+            "approved",
+            "--all",
+        ]);
+        if let Some(value) = value {
+            command.args(["--check-only", value]);
+        }
+        command.assert().success();
+        server.verify().await;
+        let before = server.received_requests().await.unwrap().len();
+        cli(dir.path(), &server)
+            .args([
+                "payments",
+                "list",
+                "--org",
+                ORG,
+                "--env",
+                ENV,
+                "--check-only",
+                "invalid",
+            ])
+            .assert()
+            .code(2);
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adjustment_ledger_keeps_filters_when_paging_and_rejects_unknown_event_types() {
+    let (server, dir) = fixture().await;
+    for offset in [None, Some("1")] {
+        let mut matcher = route(
+            "GET",
+            format!("/organizations/{ORG}/wallets/{WALLET}/ledger"),
+        )
+        .and(query_param("event_type", "adjustment"))
+        .and(query_param("start_date", "2026-10-01T00:00:00Z"))
+        .and(query_param("end_date", "2026-10-22T00:00:00Z"))
+        .and(query_param("limit", "1"));
+        matcher = match offset {
+            Some(offset) => matcher.and(query_param("offset", offset)),
+            None => matcher.and(query_param_is_missing("offset")),
+        };
+        respond_once(
+            &server,
+            matcher,
+            ok(json!({
+                "items": [{"id": RESOURCE}], "limit": 1,
+                "offset": if offset.is_none() { 0 } else { 1 }, "total": 2
+            })),
+        )
+        .await;
+    }
+    cli(dir.path(), &server)
+        .args([
+            "wallets",
+            "ledger",
+            "list",
+            WALLET,
+            "--org",
+            ORG,
+            "--event-type",
+            "adjustment",
+            "--start-date",
+            "2026-10-01T00:00:00Z",
+            "--end-date",
+            "2026-10-22T00:00:00Z",
+            "--limit",
+            "1",
+            "--all",
+        ])
+        .assert()
+        .success();
+    server.verify().await;
+    let before = server.received_requests().await.unwrap().len();
+    cli(dir.path(), &server)
+        .args([
+            "wallets",
+            "ledger",
+            "list",
+            WALLET,
+            "--org",
+            ORG,
+            "--event-type",
+            "invented",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn offset_only_endpoints_page_by_total_count() {
     let (server, dir) = fixture().await;
     let quotes = format!("/organizations/{ORG}/environments/{ENV}/quotes");

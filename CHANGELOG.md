@@ -4,6 +4,8 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type payment|adjustment`, from the refreshed API contract. Filters carry across pagination.
+
 ## 0.2.0 - 2026-10-22
 
 Commands that change something now only describe the change (exit code 6) unless `--execute` or `VOLTAGE_EXECUTE=1` asks to send them: add one of them to scripts that send payments or make other changes. Also new: `voltage context`, interactive pickers, `--no-input` and `--quiet`, and errors that name the next command.
