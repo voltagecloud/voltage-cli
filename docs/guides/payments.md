@@ -75,3 +75,9 @@ voltage convert 21000 sats --to usd --at 2026-09-01T00:00:00Z
 A conversion reports the result in every unit of its currency (`msats`, `sats`, and `btc`, or `cents` and `usd`) together with the quote it used, including the minute the service rounded to.
 
 Related: [requests](requests.md), [safety model](../concepts/safety-model.md), [exit codes](../reference/exit-codes.md).
+
+## Promote an approved check
+
+After checking the API projection for an approved send with `check_only=true`, the CLI allows `payments create` or `payments send` to reuse the check's ID. Supply the identical request body and organization/environment scope, and authorize the send with `--execute`. Changed payloads or scope remain rejected.
+
+The recovery journal records the promotion before submission. If the send is interrupted, an old check projection does not establish acceptance. Reconcile the original ID; do not delete the journal or choose a replacement ID to bypass recovery. A promoted send requires an explicit `check_only=false` send projection for automatic reconciliation, including after restarting the CLI.
