@@ -12,7 +12,7 @@ use crate::{
     output::OutputFormat,
     payment::{AmountUnit, Currency, Network, PaymentDirection, ReceiveKind, WaitTarget},
     price::ConversionRequest,
-    registry::{Method, OPERATIONS, Operation, OperationId, Parameter, operation},
+    registry::{Method, OPERATIONS, Operation, OperationId, Parameter, ResourceTarget, operation},
     terminal::Terminal,
 };
 use clap::{
@@ -724,6 +724,35 @@ fn payment_alias_parent(create_payment: &Operation) -> &[String] {
         .unwrap_or_default()
 }
 
+/// The operation's resource ID: its argument or `--id`. A wallet operation also takes an
+/// explicit `--wallet`, which names the wallet everywhere else; a profile's or
+/// `VOLTAGE_WALLET_ID`'s wallet never selects it, so a delete always names its wallet.
+fn target_id(
+    operation: &Operation,
+    target: Option<TargetFlags>,
+    m: &ArgMatches,
+) -> Result<Option<Uuid>> {
+    let id = target.and_then(|target| target.id());
+    if !operation.targets_wallet() {
+        return Ok(id);
+    }
+    match (id, m.get_one::<Uuid>("wallet").copied()) {
+        (Some(id), Some(wallet)) if id != wallet => Err(Error::usage(format!(
+            "WALLET_ID {id} and --wallet {wallet} name different wallets"
+        ))
+        .with_hint("Pass the wallet once, as WALLET_ID or --wallet.")),
+        (Some(id), _) | (None, Some(id)) => Ok(Some(id)),
+        (None, None) => {
+            let command = operation.command.join(" ");
+            Err(
+                Error::usage(format!("{command} needs a wallet ID")).with_hint(format!(
+                    "Pass it as an argument or with --wallet, as in `voltage {command} WALLET_ID`. `voltage wallets list` shows the IDs."
+                )),
+            )
+        }
+    }
+}
+
 fn api_invocation(
     operation: &'static Operation,
     alias: Option<PaymentDirection>,
@@ -758,7 +787,7 @@ fn api_invocation(
     Ok(ApiInvocation {
         operation,
         alias,
-        resource_id: target.and_then(|target| target.id()),
+        resource_id: target_id(operation, target, m)?,
         filters,
         query: query.query,
         all: pagination.is_some_and(|flags| flags.all),
@@ -898,6 +927,18 @@ fn add_children(mut parent: ClapCommand, prefix: &[String]) -> ClapCommand {
 }
 
 /// The command for one operation: its positional target, documented filters, and options.
+/// The resource ID argument and `--id`, one of which is required. A wallet command can
+/// name its wallet with `--wallet` instead, so `target_id` checks that one was given.
+fn target_args(cmd: ClapCommand, target: ResourceTarget, wallet: bool) -> ClapCommand {
+    let cmd = TargetFlags::augment_args(cmd)
+        .mut_arg("resource_id", |arg| arg.value_name(target.value_name()));
+    if wallet {
+        cmd.mut_group("TargetFlags", |group| group.required(false))
+    } else {
+        cmd
+    }
+}
+
 fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapCommand {
     let command_name = cmd.get_name().to_owned();
     let mut notes = Vec::new();
@@ -915,7 +956,7 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     }
     if !operation.is_environment_scoped() {
         notes.push(if operation.targets_wallet() {
-            "Scope:\n  Wallets have organization scope. --env validates the wallet on reads and mutations; it does not change this endpoint's scope.".to_owned()
+            "Scope:\n  Wallets have organization scope. --env validates the wallet on reads and mutations; it does not change this endpoint's scope. --wallet ID names the wallet in place of WALLET_ID.".to_owned()
         } else {
             "Scope:\n  This endpoint has no environment filter. An environment in a profile does not narrow this operation.".to_owned()
         });
@@ -936,8 +977,7 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     // `-h` stays short; `--help` adds the notes.
     cmd = cmd.after_long_help(notes.join("\n\n"));
     if let Some(target) = operation.target {
-        cmd = TargetFlags::augment_args(cmd)
-            .mut_arg("resource_id", |arg| arg.value_name(target.value_name()));
+        cmd = target_args(cmd, target, operation.targets_wallet());
     }
     for parameter in operation
         .query_filters()
@@ -1378,6 +1418,57 @@ mod tests {
                 "voltage", "wallets", "create", "--data", "@a.json", "--name", "hello"
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn wallet_flag_names_the_wallet_a_wallet_command_acts_on() {
+        const OTHER: &str = "44444444-4444-4444-8444-444444444444";
+        let wallet = Some(WALLET.parse().unwrap());
+        assert_eq!(
+            api(&["wallets", "get", "--wallet", WALLET]).resource_id,
+            wallet
+        );
+        assert_eq!(
+            api(&["wallets", "get", WALLET, "--wallet", WALLET]).resource_id,
+            wallet
+        );
+        assert_eq!(
+            api(&["wallets", "delete", "--wallet", WALLET]).resource_id,
+            wallet
+        );
+
+        let differ =
+            Invocation::try_parse_from(["voltage", "wallets", "get", WALLET, "--wallet", OTHER])
+                .unwrap_err();
+        assert_eq!(differ.kind, Kind::Usage);
+        assert_eq!(
+            differ.message,
+            format!("WALLET_ID {WALLET} and --wallet {OTHER} name different wallets")
+        );
+        assert_eq!(
+            differ.hint.as_deref(),
+            Some("Pass the wallet once, as WALLET_ID or --wallet.")
+        );
+
+        let missing = Invocation::try_parse_from(["voltage", "wallets", "get"]).unwrap_err();
+        assert_eq!(missing.kind, Kind::Usage);
+        assert_eq!(missing.message, "wallets get needs a wallet ID");
+        assert!(
+            missing
+                .hint
+                .unwrap()
+                .contains("voltage wallets get WALLET_ID")
+        );
+
+        // Commands that act on something else still require their own ID.
+        let payment =
+            Invocation::try_parse_from(["voltage", "payments", "get", "--wallet", WALLET])
+                .unwrap_err();
+        assert!(
+            payment.message.contains("<PAYMENT_ID|--id <ID>>"),
+            "{}",
+            payment.message
         );
     }
 

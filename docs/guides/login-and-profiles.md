@@ -35,7 +35,7 @@ With several saved credentials, select one with `--account` or through a profile
 
 ## Scope
 
-A resource ID is positional, or passed as `--id ID`, as in `voltage wallets get --id WALLET_ID`. The enclosing scope comes from `--org`, `--env`, `--wallet`, and `--webhook`:
+A resource ID is positional, or passed as `--id ID`, as in `voltage wallets get --id WALLET_ID`. A command that acts on one wallet also takes it as `--wallet WALLET_ID`; a profile's or `VOLTAGE_WALLET_ID`'s wallet never selects it. The enclosing scope comes from `--org`, `--env`, `--wallet`, and `--webhook`:
 
 ```sh
 voltage wallets list --org ORG_ID --env ENV_ID
