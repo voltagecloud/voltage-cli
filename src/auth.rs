@@ -13,7 +13,7 @@ use crate::{
         InputSource, LOCK_TIMEOUT, Login, Scope, ScopeSources, Settings, Source, name_in_use,
         read_secret, shell_word, unreadable_name,
     },
-    error::{CredentialRejection, CredentialSources, ErrorDetail},
+    error::{CredentialRejection, CredentialSources, ErrorDetail, ResponseLimit},
     secret::Secret,
     terminal::{self, Terminal},
 };
@@ -37,7 +37,8 @@ const MAX_LOGIN_WAIT: u64 = 600;
 const MIN_POLL_INTERVAL: u64 = 5;
 const MAX_POLL_INTERVAL: u64 = 600;
 const SLOW_DOWN_STEP: u64 = 5;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `TransportFailure::ConnectTimeout` names this limit in its message.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Auth responses are small JSON documents; anything larger is not one.
 const MAX_AUTH_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -188,9 +189,14 @@ async fn auth_request(
     terminal: Terminal,
 ) -> Result<AuthResponse> {
     let _progress = terminal.progress("Waiting for auth service...");
-    let response = request.send().await.map_err(|_| {
-        Error::transport(
-            "Authentication request failed; no token request was automatically retried",
+    let response = request.send().await.map_err(|error| {
+        Error::no_response(
+            &error,
+            "Authentication request",
+            "; no token request was automatically retried",
+            "auth",
+            ResponseLimit::Fixed(AUTH_TIMEOUT),
+            false,
         )
     })?;
     let status = response.status().as_u16();
@@ -1295,6 +1301,31 @@ mod tests {
         absorb_chunk(&mut body, bytes::Bytes::from(b"tok".to_vec()));
         absorb_chunk(&mut body, bytes::Bytes::from_static(b"en"));
         assert_eq!(&body[..], b"token");
+    }
+
+    #[tokio::test]
+    async fn an_auth_timeout_names_its_fixed_limit_not_timeout_flag() {
+        // The listener takes the connection but never answers. The client's short limit
+        // stands in for AUTH_TIMEOUT, which the message must still name.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let request = client(Duration::from_millis(100))
+            .unwrap()
+            .get(format!("http://{}/", silent.local_addr().unwrap()));
+        let Err(error) = auth_request(request, Terminal::new(true, true)).await else {
+            panic!("a silent auth service must fail");
+        };
+        assert_eq!(error.kind, crate::error::ErrorKind::Transport);
+        assert_eq!(
+            error.message,
+            "Authentication request failed: no response within 30 seconds; no token request was automatically retried"
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some(
+                "Retry. The auth service has a fixed 30-second limit, which --timeout does not change."
+            )
+        );
+        drop(silent);
     }
 
     #[tokio::test]

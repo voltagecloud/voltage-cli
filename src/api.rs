@@ -15,7 +15,7 @@ use crate::{
         read_secret, shell_word,
     },
     dry_run,
-    error::{CredentialSources, ErrorDetail, ErrorKind},
+    error::{CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output},
     payment::{
@@ -245,12 +245,26 @@ impl Api {
             .request(method.into(), path, query, body)
             .send()
             .await
-            .map_err(|_| {
-                Error::transport(if read_only {
-                    "HTTP read request failed. Check the API URL and whether the API service is running."
+            .map_err(|error| {
+                if read_only {
+                    Error::no_response(
+                        &error,
+                        "HTTP read request",
+                        "",
+                        "API",
+                        ResponseLimit::Timeout,
+                        false,
+                    )
                 } else {
-                    "HTTP request failed; a write may have been submitted. No mutation was retried."
-                })
+                    Error::no_response(
+                        &error,
+                        "HTTP request",
+                        "; a write may have been submitted. No mutation was retried.",
+                        "API",
+                        ResponseLimit::Timeout,
+                        true,
+                    )
+                }
             })?;
         let status = response.status().as_u16();
         let retry_after = retry_after(response.headers());
@@ -336,7 +350,16 @@ impl Api {
                     .send(),
             )
             .await
-            .map_err(|_| Error::transport("Could not open checkout event stream"))?;
+            .map_err(|error| {
+                Error::no_response(
+                    &error,
+                    "Opening the checkout event stream",
+                    "",
+                    "API",
+                    ResponseLimit::Timeout,
+                    false,
+                )
+            })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             return Err(Error::new(
