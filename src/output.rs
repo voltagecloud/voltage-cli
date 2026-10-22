@@ -7,9 +7,9 @@ mod human;
 
 use crate::{
     Error, Result,
-    config::new_private,
-    error::ErrorDetail,
-    style::{self, ColorChoice, Role},
+    config::{EXECUTE_VARIABLE, new_private},
+    error::{ErrorDetail, ErrorKind},
+    style::{self, ColorChoice, Glyphs, Line, Role},
     terminal::{self, scrub_line},
 };
 use clap::ValueEnum;
@@ -333,9 +333,23 @@ pub fn report_error(error: &Error, format: OutputFormat, color: ColorChoice) {
     redact(&mut body, &[]);
     if format.is_machine_readable() {
         eprintln!("{body}");
+    } else if error.kind == ErrorKind::NotExecuted && std::io::stderr().is_terminal() {
+        // The description above says it was not sent; what is left is how to send it.
+        let step = Glyphs::detect(|name| std::env::var(name).ok()).step;
+        style::write_stderr(color, &format!("{}\n", send_it(step).as_str()));
     } else {
         style::write_stderr(color, &human_error(error, &body["error"]["detail"]));
     }
+}
+
+/// On a terminal, the line after a described change.
+fn send_it(step: &'static str) -> Line {
+    Line::default()
+        .paint(Role::Hint, step)
+        .text(" Send it: add ")
+        .styled(Role::Emphasis, "--execute")
+        .text(", or set ")
+        .styled(Role::Emphasis, &format!("{EXECUTE_VARIABLE}=1"))
 }
 
 /// The human error report with painted labels, which the stream strips when color is off.
@@ -362,6 +376,18 @@ fn human_error(error: &Error, detail: &Value) -> String {
         }
     }
     report
+}
+
+/// A JSON object as the aligned, scrubbed `field  value` lines human output uses.
+pub fn field_lines(value: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    match human::detail(&mut lines, value) {
+        Ok(()) => String::from_utf8_lossy(&lines)
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// The part of an error's detail a person needs. A client error (4xx) shows the API's error

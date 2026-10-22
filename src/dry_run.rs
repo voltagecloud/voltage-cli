@@ -12,11 +12,14 @@ use crate::{
     cli::{ApiInvocation, BodySource, GlobalFlags},
     config::API_URL,
     input::{PaginationMode, Request},
-    output::{Envelope, Outcome},
+    output::{self, Envelope, Outcome},
+    payment::PaymentDirection,
     registry::{AuthScheme, Method},
+    style::{Line, Role},
+    terminal::Terminal,
 };
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Body fields whose values are identifiers, enums, or amounts. Everything else, including
 /// invoices, addresses, descriptions, names, URLs, and metadata, is omitted by default.
@@ -132,6 +135,84 @@ pub fn describe(
     ))
 }
 
+/// On a terminal, say in words what the described change would do and the values it would
+/// use, before the description's full details. It shows only what the description shows.
+pub fn announce(terminal: Terminal, invocation: &ApiInvocation, described: &Envelope) {
+    let caution = Line::default()
+        .paint(Role::Caution, "!")
+        .text(" Not sent: this would ")
+        .styled(Role::Emphasis, &action(invocation));
+    terminal.notice_line(caution);
+    for line in output::field_lines(&facts(invocation, described)) {
+        terminal.notice_line(Line::default().text(&format!("  {line}")));
+    }
+    terminal.notice_line(Line::default());
+}
+
+/// The change in words: the payment direction for `payments send` and `receive`, else the
+/// operation's summary, such as "delete a wallet".
+fn action(invocation: &ApiInvocation) -> String {
+    match invocation.alias {
+        Some(PaymentDirection::Send) => "send a payment".into(),
+        Some(PaymentDirection::Receive) => "receive a payment".into(),
+        None => {
+            let summary = invocation.operation.description.trim_end_matches('.');
+            let summary = summary.strip_suffix(" as a user").unwrap_or(summary);
+            let mut chars = summary.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_lowercase().chain(chars).collect()
+            })
+        }
+    }
+}
+
+/// The target resource and the body values the description shows. Omitted values and an
+/// `id` generated only for the description are left out, and a send's `data` fields read as
+/// the payment's own.
+fn facts(invocation: &ApiInvocation, described: &Envelope) -> Value {
+    let mut facts = Map::new();
+    // The request path's target, which a raw `--data` body's own `id` does not change.
+    if let (Some(target), Some(id)) = (invocation.operation.target, invocation.resource_id) {
+        facts.insert(
+            target.parameter_name().into(),
+            Value::String(id.to_string()),
+        );
+    }
+    let Some(Value::Object(body)) = described.data.get("body").and_then(shown) else {
+        return Value::Object(facts);
+    };
+    for (key, value) in body {
+        match value {
+            _ if key == "id" && generated_id(invocation) => {}
+            Value::Object(data) if key == SEND_DATA => {
+                for (key, value) in data {
+                    facts.entry(key).or_insert(value);
+                }
+            }
+            value => {
+                facts.entry(key).or_insert(value);
+            }
+        }
+    }
+    Value::Object(facts)
+}
+
+/// `value` without its omitted parts, or `None` when nothing is left.
+fn shown(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(text) if text == OMITTED => None,
+        Value::Object(map) => {
+            let kept = map
+                .iter()
+                .filter_map(|(key, value)| Some((key.clone(), shown(value)?)))
+                .collect::<Map<_, _>>();
+            (!kept.is_empty()).then_some(Value::Object(kept))
+        }
+        Value::Null => None,
+        other => Some(other.clone()),
+    }
+}
+
 /// A friendly create built its own `id` because `--id` was not given.
 fn generated_id(invocation: &ApiInvocation) -> bool {
     match &invocation.body {
@@ -185,7 +266,104 @@ fn contains_omission(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Command, Invocation};
     use serde_json::json;
+    use uuid::Uuid;
+
+    const WALLET: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn api(args: &[&str]) -> ApiInvocation {
+        let mut full = vec!["voltage"];
+        full.extend_from_slice(args);
+        match Invocation::try_parse_from(full).unwrap().command {
+            Command::Api(api) => *api,
+            Command::Local(local) => panic!("expected an API command, got {local:?}"),
+        }
+    }
+
+    fn described(body: Value, resource_id: Option<Uuid>) -> Envelope {
+        Envelope::new(None, json!({"body": body}), resource_id, Outcome::DryRun)
+    }
+
+    #[test]
+    fn a_change_reads_as_its_payment_direction_or_its_summary() {
+        let send = api(&["payments", "send", "--wallet", WALLET, "--invoice", "lnbc1"]);
+        assert_eq!(action(&send), "send a payment");
+        let receive = api(&[
+            "payments",
+            "receive",
+            "--kind",
+            "bolt11",
+            "--currency",
+            "btc",
+        ]);
+        assert_eq!(action(&receive), "receive a payment");
+        assert_eq!(
+            action(&api(&["wallets", "delete", WALLET])),
+            "delete a wallet"
+        );
+        // A trailing period and "as a user" are dropped from the API's summary.
+        assert_eq!(
+            action(&api(&["quotes", "create", "--wallet", WALLET])),
+            "request a currency conversion quote"
+        );
+        assert_eq!(
+            action(&api(&[
+                "wallets", "policies", "update", WALLET, "--data", "@p.json"
+            ])),
+            "update a wallet's policies"
+        );
+    }
+
+    #[test]
+    fn facts_name_the_target_and_the_shown_values_only() {
+        let delete = api(&["wallets", "delete", WALLET]);
+        let wallet = Uuid::parse_str(WALLET).unwrap();
+        assert_eq!(
+            facts(&delete, &described(Value::Null, Some(wallet))),
+            json!({"wallet_id": WALLET})
+        );
+        // A raw body's `id` can differ from the argument; the target is the one the path uses.
+        let other = "22222222-2222-4222-8222-222222222222";
+        let update = api(&["wallets", "update", WALLET, "--data", "@b.json"]);
+        let body = json!({"id": other, "name": "x"});
+        let other_id = Uuid::parse_str(other).unwrap();
+        assert_eq!(
+            facts(&update, &described(body, Some(other_id)))["wallet_id"],
+            json!(WALLET)
+        );
+        // A send's `data` fields are its own; omitted values and the generated ID are left out.
+        let send = api(&["payments", "send", "--wallet", WALLET, "--invoice", "lnbc1"]);
+        let body = json!({
+            "id": "generated", "wallet_id": WALLET, "type": "bolt11", "currency": "btc",
+            "data": {"payment_request": OMITTED, "amount": {"currency": "btc", "amount": 1000}},
+            "metadata": OMITTED, "note": null
+        });
+        assert_eq!(
+            facts(&send, &described(body, None)),
+            json!({"wallet_id": WALLET, "type": "bolt11", "currency": "btc",
+                "amount": {"currency": "btc", "amount": 1000}})
+        );
+        // An ID the person gave stays.
+        let chosen = api(&[
+            "payments",
+            "send",
+            "--wallet",
+            WALLET,
+            "--invoice",
+            "lnbc1",
+            "--id",
+            "44444444-4444-4444-8444-444444444444",
+        ]);
+        assert_eq!(
+            facts(
+                &chosen,
+                &described(json!({"id": "chosen", "data": OMITTED}), None)
+            ),
+            json!({"id": "chosen"})
+        );
+        assert_eq!(facts(&send, &described(json!(OMITTED), None)), json!({}));
+    }
 
     #[test]
     fn private_body_values_are_omitted_and_identifiers_and_amounts_kept() {
