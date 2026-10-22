@@ -6032,11 +6032,21 @@ async fn device_approval_on_a_terminal_links_the_url_and_counts_down() {
         shown.contains("Waiting for approval in your browser... 0s · expires in "),
         "{shown}"
     );
+    // The bolt and wordmark, in yellow and the brand color, lead the closing line.
+    let wordmark =
+        " /_  /  |___/\\___/_/\\__/\\_,_/\\_, /\\__/\r\n   //                       /___/\r\n\r\n";
     assert!(
         shown.contains(&format!(
-            "✓ Logged in as {LOGIN_EMAIL} (account: {LOGIN_NAME})"
+            "{wordmark}✓ Logged in as {LOGIN_EMAIL} (account: {LOGIN_NAME})"
         )),
         "{shown}"
+    );
+    assert!(
+        run.shown.contains(
+            "\u{1b}[1m\u{1b}[33m    __  \u{1b}[0m\u{1b}[1m\u{1b}[38;5;202m            ____\u{1b}[0m"
+        ),
+        "{:?}",
+        run.shown
     );
     server.verify().await;
 }
