@@ -213,7 +213,8 @@ impl<'a> Session<'a> {
             ),
             LocalCommand::Auth {
                 command: AuthCommand::Status,
-            } => Envelope::local(auth::status(&self.settings, scope, global)?),
+            } => Envelope::local(auth::status(&self.settings, scope, global)?)
+                .map(|status| status.titled("voltage auth status")),
             LocalCommand::Auth {
                 command: AuthCommand::ImportKey(flags),
             } => {
@@ -229,7 +230,8 @@ impl<'a> Session<'a> {
                     .discover(scope, Discovery::Environments)
                     .await?,
             ),
-            LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?),
+            LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?)
+                .map(|context| context.titled("voltage context")),
             LocalCommand::Profiles { command } => {
                 profiles(command, &mut self.settings, scope, global.terminal()).await
             }
