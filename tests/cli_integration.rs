@@ -2557,6 +2557,38 @@ async fn a_described_change_sends_nothing_records_nothing_and_omits_private_valu
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn webhook_test_without_data_sends_the_test_event() {
+    let (server, dir) = fixture().await;
+    let test_path = format!("/organizations/{ORG}/environments/{ENV}/webhooks/{RESOURCE}/test");
+    respond_once(&server, route("POST", test_path), accepted()).await;
+    let sent = cli(dir.path(), &server)
+        .args([
+            "webhooks",
+            "test",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--execute",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&sent)["http_status"], 202);
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["payload"]["type"], "test");
+    assert_eq!(body["payload"]["detail"]["event"], "created");
+    assert!(
+        body["delivery_id"]
+            .as_str()
+            .unwrap()
+            .parse::<uuid::Uuid>()
+            .is_ok()
+    );
+}
+
 #[test]
 fn requests_without_a_response_say_why_and_name_the_next_step() {
     let dir = private_tempdir();

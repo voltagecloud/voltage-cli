@@ -354,6 +354,41 @@ struct UpdateWebhookBody {
     events: Vec<Map<String, Value>>,
 }
 
+/// The contract's test delivery: `payload` of type `test`, whose only event is `created`.
+#[derive(Serialize)]
+struct TestWebhookBody {
+    delivery_id: Uuid,
+    payload: TestPayload,
+}
+
+#[derive(Serialize)]
+struct TestPayload {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    detail: TestDetail,
+}
+
+#[derive(Serialize)]
+struct TestDetail {
+    event: &'static str,
+    data: &'static str,
+}
+
+impl TestWebhookBody {
+    fn new() -> Self {
+        Self {
+            delivery_id: Uuid::new_v4(),
+            payload: TestPayload {
+                kind: "test",
+                detail: TestDetail {
+                    event: "created",
+                    data: "Test delivery from voltage webhooks test",
+                },
+            },
+        }
+    }
+}
+
 fn create_wallet(flags: &WalletFlags, scope: &Scope) -> Result<CreateWalletBody> {
     Ok(CreateWalletBody {
         id: new_id(flags.id),
@@ -592,6 +627,7 @@ fn friendly_body(
                 events: events(event)?,
             })?
         }
+        FriendlyFlags::TestWebhook => serde_json::to_value(TestWebhookBody::new())?,
     })
 }
 
@@ -1263,9 +1299,23 @@ mod tests {
             assert!(hint.contains("--unit usd --to btc"));
         }
         assert_eq!(
-            request_error(&["webhooks", "test", WALLET]),
+            request_error(&["payments", "check"]),
             "This operation requires --data @file or --data -"
         );
+    }
+
+    #[test]
+    fn webhook_test_without_data_sends_the_contract_test_event() {
+        let first = build(&["webhooks", "test", WALLET]).unwrap();
+        let body = first.body.unwrap();
+        assert_eq!(
+            body["payload"],
+            json!({"type": "test", "detail": {"event": "created", "data": "Test delivery from voltage webhooks test"}})
+        );
+        let delivery: Uuid = serde_json::from_value(body["delivery_id"].clone()).unwrap();
+        // Each test gets its own delivery ID.
+        let second = build(&["webhooks", "test", WALLET]).unwrap().body.unwrap();
+        assert_ne!(second["delivery_id"], json!(delivery));
     }
 
     #[test]
