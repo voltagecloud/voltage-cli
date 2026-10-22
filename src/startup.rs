@@ -14,6 +14,7 @@ use crate::{
     output::{Envelope, Output, OutputFormat, report_error, write_stdout},
     pick,
     price::{PRICE_URL, PriceService},
+    style::ColorChoice,
     terminal::Terminal,
     wallet_currency, wallet_shortlist,
 };
@@ -24,11 +25,13 @@ const BINARY_NAME: &str = "voltage";
 
 pub async fn run() -> ExitCode {
     let json_errors = cli::json_errors_requested(std::env::args_os());
-    let invocation = match Invocation::from_env() {
+    let color = ColorChoice::requested(std::env::args_os());
+    let invocation = match Invocation::from_env(color) {
         Ok(invocation) => invocation,
-        Err(failure) => return fail_parse(failure, json_errors),
+        Err(failure) => return fail_parse(failure, json_errors, color),
     };
     let format = invocation.global.output_format();
+    let color = invocation.global.color();
     let submission = SubmissionState::default();
     // Biased, with the interrupt first: tokio installs the SIGINT handler when `ctrl_c` is
     // first polled. Polled second, a command that reaches a prompt without awaiting would leave
@@ -52,15 +55,17 @@ pub async fn run() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.is_stdout_closed() => ExitCode::SUCCESS,
-        Err(error) => fail(error, format),
+        Err(error) => fail(error, format, color),
     }
 }
 
-fn fail_parse(failure: ParseFailure, json_errors: bool) -> ExitCode {
+fn fail_parse(failure: ParseFailure, json_errors: bool, color: ColorChoice) -> ExitCode {
     match failure {
-        ParseFailure::Validation(error) => fail(error, OutputFormat::select(json_errors, None)),
+        ParseFailure::Validation(error) => {
+            fail(error, OutputFormat::select(json_errors, None), color)
+        }
         ParseFailure::Clap(error) if error.use_stderr() && json_errors => {
-            fail(Error::usage(error.to_string()), OutputFormat::Json)
+            fail(Error::usage(error.to_string()), OutputFormat::Json, color)
         }
         ParseFailure::Clap(error) => {
             let writes_stdout = !error.use_stderr();
@@ -70,14 +75,14 @@ fn fail_parse(failure: ParseFailure, json_errors: bool) -> ExitCode {
                 Err(io) if writes_stdout && io.kind() == std::io::ErrorKind::BrokenPipe => {
                     ExitCode::SUCCESS
                 }
-                Err(io) => fail(io.into(), OutputFormat::select(false, None)),
+                Err(io) => fail(io.into(), OutputFormat::select(false, None), color),
             }
         }
     }
 }
 
-fn fail(error: Error, format: OutputFormat) -> ExitCode {
-    report_error(&error, format);
+fn fail(error: Error, format: OutputFormat, color: ColorChoice) -> ExitCode {
+    report_error(&error, format, color);
     process_exit(error.kind.exit_code())
 }
 

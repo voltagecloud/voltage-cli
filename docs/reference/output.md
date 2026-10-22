@@ -27,6 +27,8 @@ API fields stay inside `data`. With `--all`, JSON output collects the pages into
 
 Diagnostics, prompts, and progress go to stderr. Interactive stderr shows immediate, cancellable status for network requests and waits, with the time waited so far on payment waits and device approval; redirected stderr gets no spinner/control codes. `-q, --quiet` suppresses optional status and notices, never requested results, errors, warnings, or recovery IDs.
 
+Human output and help are colored on a terminal: `error:` is red, `hint:` cyan, and `details:` dim, and color only marks a label, so the words read the same without it. `--color always|never` (or `--no-color`) decides; otherwise `NO_COLOR`, `CLICOLOR_FORCE`, `CLICOLOR`, `TERM=dumb`, and whether each stream is a terminal decide, separately for stdout and stderr. JSON, NDJSON, `--output-file`, and completions are never colored, even with `--color always`.
+
 Human errors start with `error:`, which leads with the API's reason when it rejects a request with a client error (HTTP 4xx), and may include a safe `hint:` and an indented `details:` block of `field  value` lines. `--json` reports the complete API response in `error.detail`, and makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
 
 Related: [scripting](../guides/scripting.md), [safety model](../concepts/safety-model.md#secrets-and-redaction).

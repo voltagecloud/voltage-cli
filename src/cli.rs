@@ -13,6 +13,7 @@ use crate::{
     payment::{AmountUnit, Currency, Network, PaymentDirection, ReceiveKind, WaitTarget},
     price::ConversionRequest,
     registry::{Method, OPERATIONS, Operation, OperationId, Parameter, ResourceTarget, operation},
+    style::{self, ColorChoice},
     terminal::Terminal,
 };
 use clap::{
@@ -66,6 +67,25 @@ pub struct GlobalFlags {
     /// Never prompt for a secret; supply it with --stdin or the environment instead
     #[arg(long, global = true, help_heading = "Safety")]
     pub no_input: bool,
+    /// When to color human output and help
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "WHEN",
+        default_value_t,
+        help_heading = "Output"
+    )]
+    pub color: ColorChoice,
+    /// Same as --color never
+    #[arg(
+        long,
+        global = true,
+        hide = true,
+        conflicts_with = "color",
+        help_heading = "Output"
+    )]
+    pub no_color: bool,
     /// Hide optional progress and notices, not errors, results, or recovery IDs
     #[arg(short = 'q', long, global = true, help_heading = "Output")]
     pub quiet: bool,
@@ -109,6 +129,14 @@ pub struct GlobalFlags {
 impl GlobalFlags {
     pub fn output_format(&self) -> OutputFormat {
         OutputFormat::select(self.json, self.output)
+    }
+
+    pub fn color(&self) -> ColorChoice {
+        if self.no_color {
+            ColorChoice::Never
+        } else {
+            self.color
+        }
     }
 
     pub fn terminal(&self) -> Terminal {
@@ -636,9 +664,13 @@ pub struct Invocation {
 
 impl Invocation {
     /// Parse process arguments without letting clap terminate the process. Startup decides
-    /// whether parse failures need clap's human rendering or the JSON error envelope.
-    pub fn from_env() -> std::result::Result<Self, ParseFailure> {
-        let matches = command().try_get_matches().map_err(ParseFailure::Clap)?;
+    /// whether parse failures need clap's human rendering or the JSON error envelope; `color`
+    /// colors clap's help and errors, since `--color` itself is not parsed yet.
+    pub fn from_env(color: ColorChoice) -> std::result::Result<Self, ParseFailure> {
+        let matches = command()
+            .color(color.as_clap())
+            .try_get_matches()
+            .map_err(ParseFailure::Clap)?;
         Self::from_matches(&matches).map_err(ParseFailure::Validation)
     }
 
@@ -868,7 +900,8 @@ pub fn command() -> ClapCommand {
     let root = ClapCommand::new("voltage")
         .version(env!("VOLTAGE_VERSION"))
         .subcommand_required(true)
-        .arg_required_else_help(true);
+        .arg_required_else_help(true)
+        .styles(style::HELP);
     let root = GlobalFlags::augment_args(root);
     let mut root = LocalCommand::augment_subcommands(root);
     for name in root

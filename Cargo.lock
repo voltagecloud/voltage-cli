@@ -2540,6 +2540,7 @@ dependencies = [
 name = "voltage-cli"
 version = "0.2.0"
 dependencies = [
+ "anstream",
  "arboard",
  "assert_cmd",
  "bytes",

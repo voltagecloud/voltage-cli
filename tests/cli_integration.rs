@@ -128,6 +128,74 @@ fn human_runtime_errors_have_a_prefix_and_safe_hint() {
     assert!(!error.contains("api_key"));
 }
 
+#[test]
+fn color_follows_the_flag_then_the_environment_and_never_reaches_json() {
+    let dir = private_tempdir();
+    let missing_org = |args: &[&str], env: &[(&str, &str)]| {
+        let mut cmd = Command::from_std(human_process_at(dir.path(), "http://127.0.0.1:9"));
+        let result = cmd
+            .envs(env.iter().copied())
+            .args(args)
+            .args(["wallets", "list"])
+            .assert()
+            .code(2);
+        stderr(&result)
+    };
+    let plain = missing_org(&["--output", "table"], &[]);
+    assert!(plain.starts_with("error: --org is required") && !plain.contains('\u{1b}'));
+    for (args, env, colored) in [
+        (&["--color", "always"][..], &[][..], true),
+        (&[], &[("CLICOLOR_FORCE", "1")], true),
+        // A command-line choice beats the environment either way.
+        (&["--color", "always"], &[("NO_COLOR", "1")], true),
+        (&["--color=never"], &[("CLICOLOR_FORCE", "1")], false),
+        (&["--no-color"], &[("CLICOLOR_FORCE", "1")], false),
+        (&[], &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")], false),
+        (&["--color", "auto"], &[], false),
+    ] {
+        let shown = missing_org(&[&["--output", "table"], args].concat(), env);
+        assert_eq!(shown.contains('\u{1b}'), colored, "{args:?} {env:?}");
+        // Color decorates labels; the words are unchanged.
+        assert_eq!(strip_styles(&shown), plain, "{args:?} {env:?}");
+    }
+    // JSON errors are byte-identical whatever color asks for.
+    let json = missing_org(&["--json"], &[]);
+    assert_eq!(
+        missing_org(&["--json", "--color", "always"], &[("CLICOLOR_FORCE", "1")]),
+        json
+    );
+    assert!(!json.contains('\u{1b}'));
+}
+
+#[test]
+fn help_and_parse_errors_follow_the_color_choice() {
+    let voltage = || {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
+        cmd.env_remove("NO_COLOR").env_remove("CLICOLOR_FORCE");
+        cmd
+    };
+    let help = |args: &[&str]| stdout(&voltage().args(args).arg("--help").assert().success());
+    assert!(!help(&[]).contains('\u{1b}'));
+    let colored = help(&["--color", "always"]);
+    assert!(colored.contains('\u{1b}'));
+    assert_eq!(strip_styles(&colored), help(&[]));
+    let typo = stderr(
+        &voltage()
+            .args(["--color=always", "paymnts"])
+            .assert()
+            .code(2),
+    );
+    assert!(typo.contains('\u{1b}') && strip_styles(&typo).starts_with("error:"));
+    let typo = stderr(
+        &voltage()
+            .args(["paymnts", "--no-color"])
+            .env("CLICOLOR_FORCE", "1")
+            .assert()
+            .code(2),
+    );
+    assert!(!typo.contains('\u{1b}'));
+}
+
 #[cfg(unix)]
 #[test]
 fn completion_output_treats_an_early_closing_pipe_as_success() {
@@ -201,6 +269,10 @@ fn human_process_at(dir: &Path, api_url: &str) -> std::process::Command {
         "VOLTAGE_STREAM_TOKEN",
         "VOLTAGE_CONFIG_DIR",
         "VOLTAGE_EXECUTE",
+        // A developer's color settings must not change the bytes tests compare.
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
     ] {
         cmd.env_remove(name);
     }
@@ -225,6 +297,19 @@ fn stdout(assertion: &Assert) -> String {
 
 fn stderr(assertion: &Assert) -> String {
     String::from_utf8_lossy(&assertion.get_output().stderr).into_owned()
+}
+
+/// Text without SGR styles (`ESC [ ... m`), the only escape sequences color adds.
+fn strip_styles(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1b}[") {
+        plain.push_str(&rest[..start]);
+        let end = rest[start..].find('m').unwrap();
+        rest = &rest[start + end + 1..];
+    }
+    plain.push_str(rest);
+    plain
 }
 
 fn unix_now() -> u64 {
