@@ -4,6 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- Promote an approved payment check using its original payment ID, request body, and scope. Recovery no longer mistakes the original check for an accepted send.
 - `webhooks test WEBHOOK_ID` without `--data` sends a test event, with a new `delivery_id` and a payload of type `test` and event `created`. Before, it failed with "This operation requires --data". `--data` still sends your own payload.
 - A list that returns every item in one response, such as `wallets list`, accepts `--all` and ignores it, because there are no more pages. Before, it rejected `--all`. `--all` still pages through lists that take `--limit`.
 - A command that acts on one wallet, such as `wallets get`, also takes the wallet as `--wallet ID`. If the argument and `--wallet` name different wallets, the command stops. Without either, the error names both ways to pass it. A profile's or `VOLTAGE_WALLET_ID`'s wallet is never used, so a delete always names its wallet.
