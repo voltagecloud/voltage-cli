@@ -927,6 +927,24 @@ fn add_children(mut parent: ClapCommand, prefix: &[String]) -> ClapCommand {
 }
 
 /// The command for one operation: its positional target, documented filters, and options.
+/// `--all` pages through a list that takes `--limit`. A list without paging accepts `--all`
+/// too and ignores it, because its one response already holds every item.
+fn list_args(cmd: ClapCommand, operation: &Operation) -> ClapCommand {
+    if operation.has_parameter("limit") {
+        PaginationFlags::augment_args(cmd)
+    } else if operation.lists_everything_at_once() {
+        cmd.arg(
+            Arg::new("all_at_once")
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help("No effect: this list returns every item in one response")
+                .help_heading("Query"),
+        )
+    } else {
+        cmd
+    }
+}
+
 /// The resource ID argument and `--id`, one of which is required. A wallet command can
 /// name its wallet with `--wallet` instead, so `target_id` checks that one was given.
 fn target_args(cmd: ClapCommand, target: ResourceTarget, wallet: bool) -> ClapCommand {
@@ -989,9 +1007,7 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     if operation.method != Method::Get {
         cmd = ExecuteFlags::augment_args(cmd);
     }
-    if operation.has_parameter("limit") {
-        cmd = PaginationFlags::augment_args(cmd);
-    }
+    cmd = list_args(cmd, operation);
     if operation.id.lists_all_organizations() {
         cmd = AllOrgsFlags::augment_args(cmd);
     }
@@ -1418,6 +1434,22 @@ mod tests {
                 "voltage", "wallets", "create", "--data", "@a.json", "--name", "hello"
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn all_is_accepted_by_every_list_and_pages_only_a_paginated_one() {
+        // `wallets list` returns every wallet at once, so `--all` changes nothing.
+        assert!(!api(&["wallets", "list", "--all"]).all);
+        assert!(!api(&["webhooks", "list", "--all"]).all);
+        assert!(api(&["payments", "list", "--all"]).all);
+        // A command that is not a list still rejects it.
+        let get =
+            Invocation::try_parse_from(["voltage", "wallets", "get", WALLET, "--all"]).unwrap_err();
+        assert!(
+            get.message.contains("unexpected argument '--all'"),
+            "{}",
+            get.message
         );
     }
 
