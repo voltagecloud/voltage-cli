@@ -2557,6 +2557,131 @@ async fn a_described_change_sends_nothing_records_nothing_and_omits_private_valu
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[test]
+fn requests_without_a_response_say_why_and_name_the_next_step() {
+    let dir = private_tempdir();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let closed = format!("http://{closed}");
+    let api_hint =
+        "Check the API URL, your network or proxy, and whether the API service is running.";
+    let cases: [(Vec<&str>, &str, &str); 5] = [
+        (
+            vec!["wallets", "list", "--org", ORG],
+            "HTTP read request failed: could not connect",
+            api_hint,
+        ),
+        (
+            vec!["wallets", "delete", WALLET, "--org", ORG],
+            "HTTP request failed: could not connect; a write may have been submitted. No mutation was retried.",
+            api_hint,
+        ),
+        (
+            vec![
+                "checkout",
+                "events",
+                "watch",
+                "--origin",
+                "https://shop.example.test",
+            ],
+            "Opening the checkout event stream failed: could not connect",
+            api_hint,
+        ),
+        (
+            vec![
+                "convert",
+                "10",
+                "usd",
+                "--to",
+                "btc",
+                "--price-url",
+                &closed,
+            ],
+            "Price request failed: could not connect",
+            "Check the price URL, your network or proxy, and whether the price service is running.",
+        ),
+        (
+            vec!["login", "--no-browser", "--auth-url", &closed],
+            "Authentication request failed: could not connect; no token request was automatically retried",
+            "Check the auth URL, your network or proxy, and whether the auth service is running.",
+        ),
+    ];
+    for (args, message, hint) in cases {
+        let failed = cli_at(dir.path(), &closed)
+            .env("VOLTAGE_STREAM_TOKEN", "private-stream-token")
+            .args(&args)
+            .assert()
+            .code(4);
+        let report = json_error(&failed);
+        assert_eq!(report["error"]["message"], message, "{args:?}");
+        assert_eq!(report["error"]["hint"], hint, "{args:?}");
+        if args[1] == "delete" {
+            // A write keeps its unknown-outcome detail.
+            assert_eq!(report["error"]["detail"]["outcome"], "unknown");
+        }
+    }
+
+    // A server that takes the request and never answers: a write may have been applied, so
+    // its hint says to look the resource up first, never to retry.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_url = format!("http://{}", silent.local_addr().unwrap());
+    let writes: [Vec<&str>; 2] = [
+        vec!["wallets", "delete", WALLET, "--org", ORG],
+        vec![
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wallet",
+            WALLET,
+            "--currency",
+            "btc",
+            "--address",
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+            "--amount",
+            "1000",
+            "--unit",
+            "sats",
+        ],
+    ];
+    for args in writes {
+        let failed = cli_at(dir.path(), &silent_url)
+            .args(["--timeout", "1"])
+            .args(&args)
+            .assert()
+            .code(4);
+        let report = json_error(&failed);
+        let hint = report["error"]["hint"].as_str().unwrap();
+        assert!(
+            hint.starts_with("The change may have been applied. Look up the resource ID before you run the command again"),
+            "{args:?}: {hint}"
+        );
+        assert!(!hint.contains("Retry"), "{args:?}: {hint}");
+        assert!(
+            report["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no response within --timeout"),
+            "{args:?}"
+        );
+        assert_eq!(report["error"]["detail"]["outcome"], "unknown", "{args:?}");
+    }
+    // A read that times out may simply be retried.
+    let read = cli_at(dir.path(), &silent_url)
+        .args(["--timeout", "1", "wallets", "list", "--org", ORG])
+        .assert()
+        .code(4);
+    assert_eq!(
+        json_error(&read)["error"]["hint"],
+        "Retry, or pass a larger --timeout."
+    );
+    drop(silent);
+}
+
 #[tokio::test]
 async fn output_file_refusals_name_the_path_problem_and_send_nothing() {
     let (server, dir) = fixture().await;
