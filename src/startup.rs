@@ -107,6 +107,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             global.output_format(),
             global.show_secrets,
             global.output_file.as_deref().filter(|_| reserve),
+            global.color(),
         )
     };
     // Price commands need neither configuration nor credentials.

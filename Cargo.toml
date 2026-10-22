@@ -45,6 +45,9 @@ keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 # Human tables: display-width layout and truncation. Default features stay off for security:
 # without `tty` and `custom_styling`, cells cannot carry escape sequences past scrubbing.
 comfy-table = { version = "=8.0.1", default-features = false }
+# Display widths, to find a table column after layout and color it; comfy-table already
+# depends on it, so it adds no crate.
+unicode-width = "=0.2.2"
 # Reads the terminal width on every platform. Without its `windows` feature, crossterm
 # refuses to compile on Windows.
 crossterm = { version = "=0.29.0", default-features = false, features = ["windows"] }

@@ -3946,6 +3946,39 @@ async fn api_rejections_lead_with_the_reason_and_keep_the_response_for_json() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tables_follow_the_color_choice_on_stdout_and_strip_to_the_plain_table() {
+    let (server, dir) = fixture().await;
+    route("GET", payments_path())
+        .respond_with(ok(json!({"items": [
+            {"id": RESOURCE, "status": "completed", "amount": {"amount": 150000, "currency": "btc"}},
+            {"id": WALLET, "status": "failed", "amount": {"amount": 1500, "currency": "btc"}}
+        ], "has_more": false})))
+        .mount(&server)
+        .await;
+    let list = |color: &str| {
+        let result = Command::from_std(human_process_at(dir.path(), &server.uri()))
+            .args([
+                "payments", "list", "--org", ORG, "--env", ENV, "--output", "table", "--color",
+                color,
+            ])
+            .assert()
+            .success();
+        stdout(&result)
+    };
+    let plain = list("auto");
+    assert!(!plain.contains('\u{1b}'), "{plain}");
+    assert!(
+        plain.contains("150 sats") && plain.contains("1.5 sats"),
+        "{plain}"
+    );
+    let colored = list("always");
+    assert!(colored.contains("\u{1b}[32mcompleted"), "{colored:?}");
+    assert!(colored.contains("\u{1b}[1m\u{1b}[31mfailed"), "{colored:?}");
+    assert_eq!(strip_styles(&colored), plain);
+    assert_eq!(list("never"), plain);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn human_output_fits_the_terminal_and_scrubs_api_text() {
     let (server, dir) = fixture().await;
     let hostile = "evil\u{1b}]52;c;AAAA\u{7}\u{202e}name";
@@ -3969,7 +4002,7 @@ async fn human_output_fits_the_terminal_and_scrubs_api_text() {
     assert_eq!(
         stdout(&listed),
         format!(
-            "{:<36}  {:<9}  AMOUNT\n{RESOURCE}  completed  150000 msats\n\
+            "{:<36}  {:<9}  AMOUNT\n{RESOURCE}  completed  150 sats\n\
              Hidden columns: created_at. Use a wider terminal or --json for every field.\n\
              1 result.\n",
             "ID", "STATUS"
