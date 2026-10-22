@@ -5064,7 +5064,13 @@ async fn on_a_terminal_with(
     let observer = controller.try_clone().unwrap();
     let before = local_modes(&observer);
     let mut command = human_process_at(dir, &server.uri());
+    // A UTF-8 color terminal, whatever the test runner's own, so symbols are predictable.
     command
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env_remove("VOLTAGE_SPINNER")
         .env_remove("VOLTAGE_EXECUTE")
         .args(args)
         .stdin(Stdio::from(terminal.try_clone().unwrap()))
@@ -5660,11 +5666,107 @@ async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
     )
     .await;
     assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
     assert!(
-        run.shown
-            .contains("Waiting for the payment to be completed... 0s"),
+        shown.contains("⠋ Waiting for the payment to be completed... 0s"),
+        "{shown}"
+    );
+    // Each status gets one line, and the wait ends with a symbol; color marks only words.
+    assert!(shown.contains("› sending · 0s"), "{shown}");
+    assert!(
+        shown.contains(&format!("✓ Payment {RESOURCE} completed · ")),
+        "{shown}"
+    );
+    assert!(!shown.contains("status: sending"), "{shown}");
+    assert!(run.shown.contains("\u{1b}[32m✓"), "{:?}", run.shown);
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submitted_payment_on_a_terminal_reads_as_a_timeline() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": "receiving"})),
+            ok(json!({"id": RESOURCE, "status": "receiving"})),
+            ok(json!({"id": RESOURCE, "status": "completed"})),
+        ]))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let args = receive_args(&["--wallet", WALLET, "--wait", "completed", "--execute"]);
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    let accepted = shown
+        .find(&format!(
+            "› Payment {RESOURCE} accepted; waiting for completed\r\n"
+        ))
+        .expect(&shown);
+    let receiving = shown.find("› receiving · ").expect(&shown);
+    let done = shown
+        .find(&format!("✓ Payment {RESOURCE} completed · "))
+        .expect(&shown);
+    assert!(accepted < receiving && receiving < done, "{shown}");
+    // An unchanged status is not repeated on a terminal.
+    assert_eq!(shown.matches("› receiving").count(), 1, "{shown}");
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(ok(json!({"id": RESOURCE, "status": "failed"})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let args = [
+        "payments",
+        "get",
+        RESOURCE,
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--wait",
+        "completed",
+        "--color",
+        "never",
+        "--output",
+        "table",
+    ];
+    // `--quiet` hides the closing line; the error, which names the payment, remains.
+    let quiet = on_a_terminal(
+        dir.path(),
+        &server,
+        &[&args[..], &["--quiet"]].concat(),
+        &[],
+    )
+    .await;
+    assert_eq!(quiet.code, Some(1), "{}", quiet.shown);
+    assert!(!quiet.shown.contains("✗ Payment"), "{}", quiet.shown);
+    assert!(
+        quiet.shown.contains("error: Payment reached"),
         "{}",
-        run.shown
+        quiet.shown
+    );
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(1), "{}", run.shown);
+    // Without color, only the status line's own clearing codes remain.
+    let shown = run.shown.replace("\r\u{1b}[2K", "");
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
+    // The closing line reports a final status, so it gets no step line of its own.
+    assert!(!shown.contains("› failed"), "{shown}");
+    let failed = shown
+        .find(&format!("✗ Payment {RESOURCE} failed · 0s"))
+        .expect(&shown);
+    assert!(
+        shown[failed..].contains("error: Payment reached"),
+        "{shown}"
     );
     server.verify().await;
 }

@@ -140,7 +140,7 @@ impl GlobalFlags {
     }
 
     pub fn terminal(&self) -> Terminal {
-        Terminal::new(self.quiet, self.no_input)
+        Terminal::new(self.quiet, self.no_input).with_color(self.color())
     }
 
     pub fn scope_selection(&self) -> ScopeSelection {

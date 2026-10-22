@@ -18,12 +18,11 @@ use crate::{
     error::{CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     input::{PaginationMode, Request},
     output::{Envelope, Outcome, Output},
-    payment::{
-        Currency, PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget,
-    },
+    payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
     registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
-    terminal::{self, Terminal},
+    terminal::Terminal,
+    timeline::Timeline,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -49,8 +48,6 @@ const READY_POLL_START: Duration = Duration::from_millis(100);
 const COMPLETION_POLL_START: Duration = Duration::from_millis(250);
 /// A checkout session projection usually appears within this long.
 const SESSION_POLL_START: Duration = Duration::from_millis(100);
-/// Waits repeat their status notice at least this often.
-const STATUS_NOTICE_INTERVAL: Duration = Duration::from_secs(15);
 /// The one read that reconciles an interrupted payment submission.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 const JOURNAL_DIR: &str = "requests";
@@ -678,7 +675,7 @@ pub async fn organization_wallets(
     let request = Request::build(invocation, &scope, None)?;
     let credential = ApiCredential::OrganizationToken(token);
     let mut api = Api::new(global, None, Authorization::Account(credential, None))?;
-    api.terminal = Terminal::new(true, global.no_input);
+    api.terminal = global.terminal().quieted();
     Ok(api
         .send(Method::Get, &request.path, &request.query, None)
         .await?
@@ -1313,10 +1310,8 @@ impl Call<'_> {
             scope.single_env()?
         );
         let target = until.as_str();
-        if invocation.operation.method != Method::Get {
-            api.terminal
-                .important(format!("Payment {id} accepted; waiting for {target}."));
-        }
+        let accepted = invocation.operation.method != Method::Get;
+        let mut timeline = Timeline::start(api.terminal, id, target, accepted);
         let mut backoff = Backoff::new(
             match until {
                 WaitTarget::Ready => READY_POLL_START,
@@ -1326,21 +1321,10 @@ impl Call<'_> {
         );
         let mut pause = backoff.pause();
         let mut invoice_presented = false;
-        let mut last_status: Option<StatusText> = None;
-        let mut last_notice = Instant::now() - STATUS_NOTICE_INTERVAL;
-        let started = Instant::now();
         loop {
             let view = PaymentView::from_body(&response.body);
-            if let Some(status) = &view.status
-                && (Some(status) != last_status.as_ref()
-                    || last_notice.elapsed() >= STATUS_NOTICE_INTERVAL)
-            {
-                api.terminal.notice(format!(
-                    "Payment {id} status: {}; waiting for {target}.",
-                    status.as_str()
-                ));
-                last_status = Some(status.clone());
-                last_notice = Instant::now();
+            if let Some(status) = &view.status {
+                timeline.status(status);
             }
             if invocation.presents_invoice()
                 && !invoice_presented
@@ -1355,6 +1339,7 @@ impl Call<'_> {
             }
             match view.progress(until) {
                 WaitProgress::Unsuccessful => {
+                    timeline.unsuccessful(view.status.as_ref());
                     return Err(Error::api("Payment reached an unsuccessful terminal state")
                         .with_detail(ErrorDetail::Payment(response.body))
                         .redacted(&api.secrets()));
@@ -1369,6 +1354,7 @@ impl Call<'_> {
                             api.terminal,
                         )?;
                     }
+                    timeline.reached(outcome);
                     return self.out.write(
                         Envelope::new(Some(response.status), response.body, Some(id), outcome),
                         &api.secrets(),
@@ -1383,11 +1369,9 @@ impl Call<'_> {
                 .with_detail(ErrorDetail::pending(id)));
             }
             api.terminal
-                .during(
-                    format!(
-                        "Waiting for the payment to be {target}... {}",
-                        terminal::elapsed(started.elapsed())
-                    ),
+                .waiting(
+                    format!("Waiting for the payment to be {target}..."),
+                    timeline.started,
                     tokio::time::sleep(pause),
                 )
                 .await;

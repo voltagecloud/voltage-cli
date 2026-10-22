@@ -15,7 +15,7 @@ use crate::{
     },
     error::{CredentialRejection, CredentialSources, ErrorDetail, ResponseLimit},
     secret::Secret,
-    terminal::{self, Terminal},
+    terminal::Terminal,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -275,11 +275,9 @@ impl AuthService {
                 return Err(Error::timeout("Login expired; run voltage login again"));
             }
             self.terminal
-                .during(
-                    format!(
-                        "Waiting for device approval... {}",
-                        terminal::elapsed(started.elapsed())
-                    ),
+                .waiting(
+                    "Waiting for device approval...",
+                    started,
                     tokio::time::sleep(Duration::from_secs(interval)),
                 )
                 .await;

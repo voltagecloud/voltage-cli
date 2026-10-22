@@ -6,6 +6,7 @@
 //! plain, so every escape sequence the CLI writes comes from this palette. Machine-readable
 //! output never passes through here.
 
+use crate::terminal::scrub_line;
 use clap::{
     ValueEnum,
     builder::{
@@ -70,6 +71,17 @@ impl ColorChoice {
         }
     }
 
+    /// Whether text written straight to stderr, outside an anstream writer, may carry styles.
+    pub fn colors_stderr(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => {
+                anstream::AutoStream::choice(&std::io::stderr()) == anstream::ColorChoice::Always
+            }
+        }
+    }
+
     fn as_stream(self) -> anstream::ColorChoice {
         match self {
             Self::Auto => anstream::ColorChoice::Auto,
@@ -88,6 +100,10 @@ pub enum Role {
     Hint,
     /// `details:`, which introduces lines a person may skip
     Muted,
+    /// `✓` and a completed status
+    Success,
+    /// The spinner and in-flight statuses such as `sending`
+    Pending,
 }
 
 impl Role {
@@ -96,7 +112,77 @@ impl Role {
             Self::Failure => AnsiColor::Red.on_default().bold(),
             Self::Hint => AnsiColor::Cyan.on_default().bold(),
             Self::Muted => Style::new().dimmed(),
+            Self::Success => AnsiColor::Green.on_default(),
+            Self::Pending => AnsiColor::Yellow.on_default(),
         }
+    }
+}
+
+/// One line of terminal text built only from painted labels and scrubbed text, so its only
+/// escape sequences are the palette's.
+#[derive(Debug, Default)]
+pub struct Line(String);
+
+impl Line {
+    pub fn paint(mut self, role: Role, label: &'static str) -> Self {
+        self.0.push_str(&paint(role, label));
+        self
+    }
+
+    /// Untrusted or variable text, with every unsafe character made a space.
+    pub fn text(mut self, text: &str) -> Self {
+        self.0.push_str(&scrub_line(text));
+        self
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Status symbols: Unicode where the terminal can draw it, ASCII otherwise.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Glyphs {
+    pub done: &'static str,
+    pub failed: &'static str,
+    pub step: &'static str,
+    /// Separates a status line's facts, as in `completed · 4s`.
+    pub separator: &'static str,
+    pub frames: &'static [&'static str],
+}
+
+impl Glyphs {
+    pub const UNICODE: Self = Self {
+        done: "✓",
+        failed: "✗",
+        step: "›",
+        separator: "·",
+        frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    };
+    pub const ASCII: Self = Self {
+        done: "ok",
+        failed: "x",
+        step: ">",
+        separator: "-",
+        frames: &["-", "\\", "|", "/"],
+    };
+
+    /// Unicode on Windows Terminal, or where `TERM` is not `dumb` or `linux` and the locale
+    /// that applies (the first set of `LC_ALL`, `LC_CTYPE`, `LANG`) is UTF-8.
+    pub fn detect(var: impl Fn(&str) -> Option<String>) -> Self {
+        let unicode = if cfg!(windows) {
+            var("WT_SESSION").is_some()
+        } else {
+            !matches!(var("TERM").as_deref(), Some("dumb" | "linux"))
+                && ["LC_ALL", "LC_CTYPE", "LANG"]
+                    .into_iter()
+                    .find_map(|name| var(name).filter(|value| !value.is_empty()))
+                    .is_some_and(|locale| {
+                        let locale = locale.to_ascii_lowercase();
+                        locale.contains("utf-8") || locale.contains("utf8")
+                    })
+        };
+        if unicode { Self::UNICODE } else { Self::ASCII }
     }
 }
 
@@ -106,8 +192,8 @@ pub fn paint(role: Role, label: &'static str) -> String {
     format!("{style}{label}{style:#}")
 }
 
-/// Write `text` to stderr, keeping its styles only when `choice` allows color there. A
-/// stderr write failure has nowhere to be reported, so it is ignored.
+/// Write `text` to stderr, keeping its styles only when `choice` allows color there; anstream
+/// strips them otherwise. A stderr write failure has nowhere to be reported, so it is ignored.
 pub fn write_stderr(choice: ColorChoice, text: &str) {
     let mut stderr = anstream::AutoStream::new(std::io::stderr().lock(), choice.as_stream());
     let _ = stderr.write_all(text.as_bytes());
@@ -165,10 +251,63 @@ mod tests {
 
     #[test]
     fn a_painted_label_is_the_label_once_styles_are_stripped() {
-        for role in [Role::Failure, Role::Hint, Role::Muted] {
+        for role in [
+            Role::Failure,
+            Role::Hint,
+            Role::Muted,
+            Role::Success,
+            Role::Pending,
+        ] {
             let painted = paint(role, "error:");
             assert!(painted.starts_with('\u{1b}') && painted.ends_with("\u{1b}[0m"));
             assert_eq!(anstream::adapter::strip_str(&painted).to_string(), "error:");
+        }
+    }
+
+    #[test]
+    fn lines_scrub_text_and_paint_labels() {
+        let line = Line::default()
+            .paint(Role::Success, "✓")
+            .text(" Payment \u{1b}[2Jx\ncompleted");
+        assert_eq!(
+            anstream::adapter::strip_str(line.as_str()).to_string(),
+            "✓ Payment  [2Jx completed"
+        );
+        assert_eq!(line.as_str().matches('\u{1b}').count(), 2);
+    }
+
+    #[test]
+    fn glyphs_are_unicode_only_for_a_utf8_locale_on_a_capable_terminal() {
+        let detect = |vars: &[(&str, &str)]| {
+            Glyphs::detect(|name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+        };
+        if cfg!(windows) {
+            assert_eq!(detect(&[("WT_SESSION", "1")]), Glyphs::UNICODE);
+            assert_eq!(detect(&[("LANG", "en_US.UTF-8")]), Glyphs::ASCII);
+            return;
+        }
+        assert_eq!(detect(&[("LANG", "en_US.UTF-8")]), Glyphs::UNICODE);
+        assert_eq!(detect(&[("LC_CTYPE", "C.utf8")]), Glyphs::UNICODE);
+        assert_eq!(detect(&[]), Glyphs::ASCII);
+        assert_eq!(detect(&[("LANG", "C")]), Glyphs::ASCII);
+        // LC_ALL overrides LANG, and an empty value is unset.
+        assert_eq!(
+            detect(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")]),
+            Glyphs::ASCII
+        );
+        assert_eq!(
+            detect(&[("LC_ALL", ""), ("LANG", "en_US.UTF-8")]),
+            Glyphs::UNICODE
+        );
+        for term in ["dumb", "linux"] {
+            assert_eq!(
+                detect(&[("TERM", term), ("LANG", "en_US.UTF-8")]),
+                Glyphs::ASCII
+            );
         }
     }
 
