@@ -6048,6 +6048,138 @@ async fn a_wallet_on_a_terminal_leads_with_its_balance_and_activity() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_or_networkless_wallet_read_falls_back_to_the_invoice_prefix() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(ok(
+            json!({"id": RESOURCE, "status": "receiving", "wallet_id": WALLET,
+            "data": {"payment_request": EXAMPLE_INVOICE}}),
+        ))
+        .mount(&server)
+        .await;
+    // First the wallet read fails; then it answers without a network.
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(in_order(vec![
+            ResponseTemplate::new(404),
+            ok(json!({"id": WALLET})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let args = [
+        "payments", "get", RESOURCE, "--org", ORG, "--env", ENV, "--qr",
+    ];
+    for _ in 0..2 {
+        let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+        assert!(shown.contains("● signet · Scan to pay"), "{shown}");
+    }
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_qr_code_on_a_terminal_is_framed_for_scanning_under_a_caption() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            // `expiration` is the invoice's lifetime in seconds from `created_at`, as in the
+            // contract; this one is far enough off to count down during the test.
+            ok(
+                json!({"id": RESOURCE, "status": "receiving", "created_at": "2026-01-01T00:00:00Z",
+                "data": {
+                    "payment_request": EXAMPLE_INVOICE, "memo": "order 42",
+                    "amount": {"amount": 1_000_000, "currency": "btc", "unit": "msats"},
+                    "expiration": 4_000_000_000_u64
+                }}),
+            ),
+            ok(json!({"id": RESOURCE, "status": "completed"})),
+        ]))
+        .mount(&server)
+        .await;
+    let args = receive_args(&[
+        "--wallet",
+        WALLET,
+        "--amount",
+        "1000",
+        "--unit",
+        "sats",
+        "--qr",
+        "--wait",
+        "completed",
+        "--execute",
+    ]);
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    assert!(
+        // The payment names no wallet, so no wallet is read and the invoice's signet prefix
+        // names the network.
+        shown.contains("● signet · Scan to pay · 1,000 sats · order 42 · expires in "),
+        "{shown}"
+    );
+    // Every code line is black on bright white, and the code has a blank quiet zone row.
+    let code: Vec<&str> = run
+        .shown
+        .lines()
+        .filter(|line| line.contains("\u{1b}[107m"))
+        .collect();
+    assert!(code.len() > 10, "{:?}", run.shown);
+    assert!(
+        code.iter().all(|line| line.contains("\u{1b}[30m")),
+        "{code:?}"
+    );
+    assert!(strip_styles(code[0]).trim().is_empty(), "{:?}", code[0]);
+    // Only the caption's dot takes signet's purple (256 colors on this terminal); the code has
+    // no frame.
+    assert!(run.shown.contains("\u{1b}[38;5;129m●"), "{:?}", run.shown);
+    assert!(!shown.contains('┏'), "{shown}");
+    // The wait counts down to the invoice's expiry.
+    assert!(shown.contains("· expires in "), "{shown}");
+    assert!(!shown.contains("Scan to pay:"), "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_qr_code_for_a_ready_invoice_comes_last_so_it_stays_on_screen() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    route("GET", payment_path())
+        .respond_with(ok(
+            json!({"id": RESOURCE, "status": "receiving", "wallet_id": WALLET,
+            "data": {"payment_request": EXAMPLE_INVOICE}}),
+        ))
+        .mount(&server)
+        .await;
+    // The wallet names the network, which the signet prefix alone cannot.
+    respond_once(
+        &server,
+        route("GET", format!("{}/{WALLET}", wallets_path(ORG))),
+        ok(json!({"id": WALLET, "network": "mutinynet"})),
+    )
+    .await;
+    let args = receive_args(&[
+        "--wallet",
+        WALLET,
+        "--amount",
+        "1000",
+        "--unit",
+        "sats",
+        "--qr",
+        "--execute",
+    ]);
+    let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+    // The result's fields come first; the caption and code end the output.
+    let fields = shown.find("payment_request").expect(&shown);
+    let caption = shown.find("Scan to pay").expect(&shown);
+    assert!(fields < caption, "{shown}");
+    assert!(!shown[caption..].contains("payment_request"), "{shown}");
+    assert!(shown.contains("● mutinynet · Scan to pay"), "{shown}");
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {
     let (server, dir) = fixture().await;
     route("GET", payment_path())

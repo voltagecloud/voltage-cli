@@ -52,6 +52,11 @@ impl Terminal {
         std::io::stderr().is_terminal()
     }
 
+    /// Whether styles written to stderr will show, from `--color` and the environment.
+    pub fn colors(self) -> bool {
+        self.color.colors_stderr()
+    }
+
     pub fn glyphs(self) -> Glyphs {
         Glyphs::detect(|name| std::env::var(name).ok())
     }

@@ -19,6 +19,7 @@ mod payment;
 mod pick;
 mod price;
 mod progress;
+mod qr;
 pub mod registry;
 pub mod secret;
 mod startup;

@@ -256,6 +256,11 @@ pub fn epoch_seconds(text: &str) -> Option<i64> {
     timestamp(text).map(|(_, seconds)| seconds)
 }
 
+/// `then` against `now`, such as `in 59 minutes` or `3 days ago`.
+pub fn relative_time(then: i64, now: i64) -> String {
+    relative(then, now)
+}
+
 /// An outcome worth a color: what finished, what is still in flight, and what was not sent.
 fn outcome_role(outcome: Outcome) -> Option<Role> {
     match outcome {

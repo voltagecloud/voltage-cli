@@ -401,7 +401,7 @@ struct WaitFlags {
 
 #[derive(Debug, Args)]
 struct InvoiceFlags {
-    /// Render a ready BOLT11 invoice as a compact terminal QR code; implies --wait ready
+    /// Render a ready BOLT11 invoice as a QR code to scan; implies --wait ready
     #[arg(long, help_heading = "Waiting and presentation")]
     qr: bool,
     /// Copy a ready BOLT11 invoice to the clipboard; implies --wait ready

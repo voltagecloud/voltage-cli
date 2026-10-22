@@ -38,7 +38,7 @@ voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120
 
 ## Show an invoice
 
-For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--copy` puts it on the clipboard as soon as it is ready. Either flag implies `--wait ready`; with `--wait completed` the invoice is shown first and polling continues to settlement.
+For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--copy` puts it on the clipboard as soon as it is ready. Either flag implies `--wait ready`; with `--wait completed` the invoice is shown first and polling continues to settlement. On a terminal with color the QR code is black on white with the QR spec's four-module quiet zone, so it scans on a dark theme too; with color off (`NO_COLOR`, `--color never`, `TERM=dumb`) it is the compact code, which follows your terminal's theme and may read inverted on a dark one. It appears under a bold `Scan to pay` caption with the amount, memo, and expiry when the payment has them. The caption starts with the network, its dot in the website's color (mainnet orange, mutinynet and signet purple, testnet green); the code itself stays black and white. The CLI reads the payment's wallet for its network, since mutinynet and signet invoices share a prefix, and uses the prefix if that read fails. A wait that ends at `ready` shows the code after the result, so the code stays on screen; with `--wait completed` it comes first, and the status line counts down to the expiry. Redirected stderr gets the compact code it always did.
 
 ## Quotes and lines of credit
 
