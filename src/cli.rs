@@ -131,11 +131,12 @@ impl GlobalFlags {
         OutputFormat::select(self.json, self.output)
     }
 
+    /// `--color` or `--no-color`, else `FORCE_COLOR`, else automatic.
     pub fn color(&self) -> ColorChoice {
         if self.no_color {
             ColorChoice::Never
         } else {
-            self.color
+            self.color.with_environment(|name| std::env::var(name).ok())
         }
     }
 
@@ -667,8 +668,10 @@ impl Invocation {
     /// whether parse failures need clap's human rendering or the JSON error envelope; `color`
     /// colors clap's help and errors, since `--color` itself is not parsed yet.
     pub fn from_env(color: ColorChoice) -> std::result::Result<Self, ParseFailure> {
+        let depth = style::Depth::detect(|name| std::env::var(name).ok());
         let matches = command()
             .color(color.as_clap())
+            .styles(style::help(depth))
             .try_get_matches()
             .map_err(ParseFailure::Clap)?;
         Self::from_matches(&matches).map_err(ParseFailure::Validation)
@@ -901,7 +904,7 @@ pub fn command() -> ClapCommand {
         .version(env!("VOLTAGE_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .styles(style::HELP);
+        .styles(style::help(style::Depth::Basic));
     let root = GlobalFlags::augment_args(root);
     let mut root = LocalCommand::augment_subcommands(root);
     for name in root

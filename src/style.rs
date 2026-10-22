@@ -12,7 +12,7 @@ use clap::{
     ValueEnum,
     builder::{
         Styles,
-        styling::{AnsiColor, Style},
+        styling::{Ansi256Color, AnsiColor, Color, RgbColor, Style},
     },
 };
 use std::{ffi::OsStr, io::Write};
@@ -62,6 +62,21 @@ impl ColorChoice {
             }
         }
         choice
+    }
+
+    /// Fold in `FORCE_COLOR` when no flag decided: `0` or `false` turns color off, and any
+    /// other non-empty value turns it on even when redirected. `NO_COLOR` still wins, and
+    /// `FORCE_COLOR` wins over `CLICOLOR_FORCE` and `CLICOLOR`, which anstream reads.
+    pub fn with_environment(self, var: impl Fn(&str) -> Option<String>) -> Self {
+        let set = |name| var(name).filter(|value: &String| !value.is_empty());
+        if self != Self::Auto || set("NO_COLOR").is_some() {
+            return self;
+        }
+        match set("FORCE_COLOR").as_deref() {
+            Some("0" | "false") => Self::Never,
+            Some(_) => Self::Always,
+            None => self,
+        }
     }
 
     pub fn as_clap(self) -> clap::ColorChoice {
@@ -234,16 +249,58 @@ pub fn stdout(choice: ColorChoice) -> anstream::AutoStream<std::io::StdoutLock<'
     anstream::AutoStream::new(std::io::stdout().lock(), choice.as_stream())
 }
 
-/// Help and parse-error styles in cargo's manner, using only the 16 basic colors so the
-/// terminal's theme keeps them legible.
-pub const HELP: Styles = Styles::styled()
-    .header(AnsiColor::Green.on_default().bold())
-    .usage(AnsiColor::Green.on_default().bold())
-    .literal(AnsiColor::Cyan.on_default().bold())
-    .placeholder(AnsiColor::Cyan.on_default())
-    .error(AnsiColor::Red.on_default().bold())
-    .valid(AnsiColor::Green.on_default().bold())
-    .invalid(AnsiColor::Yellow.on_default().bold());
+/// How many colors the terminal draws, for the one brand color; every other style uses
+/// the 16 basic colors, which the terminal's theme keeps legible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Depth {
+    Basic,
+    Ansi256,
+    TrueColor,
+}
+
+impl Depth {
+    /// `FORCE_COLOR=2` or `3` names a depth, as chalk reads it; otherwise `COLORTERM` of
+    /// `truecolor` or `24bit` (or Windows Terminal) means 24-bit, and a `TERM` naming
+    /// `256color` means 256 colors.
+    pub fn detect(var: impl Fn(&str) -> Option<String>) -> Self {
+        match var("FORCE_COLOR").as_deref() {
+            Some("3") => return Self::TrueColor,
+            Some("2") => return Self::Ansi256,
+            _ => {}
+        }
+        let truecolor = matches!(var("COLORTERM").as_deref(), Some("truecolor" | "24bit"))
+            || (cfg!(windows) && var("WT_SESSION").is_some());
+        if truecolor {
+            Self::TrueColor
+        } else if var("TERM").is_some_and(|term| term.contains("256color")) {
+            Self::Ansi256
+        } else {
+            Self::Basic
+        }
+    }
+}
+
+/// Voltage orange, `#FF5000`, at the depth the terminal draws; bold alone without one.
+pub fn brand(depth: Depth) -> Style {
+    let color = match depth {
+        Depth::TrueColor => Some(Color::Rgb(RgbColor(0xFF, 0x50, 0x00))),
+        Depth::Ansi256 => Some(Color::Ansi256(Ansi256Color(202))),
+        Depth::Basic => None,
+    };
+    Style::new().fg_color(color).bold()
+}
+
+/// Help and parse-error styles in cargo's manner, with headers and usage in the brand color.
+pub fn help(depth: Depth) -> Styles {
+    Styles::styled()
+        .header(brand(depth))
+        .usage(brand(depth))
+        .literal(AnsiColor::Cyan.on_default().bold())
+        .placeholder(AnsiColor::Cyan.on_default())
+        .error(AnsiColor::Red.on_default().bold())
+        .valid(AnsiColor::Green.on_default().bold())
+        .invalid(AnsiColor::Yellow.on_default().bold())
+}
 
 #[cfg(test)]
 mod tests {
@@ -366,6 +423,79 @@ mod tests {
                 Glyphs::ASCII
             );
         }
+    }
+
+    fn vars<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn force_color_applies_only_without_a_flag_or_no_color() {
+        use ColorChoice::{Always, Auto, Never};
+        for (choice, env, expected) in [
+            (Auto, &[][..], Auto),
+            (Auto, &[("FORCE_COLOR", "1")][..], Always),
+            (Auto, &[("FORCE_COLOR", "3")][..], Always),
+            (Auto, &[("FORCE_COLOR", "true")][..], Always),
+            (Auto, &[("FORCE_COLOR", "0")][..], Never),
+            (Auto, &[("FORCE_COLOR", "false")][..], Never),
+            (Auto, &[("FORCE_COLOR", "")][..], Auto),
+            // NO_COLOR wins; anstream then turns color off.
+            (Auto, &[("FORCE_COLOR", "1"), ("NO_COLOR", "1")][..], Auto),
+            (Auto, &[("FORCE_COLOR", "1"), ("NO_COLOR", "")][..], Always),
+            // A flag wins over both.
+            (Never, &[("FORCE_COLOR", "1")][..], Never),
+            (Always, &[("FORCE_COLOR", "0")][..], Always),
+        ] {
+            assert_eq!(
+                choice.with_environment(vars(env)),
+                expected,
+                "{choice:?} {env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn depth_follows_force_color_then_colorterm_then_term() {
+        assert_eq!(Depth::detect(vars(&[])), Depth::Basic);
+        assert_eq!(
+            Depth::detect(vars(&[("TERM", "xterm-256color")])),
+            Depth::Ansi256
+        );
+        assert_eq!(
+            Depth::detect(vars(&[("COLORTERM", "truecolor")])),
+            Depth::TrueColor
+        );
+        assert_eq!(
+            Depth::detect(vars(&[("COLORTERM", "24bit")])),
+            Depth::TrueColor
+        );
+        assert_eq!(
+            Depth::detect(vars(&[("FORCE_COLOR", "2"), ("COLORTERM", "truecolor")])),
+            Depth::Ansi256
+        );
+        assert_eq!(
+            Depth::detect(vars(&[("FORCE_COLOR", "3")])),
+            Depth::TrueColor
+        );
+        assert_eq!(Depth::detect(vars(&[("FORCE_COLOR", "1")])), Depth::Basic);
+    }
+
+    #[test]
+    fn the_brand_color_degrades_to_bold() {
+        assert_eq!(
+            format!("{}", brand(Depth::TrueColor)),
+            "\u{1b}[1m\u{1b}[38;2;255;80;0m"
+        );
+        assert_eq!(
+            format!("{}", brand(Depth::Ansi256)),
+            "\u{1b}[1m\u{1b}[38;5;202m"
+        );
+        assert_eq!(format!("{}", brand(Depth::Basic)), "\u{1b}[1m");
     }
 
     #[test]

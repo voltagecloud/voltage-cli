@@ -25,7 +25,8 @@ const BINARY_NAME: &str = "voltage";
 
 pub async fn run() -> ExitCode {
     let json_errors = cli::json_errors_requested(std::env::args_os());
-    let color = ColorChoice::requested(std::env::args_os());
+    let color = ColorChoice::requested(std::env::args_os())
+        .with_environment(|name| std::env::var(name).ok());
     let invocation = match Invocation::from_env(color) {
         Ok(invocation) => invocation,
         Err(failure) => return fail_parse(failure, json_errors, color),
