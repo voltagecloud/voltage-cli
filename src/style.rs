@@ -128,6 +128,8 @@ pub enum Role {
     Emphasis,
     /// The wordmark's lightning bolt; decoration, never a status
     Bolt,
+    /// A QR code: black on bright white whatever the theme, so it scans
+    QrCode,
 }
 
 impl Role {
@@ -142,6 +144,9 @@ impl Role {
             Self::Link => AnsiColor::Blue.on_default().underline(),
             Self::Emphasis => Style::new().bold(),
             Self::Bolt => AnsiColor::Yellow.on_default().bold(),
+            Self::QrCode => Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Black)))
+                .bg_color(Some(Color::Ansi(AnsiColor::BrightWhite))),
         }
     }
 }
@@ -166,6 +171,13 @@ impl Line {
     /// `text` in a role's style.
     pub fn styled(mut self, role: Role, text: &str) -> Self {
         let style = role.style();
+        self.0
+            .push_str(&format!("{style}{}{style:#}", scrub_line(text)));
+        self
+    }
+
+    /// Variable text in a style chosen at run time, such as a network's color.
+    pub fn with_style(mut self, style: Style, text: &str) -> Self {
         self.0
             .push_str(&format!("{style}{}{style:#}", scrub_line(text)));
         self
@@ -370,6 +382,7 @@ mod tests {
             Role::Link,
             Role::Emphasis,
             Role::Bolt,
+            Role::QrCode,
         ] {
             let painted = paint(role, "error:");
             assert!(painted.starts_with('\u{1b}') && painted.ends_with("\u{1b}[0m"));

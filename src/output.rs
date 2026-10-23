@@ -5,7 +5,7 @@
 
 mod human;
 
-pub use human::{epoch_seconds, readable_amount};
+pub use human::{epoch_seconds, readable_amount, relative_time};
 
 use crate::{
     Error, Result,

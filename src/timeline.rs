@@ -20,6 +20,8 @@ pub struct Timeline {
     id: Uuid,
     target: &'static str,
     pub started: Instant,
+    /// When the invoice expires, once it is shown.
+    expires: Option<Instant>,
     last: Option<StatusText>,
     last_notice: Option<Instant>,
 }
@@ -32,6 +34,7 @@ impl Timeline {
             id,
             target,
             started: Instant::now(),
+            expires: None,
             last: None,
             last_notice: None,
         };
@@ -72,6 +75,32 @@ impl Timeline {
             self.last_notice = Some(Instant::now());
         }
         self.last = Some(status.clone());
+    }
+
+    /// Count down to the invoice's expiry, given in seconds since the epoch, while waiting.
+    pub fn expires_at(&mut self, expires: Option<i64>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        self.expires = expires
+            .and_then(|expires| u64::try_from(expires.saturating_sub(now)).ok())
+            .filter(|left| *left > 0)
+            .and_then(|left| Instant::now().checked_add(Duration::from_secs(left)));
+    }
+
+    /// Show `label` with the time waited, and the expiry countdown once there is one, while
+    /// `work` runs.
+    pub async fn pause<T>(&self, label: String, work: impl Future<Output = T>) -> T {
+        match self.expires {
+            Some(expires) => {
+                self.terminal
+                    .expiring(label, self.started, expires, work)
+                    .await
+            }
+            None => self.terminal.waiting(label, self.started, work).await,
+        }
     }
 
     /// The wait reached its target.

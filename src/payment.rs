@@ -3,7 +3,10 @@
 //! Wire encodings here are stable: they appear in request bodies, in the `--wait` and
 //! `--unit` flags, and in the payment projections the CLI polls.
 
-use crate::{Error, Result, output::Outcome};
+use crate::{
+    Error, Result,
+    output::{Outcome, epoch_seconds},
+};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -232,6 +235,15 @@ pub struct PaymentData {
     pub payment_request: Option<String>,
     #[serde(default)]
     pub address: Option<String>,
+    // Display-only fields stay raw JSON: a shape this view does not expect must never fail
+    // the whole view, which drives waits.
+    #[serde(default)]
+    pub amount: Option<Value>,
+    #[serde(default)]
+    pub memo: Option<Value>,
+    /// The invoice's lifetime in seconds, counted from the payment's `created_at`.
+    #[serde(default)]
+    pub expiration: Option<Value>,
 }
 
 /// Read view over a payment projection; unknown fields and shapes stay in the raw body.
@@ -239,6 +251,11 @@ pub struct PaymentData {
 pub struct PaymentView {
     #[serde(default)]
     pub id: Option<Uuid>,
+    #[serde(default)]
+    pub wallet_id: Option<Uuid>,
+    /// RFC 3339 UTC; raw for the same reason as `PaymentData`'s display fields.
+    #[serde(default)]
+    pub created_at: Option<Value>,
     #[serde(default)]
     pub status: Option<StatusText>,
     #[serde(default)]
@@ -264,6 +281,22 @@ impl PaymentView {
     /// A body that is not a payment object reads as a pending projection.
     pub fn from_body(body: &Value) -> Self {
         Self::deserialize(body).unwrap_or_default()
+    }
+
+    /// When the invoice expires, in seconds since the epoch: its creation plus its lifetime.
+    pub fn expires_at(&self) -> Option<i64> {
+        let created = self.created_at.as_ref()?.as_str().and_then(epoch_seconds)?;
+        let lifetime = i64::try_from(self.data.expiration.as_ref()?.as_u64()?).ok()?;
+        created.checked_add(lifetime)
+    }
+
+    /// The memo, when the payment has a non-empty one.
+    pub fn memo(&self) -> Option<&str> {
+        self.data
+            .memo
+            .as_ref()
+            .and_then(Value::as_str)
+            .filter(|memo| !memo.is_empty())
     }
 
     /// The BOLT11 invoice, once generated.
@@ -309,6 +342,31 @@ impl PaymentView {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_expiration_in_seconds_keeps_the_view_and_dates_the_expiry() {
+        // The contract's `expiration` is an integer number of seconds.
+        let view = PaymentView::from_body(&json!({
+            "status": "completed", "created_at": "2026-10-21T00:00:00Z",
+            "data": {"expiration": 3600, "memo": "order 42"}
+        }));
+        assert_eq!(
+            view.progress(WaitTarget::Completed),
+            WaitProgress::Reached(Outcome::Completed)
+        );
+        assert_eq!(view.expires_at(), Some(1_792_540_800 + 3600));
+        assert_eq!(view.memo(), Some("order 42"));
+        // Unexpected display shapes leave the view intact and simply show nothing.
+        let odd = PaymentView::from_body(&json!({
+            "status": "completed", "created_at": 7,
+            "data": {"expiration": "soon", "memo": {"x": 1}}
+        }));
+        assert_eq!(
+            odd.progress(WaitTarget::Completed),
+            WaitProgress::Reached(Outcome::Completed)
+        );
+        assert_eq!((odd.expires_at(), odd.memo()), (None, None));
+    }
 
     #[test]
     fn exact_money() {

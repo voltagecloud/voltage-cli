@@ -21,6 +21,7 @@ use crate::{
     output::{Envelope, Outcome, Output},
     payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
     price::{PRICE_URL, PriceService, UsdPerBtc},
+    qr,
     registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
     style::Depth,
@@ -1395,11 +1396,16 @@ impl Call<'_> {
             if let Some(status) = &view.status {
                 timeline.status(status);
             }
+            // Waiting on to settlement needs the invoice now; a wait that ends at `ready` shows
+            // it after the result, so the code is what stays on screen.
             if invocation.presents_invoice()
+                && until == WaitTarget::Completed
                 && !invoice_presented
                 && let Some(invoice) = view.invoice()
             {
-                present_invoice(invoice, invocation, api.terminal)?;
+                let network = self.wallet_network(&view).await;
+                present_invoice(invoice, &view, network.as_deref(), invocation, api.terminal)?;
+                timeline.expires_at(view.expires_at());
                 invoice_presented = true;
                 if until == WaitTarget::Completed {
                     api.terminal
@@ -1414,19 +1420,34 @@ impl Call<'_> {
                         .redacted(&api.secrets()));
                 }
                 WaitProgress::Reached(outcome) => {
-                    if invocation.presents_invoice() && !invoice_presented {
-                        present_invoice(
-                            view.invoice().ok_or_else(|| {
+                    let invoice = (invocation.presents_invoice() && !invoice_presented)
+                        .then(|| {
+                            view.invoice().map(str::to_owned).ok_or_else(|| {
                                 Error::usage("The ready payment does not contain a BOLT11 invoice")
-                            })?,
-                            invocation,
-                            api.terminal,
-                        )?;
+                            })
+                        })
+                        .transpose()?;
+                    // An invoice that cannot be drawn fails before the record is written.
+                    if let Some(invoice) = &invoice
+                        && invocation.qr
+                    {
+                        qr::check(invoice)?;
                     }
                     timeline.reached(outcome);
-                    return self.out.write(
+                    self.out.write(
                         Envelope::new(Some(response.status), response.body, Some(id), outcome),
                         &api.secrets(),
+                    )?;
+                    let Some(invoice) = invoice else {
+                        return Ok(());
+                    };
+                    let network = self.wallet_network(&view).await;
+                    return present_invoice(
+                        &invoice,
+                        &view,
+                        network.as_deref(),
+                        invocation,
+                        api.terminal,
                     );
                 }
                 WaitProgress::Pending => {}
@@ -1437,10 +1458,9 @@ impl Call<'_> {
                 ))
                 .with_detail(ErrorDetail::pending(id)));
             }
-            api.terminal
-                .waiting(
+            timeline
+                .pause(
                     format!("Waiting for the payment to be {target}..."),
-                    timeline.started,
                     tokio::time::sleep(pause),
                 )
                 .await;
@@ -1460,8 +1480,38 @@ impl Call<'_> {
     }
 }
 
+impl Call<'_> {
+    /// The payment's wallet network, which colors a QR code on a terminal. Mutinynet and
+    /// signet invoices share a prefix, so the wallet says which it is. Best effort: without
+    /// it, the invoice's prefix stands in.
+    async fn wallet_network(&self, view: &PaymentView) -> Option<String> {
+        if !self.invocation.qr || !self.api.terminal.decorates() {
+            return None;
+        }
+        let path = format!(
+            "/organizations/{}/wallets/{}",
+            self.scope.require_org().ok()?,
+            view.wallet_id?
+        );
+        // A slow wallets endpoint must not hold back the code or outlast the wait.
+        let limit =
+            balance::READ_LIMIT.min(self.deadline.saturating_duration_since(Instant::now()));
+        let wallet = tokio::time::timeout(limit, self.api.read(&path))
+            .await
+            .ok()?
+            .ok()?;
+        wallet.body.get("network")?.as_str().map(str::to_owned)
+    }
+}
+
 /// Copy and render a ready BOLT11 invoice as requested; both go to stderr.
-fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal) -> Result<()> {
+fn present_invoice(
+    invoice: &str,
+    view: &PaymentView,
+    network: Option<&str>,
+    invocation: &ApiInvocation,
+    terminal: Terminal,
+) -> Result<()> {
     if invocation.copy {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(invoice)) {
             Ok(()) => terminal.notice("Invoice copied to the clipboard."),
@@ -1471,23 +1521,12 @@ fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal
         }
     }
     if invocation.qr {
-        // BOLT11 is case-insensitive. Uppercase enables QR alphanumeric mode, while
-        // low error correction and a two-module margin keep terminal output compact.
-        let code = qrcode::QrCode::with_error_correction_level(
-            invoice.to_ascii_uppercase(),
-            qrcode::EcLevel::L,
-        )
-        .map_err(|_| Error::transport("Could not encode the invoice as a QR code"))?;
-        let image = code
-            .render::<qrcode::render::unicode::Dense1x2>()
-            .quiet_zone(false)
-            .build();
-        let image = image
-            .lines()
-            .map(|line| format!("  {line}  "))
-            .collect::<Vec<_>>()
-            .join("\n");
-        terminal.important(format!("\nScan to pay:\n\n{image}\n"));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        qr::show(invoice, view, network, terminal, now)?;
     }
     Ok(())
 }
