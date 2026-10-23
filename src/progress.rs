@@ -40,17 +40,29 @@ impl Progress {
     }
 
     /// Draw `label` now and, when animated, every frame after. `since` starts the time of a
-    /// wait that spans several status lines.
-    pub fn show(label: String, since: Option<Instant>, look: Look) -> Self {
-        Self::start(label, since, look, to_stderr)
+    /// wait that spans several status lines; `expires` adds a countdown to that instant.
+    pub fn show(
+        label: String,
+        since: Option<Instant>,
+        expires: Option<Instant>,
+        look: Look,
+    ) -> Self {
+        Self::start(label, since, expires, look, to_stderr)
     }
 
     /// `show`, writing each frame with `write`.
-    fn start(label: String, since: Option<Instant>, look: Look, write: fn(&[u8])) -> Self {
+    fn start(
+        label: String,
+        since: Option<Instant>,
+        expires: Option<Instant>,
+        look: Look,
+        write: fn(&[u8]),
+    ) -> Self {
         let line = Arc::new(StatusLine {
             label,
             since: since.unwrap_or_else(Instant::now),
             timed: since.is_some(),
+            expires,
             look,
             // Read once: where crossterm cannot open `/dev/tty`, each read runs `tput`.
             width: terminal::stderr_width(),
@@ -97,6 +109,7 @@ struct StatusLine {
     label: String,
     since: Instant,
     timed: bool,
+    expires: Option<Instant>,
     look: Look,
     /// The terminal's width when the line was first drawn.
     width: Option<usize>,
@@ -113,7 +126,10 @@ impl StatusLine {
         if *cleared {
             return;
         }
-        let text = self.text(frame, self.since.elapsed(), self.width);
+        let left = self
+            .expires
+            .map(|expires| expires.saturating_duration_since(Instant::now()));
+        let text = self.text(frame, self.since.elapsed(), left, self.width);
         (self.write)(format!("\r\x1b[2K{text}").as_bytes());
     }
 
@@ -124,12 +140,22 @@ impl StatusLine {
     }
 
     /// The line for one frame, cut to fit `width` so clearing never leaves a wrapped remnant.
-    fn text(&self, frame: usize, waited: Duration, width: Option<usize>) -> String {
-        let label = if self.timed || waited >= SHOW_WAITED_AFTER {
+    fn text(
+        &self,
+        frame: usize,
+        waited: Duration,
+        left: Option<Duration>,
+        width: Option<usize>,
+    ) -> String {
+        let mut label = if self.timed || waited >= SHOW_WAITED_AFTER {
             format!("{} {}", self.label, terminal::elapsed(waited))
         } else {
             self.label.clone()
         };
+        if let Some(left) = left {
+            let separator = self.look.glyphs.separator;
+            label.push_str(&format!(" {separator} expires in {}", countdown(left)));
+        }
         if !self.look.animate {
             return fit(&label, width);
         }
@@ -154,6 +180,12 @@ fn to_stderr(bytes: &[u8]) {
     let _ = stderr.flush();
 }
 
+/// Time left as `m:ss`, rounded up so a countdown reaches `0:00` only when time is up.
+fn countdown(left: Duration) -> String {
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
 /// `text` cut to leave the last of `width` columns free, so the cursor never wraps.
 fn fit(text: &str, width: Option<usize>) -> String {
     match width {
@@ -173,6 +205,7 @@ mod tests {
             label: "Waiting...".into(),
             since: Instant::now(),
             timed,
+            expires: None,
             look,
             width: None,
             write: |_| {},
@@ -194,9 +227,9 @@ mod tests {
     fn frames_advance_and_wrap_with_the_label_after_the_glyph() {
         let spinner = line(false, SPINNING);
         let short = Duration::from_millis(300);
-        assert_eq!(spinner.text(0, short, None), "⠋ Waiting...");
-        assert_eq!(spinner.text(1, short, None), "⠙ Waiting...");
-        assert_eq!(spinner.text(10, short, None), "⠋ Waiting...");
+        assert_eq!(spinner.text(0, short, None, None), "⠋ Waiting...");
+        assert_eq!(spinner.text(1, short, None, None), "⠙ Waiting...");
+        assert_eq!(spinner.text(10, short, None, None), "⠋ Waiting...");
         let ascii = line(
             false,
             Look {
@@ -204,7 +237,7 @@ mod tests {
                 ..SPINNING
             },
         );
-        assert_eq!(ascii.text(5, short, None), "\\ Waiting...");
+        assert_eq!(ascii.text(5, short, None, None), "\\ Waiting...");
         let colored = line(
             false,
             Look {
@@ -212,7 +245,7 @@ mod tests {
                 ..SPINNING
             },
         );
-        let text = colored.text(0, short, None);
+        let text = colored.text(0, short, None, None);
         assert!(text.starts_with(&paint(Role::Pending, "⠋")), "{text:?}");
         assert!(text.ends_with(" Waiting..."));
     }
@@ -221,33 +254,59 @@ mod tests {
     fn time_shows_from_two_seconds_or_from_the_start_of_a_timed_wait() {
         let quick = line(false, STILL);
         assert_eq!(
-            quick.text(0, Duration::from_millis(1999), None),
+            quick.text(0, Duration::from_millis(1999), None, None),
             "Waiting..."
         );
-        assert_eq!(quick.text(0, Duration::from_secs(2), None), "Waiting... 2s");
-        let timed = line(true, STILL);
-        assert_eq!(timed.text(0, Duration::ZERO, None), "Waiting... 0s");
         assert_eq!(
-            timed.text(0, Duration::from_secs(65), None),
+            quick.text(0, Duration::from_secs(2), None, None),
+            "Waiting... 2s"
+        );
+        let timed = line(true, STILL);
+        assert_eq!(timed.text(0, Duration::ZERO, None, None), "Waiting... 0s");
+        assert_eq!(
+            timed.text(0, Duration::from_secs(65), None, None),
             "Waiting... 1m 05s"
+        );
+    }
+
+    #[test]
+    fn a_countdown_follows_the_time_waited_and_rounds_up() {
+        let timed = line(true, STILL);
+        let left = Some(Duration::from_millis(581_200));
+        assert_eq!(
+            timed.text(0, Duration::from_secs(3), left, None),
+            "Waiting... 3s · expires in 9:42"
+        );
+        assert_eq!(countdown(Duration::from_secs(59)), "0:59");
+        assert_eq!(countdown(Duration::ZERO), "0:00");
+        let ascii = line(
+            false,
+            Look {
+                glyphs: Glyphs::ASCII,
+                ..STILL
+            },
+        );
+        assert_eq!(
+            ascii.text(0, Duration::ZERO, Some(Duration::from_secs(60)), None),
+            "Waiting... - expires in 1:00"
         );
     }
 
     #[test]
     fn a_line_never_reaches_the_last_column() {
         let still = line(false, STILL);
-        assert_eq!(still.text(0, Duration::ZERO, Some(8)), "Waiting");
-        assert_eq!(still.text(0, Duration::ZERO, Some(11)), "Waiting...");
-        assert_eq!(still.text(0, Duration::ZERO, Some(10)), "Waiting..");
+        assert_eq!(still.text(0, Duration::ZERO, None, Some(8)), "Waiting");
+        assert_eq!(still.text(0, Duration::ZERO, None, Some(11)), "Waiting...");
+        assert_eq!(still.text(0, Duration::ZERO, None, Some(10)), "Waiting..");
         let spinner = line(false, SPINNING);
-        assert_eq!(spinner.text(0, Duration::ZERO, Some(8)), "⠋ Waiti");
+        assert_eq!(spinner.text(0, Duration::ZERO, None, Some(8)), "⠋ Waiti");
         assert_eq!(fit("abc", Some(0)), "");
         assert_eq!(fit("abc", None), "abc");
     }
 
     #[tokio::test]
     async fn dropping_the_guard_stops_the_redraw_and_clears_once() {
-        let progress = Progress::start("x".into(), None, SPINNING, |_| {});
+        let progress = Progress::start("x".into(), None, None, SPINNING, |_| {});
         let redraw = progress
             .redraw
             .as_ref()
@@ -261,7 +320,7 @@ mod tests {
         }
         assert!(redraw.is_finished());
         // A still line never starts a redraw.
-        let still = Progress::start("x".into(), None, STILL, |_| {});
+        let still = Progress::start("x".into(), None, None, STILL, |_| {});
         assert!(still.redraw.is_none());
         assert!(Progress::hidden().line.is_none());
     }

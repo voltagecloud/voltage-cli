@@ -2,9 +2,10 @@
 //!
 //! `--color always|never` decides; otherwise each stream follows anstream's automatic choice,
 //! which honors `NO_COLOR`, `CLICOLOR_FORCE`, `CLICOLOR`, `TERM=dumb`, and whether that
-//! stream is a terminal. Only static labels are painted. Untrusted text stays scrubbed and
-//! plain, so every escape sequence the CLI writes comes from this palette. Machine-readable
-//! output never passes through here.
+//! stream is a terminal. A `Line` takes fixed labels and untrusted text, and scrubs the text
+//! before styling it, so every escape sequence the CLI writes comes from this palette or from
+//! an OSC 8 link whose visible text is its target. Machine-readable output never passes
+//! through here.
 
 use crate::terminal::scrub_line;
 use clap::{
@@ -104,6 +105,10 @@ pub enum Role {
     Success,
     /// The spinner and in-flight statuses such as `sending`
     Pending,
+    /// A URL a person opens
+    Link,
+    /// A value a person reads or types, such as a device code
+    Emphasis,
 }
 
 impl Role {
@@ -114,6 +119,8 @@ impl Role {
             Self::Muted => Style::new().dimmed(),
             Self::Success => AnsiColor::Green.on_default(),
             Self::Pending => AnsiColor::Yellow.on_default(),
+            Self::Link => AnsiColor::Blue.on_default().underline(),
+            Self::Emphasis => Style::new().bold(),
         }
     }
 }
@@ -132,6 +139,25 @@ impl Line {
     /// Untrusted or variable text, with every unsafe character made a space.
     pub fn text(mut self, text: &str) -> Self {
         self.0.push_str(&scrub_line(text));
+        self
+    }
+
+    /// `text` in a role's style.
+    pub fn styled(mut self, role: Role, text: &str) -> Self {
+        let style = role.style();
+        self.0
+            .push_str(&format!("{style}{}{style:#}", scrub_line(text)));
+        self
+    }
+
+    /// A URL that terminals with OSC 8 support make clickable. The visible text is the whole
+    /// URL, so a link cannot hide where it goes; anstream strips the sequence with color off.
+    pub fn link(mut self, url: &str) -> Self {
+        let url = scrub_line(url);
+        let style = Role::Link.style();
+        self.0.push_str(&format!(
+            "\x1b]8;;{url}\x1b\\{style}{url}{style:#}\x1b]8;;\x1b\\"
+        ));
         self
     }
 
@@ -257,6 +283,8 @@ mod tests {
             Role::Muted,
             Role::Success,
             Role::Pending,
+            Role::Link,
+            Role::Emphasis,
         ] {
             let painted = paint(role, "error:");
             assert!(painted.starts_with('\u{1b}') && painted.ends_with("\u{1b}[0m"));
@@ -274,6 +302,26 @@ mod tests {
             "✓ Payment  [2Jx completed"
         );
         assert_eq!(line.as_str().matches('\u{1b}').count(), 2);
+    }
+
+    #[test]
+    fn a_link_shows_its_whole_scrubbed_url_and_strips_to_it() {
+        let line = Line::default().link("https://x.test/a\u{1b}]8;;https://evil.test\u{7}");
+        let shown = "https://x.test/a ]8;;https://evil.test ";
+        assert_eq!(
+            anstream::adapter::strip_str(line.as_str()).to_string(),
+            shown
+        );
+        assert!(
+            line.as_str()
+                .starts_with(&format!("\u{1b}]8;;{shown}\u{1b}\\"))
+        );
+        assert!(line.as_str().ends_with("\u{1b}]8;;\u{1b}\\"));
+        let code = Line::default().styled(Role::Emphasis, "AB\u{1b}CD");
+        assert_eq!(
+            anstream::adapter::strip_str(code.as_str()).to_string(),
+            "AB CD"
+        );
     }
 
     #[test]
