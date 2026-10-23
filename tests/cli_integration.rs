@@ -6377,6 +6377,46 @@ async fn a_watch_retries_a_server_error_and_ends_on_a_client_error() {
     server.verify().await;
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_never_refreshes_sooner_than_its_own_pause_for_a_zero_retry_hint() {
+    let (server, dir) = fixture().await;
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    // `Retry-After: 0` on a success and on a 429 asks for no wait at all. The watch still
+    // waits its interval after the success, and at least half of it after the 429.
+    route("GET", payments_path())
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving"}]})),
+            ok(json!({"items": [{"id": a, "status": "receiving"}]}))
+                .insert_header("Retry-After", "0"),
+            ResponseTemplate::new(429).insert_header("Retry-After", "0"),
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"detail": "Forbidden"}})),
+        ]))
+        .expect(4)
+        .mount(&server)
+        .await;
+    let started = std::time::Instant::now();
+    cli(dir.path(), &server)
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .code(3);
+    // Interval, interval, then at least half the interval: a lower bound, so never flaky.
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(2500), "{elapsed:?}");
+    server.verify().await;
+}
+
 /// What a pseudo-terminal has shown so far, and whether it has closed.
 #[cfg(unix)]
 #[derive(Default)]
