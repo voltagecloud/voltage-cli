@@ -36,6 +36,17 @@ An accepted submission returns immediately with `outcome: accepted`. In human ou
 voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120
 ```
 
+## Watch payments
+
+`payments list --watch` keeps reading the list every `--interval` seconds (default 5) until you press Ctrl-C, with the same filters as `payments list`:
+
+```sh
+voltage payments list --profile prod --wallet WALLET_ID --watch
+voltage payments list --profile prod --watch --interval 2 --json
+```
+
+On a terminal it is a live table on the alternate screen, newest first, with `●` beside each payment that is new or changed since the last refresh; Ctrl-C puts your screen back and prints `Stopped watching payments.` (exit code 130). Piped or with `--json`, it writes one event envelope per payment instead: `snapshot` for each payment in the first read, then `new` or `updated` as they appear, with the payment in `data` and its ID in `id`. Each refresh reads the first page of the most recently updated payments (`sort_key=updated_at`, `sort_order=DESC`), so `--watch` cannot be combined with `--all`, `--cursor`, `--sort-key`, or `--sort-order`; more changes than one page holds (`--limit`, the API's default otherwise) between two refreshes are not all reported. A refresh that fails in transport, with a server error (5xx), or with a rate limit (429) is retried after the server's `Retry-After`, or after a pause that grows up to a minute, and the live view says why. A rejected credential (401) is resolved again once, so a saved login exchanges a fresh organization token. Any other error ends the watch. `--timeout` limits each refresh's request, not the watch, and `--quiet` also hides `Stopped watching payments.` On a terminal, rows beyond its height are left out and counted.
+
 ## Show an invoice
 
 For a BOLT11 receive, `--qr` prints the invoice as a terminal QR code and `--copy` puts it on the clipboard as soon as it is ready. Either flag implies `--wait ready`; with `--wait completed` the invoice is shown first and polling continues to settlement. On a terminal with color the QR code is black on white with the QR spec's four-module quiet zone, so it scans on a dark theme too; with color off (`NO_COLOR`, `--color never`, `TERM=dumb`) it is the compact code, which follows your terminal's theme and may read inverted on a dark one. It appears under a bold `Scan to pay` caption with the amount, memo, and expiry when the payment has them. The caption starts with the network, its dot in the website's color (mainnet orange, mutinynet and signet purple, testnet green); the code itself stays black and white. The CLI reads the payment's wallet for its network, since mutinynet and signet invoices share a prefix, and uses the prefix if that read fails. A wait that ends at `ready` shows the code after the result, so the code stays on screen; with `--wait completed` it comes first, and the status line counts down to the expiry. Redirected stderr gets the compact code it always did.

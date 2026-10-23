@@ -262,6 +262,57 @@ impl Output {
         write_stdout_styled(text.as_bytes(), self.color)
     }
 
+    /// One frame of a live watch on an interactive stdout: clear the screen, then `header`
+    /// and the payments table, with a marker beside each row whose ID is in `marked`.
+    pub fn live_frame(&self, header: &Line, page: &Value, marked: &[String]) -> Result<()> {
+        let view = human::View {
+            width: terminal::width().map(|width| width.saturating_sub(MARK_WIDTH)),
+            color: true,
+            glyphs: Glyphs::detect(|name| std::env::var(name).ok()),
+            ..human::View::plain()
+        };
+        // Rows past the terminal's height would scroll the header off; the newest updates
+        // come first, so the rows kept are the ones that matter.
+        let rows = terminal::height().map(|rows| rows.saturating_sub(FRAME_LINES));
+        let (page, more) = crate::watch::first(page, rows);
+        let mut table = Vec::new();
+        let envelope = Envelope::new(Some(200), page.clone(), None, Outcome::Retrieved);
+        human::render(&mut table, &envelope, view)?;
+        let ids: Vec<Option<&str>> = crate::watch::items(&page)
+            .iter()
+            .map(|payment| payment.get("id").and_then(Value::as_str))
+            .collect();
+        let mark = Line::default().paint(
+            Role::Pending,
+            if view.glyphs == Glyphs::UNICODE {
+                "●"
+            } else {
+                "*"
+            },
+        );
+        let mut frame = format!("{}\n\n", header.as_str());
+        // A next cursor is for paging by hand, which a live view does not do.
+        let table = String::from_utf8_lossy(&table);
+        let lines = table
+            .lines()
+            .filter(|line| !line.starts_with("Next cursor:"));
+        for (index, line) in lines.enumerate() {
+            // The table's first line is its header; row `n` is the `n`th payment.
+            let marked = index
+                .checked_sub(1)
+                .and_then(|row| ids.get(row).copied().flatten())
+                .is_some_and(|id| marked.iter().any(|marked| marked == id));
+            let prefix = if marked { mark.as_str() } else { " " };
+            frame.push_str(&format!("{prefix} {line}\n"));
+        }
+        if more > 0 {
+            frame.push_str(&format!("  … {more} more, below the terminal's height\n"));
+        }
+        // Home and clear are screen control, not color, so they skip the color stream.
+        finish_stdout(std::io::stdout().lock(), b"\x1b[H\x1b[2J")?;
+        write_stdout_styled(frame.as_bytes(), self.color)
+    }
+
     /// JSON output collects `--all` pages into one envelope; NDJSON streams them.
     pub fn collects_pages(&self) -> bool {
         self.format == OutputFormat::Json
@@ -295,6 +346,30 @@ impl Output {
         let mut bytes = serde_json::to_vec(&envelope)?;
         bytes.push(b'\n');
         write_stdout(&bytes)
+    }
+}
+
+/// Columns the live watch's row marker takes: the mark and a space.
+const MARK_WIDTH: usize = 2;
+/// Lines a live frame needs besides its rows: header, blank, table header, hidden columns,
+/// result count, the `more` line, and the line the cursor rests on.
+const FRAME_LINES: usize = 7;
+
+/// The terminal's alternate screen with the cursor hidden, for a live watch. Dropping it
+/// puts back the person's screen and cursor, including when Ctrl-C ends the watch.
+#[must_use = "the alternate screen is left as soon as the guard is dropped"]
+pub struct LiveScreen;
+
+impl LiveScreen {
+    pub fn enter() -> Self {
+        let _ = finish_stdout(std::io::stdout().lock(), b"\x1b[?1049h\x1b[?25l");
+        Self
+    }
+}
+
+impl Drop for LiveScreen {
+    fn drop(&mut self) {
+        let _ = finish_stdout(std::io::stdout().lock(), b"\x1b[?25h\x1b[?1049l");
     }
 }
 

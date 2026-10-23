@@ -18,15 +18,16 @@ use crate::{
     dry_run,
     error::{CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     input::{PaginationMode, Request},
-    output::{Envelope, Outcome, Output},
+    output::{Envelope, LiveScreen, Outcome, Output},
     payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
     price::{PRICE_URL, PriceService, UsdPerBtc},
     qr,
     registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
-    style::Depth,
-    terminal::Terminal,
+    style::{Depth, Line, Role},
+    terminal::{self, Terminal},
     timeline::Timeline,
+    watch,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -35,7 +36,10 @@ use std::{
     borrow::Cow,
     collections::BTreeSet,
     io::Write,
-    sync::{Mutex, OnceLock, PoisonError},
+    sync::{
+        Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
@@ -290,6 +294,8 @@ impl Api {
                     ErrorKind::for_http_status(status)
                 };
                 Error {
+                    response_status: Some(status),
+                    retry_after,
                     hint: self.authorization.rejection_hint(status),
                     // Only the sources are attached: an HTTP detail would make an HTML 404
                     // read as a missing resource.
@@ -322,6 +328,7 @@ impl Api {
             if let Some(hint) = hint.or_else(|| rejection.hint().map(Cow::Borrowed)) {
                 error = error.with_hint(hint);
             }
+            error.retry_after = retry_after;
             return Err(error
                 .with_detail(ErrorDetail::Http {
                     http_status: status,
@@ -635,6 +642,7 @@ pub async fn execute(
     let call = Call {
         api,
         global,
+        resolver,
         invocation,
         scope,
         deadline: Instant::now() + global.timeout,
@@ -643,7 +651,12 @@ pub async fn execute(
     };
     match run {
         Run::EventStream => call.api.stream(&call.request, call.out).await,
-        Run::Read(read) => call.read(read).await,
+        Run::Read(read) => {
+            if matches!(read.then, ReadThen::Watch { .. }) {
+                resolver.submission.watching();
+            }
+            call.read(read).await
+        }
         Run::Mutation(mutation) => {
             call.mutate(mutation, resolver.settings, resolver.submission)
                 .await
@@ -804,6 +817,8 @@ pub struct Read {
 pub enum ReadThen {
     /// Write the response, then follow further pages when `follow` (`--all`) is set.
     Pages { follow: bool },
+    /// `payments list --watch`: read again every `interval_seconds` until interrupted.
+    Watch { interval_seconds: u64 },
     /// A checkout session read answers 202 until its projection exists.
     SessionProjection,
     /// Poll the payment until `until`. A submitted payment can be missing from the read
@@ -825,6 +840,9 @@ impl Read {
                     && invocation.wait.is_some(),
             },
             None if operation.id == OperationId::GetSession => ReadThen::SessionProjection,
+            None if let Some(interval) = invocation.watch => ReadThen::Watch {
+                interval_seconds: interval.as_secs(),
+            },
             None => ReadThen::Pages {
                 follow: invocation.all,
             },
@@ -868,6 +886,8 @@ impl Mutation {
 struct Call<'a> {
     api: Api,
     global: &'a GlobalFlags,
+    /// How the credential was chosen, to choose it again when a watch outlives it.
+    resolver: Resolver<'a>,
     invocation: &'a ApiInvocation,
     scope: &'a Scope,
     deadline: Instant,
@@ -878,6 +898,9 @@ struct Call<'a> {
 impl Call<'_> {
     async fn read(mut self, read: Read) -> Result<()> {
         let operation = self.invocation.operation;
+        if matches!(read.then, ReadThen::Watch { .. }) {
+            watch::follow_updates(&mut self.request.query);
+        }
         let sent = self
             .api
             .send(
@@ -911,11 +934,83 @@ impl Call<'_> {
                 let response = self.await_session_projection(response).await?;
                 self.write_pages(response, Outcome::Retrieved, false).await
             }
+            ReadThen::Watch { interval_seconds } => {
+                self.watch(response, Duration::from_secs(interval_seconds))
+                    .await
+            }
             ReadThen::Pages { follow } => {
                 if operation.id == OperationId::GetWallet && self.out.on_terminal() {
                     self.lead_with_balance(&response.body).await?;
                 }
                 self.write_pages(response, Outcome::Retrieved, follow).await
+            }
+        }
+    }
+
+    /// `payments list --watch`: read the list again every `interval` until interrupted, most
+    /// recently updated first. An interactive stdout gets a live table on the alternate
+    /// screen that marks payments new or changed since the last read; other output gets one
+    /// event envelope per payment, `snapshot` for the first read, then `new` or `updated`.
+    /// A refresh the server could not serve (a 5xx, a 429, or a transport failure) is retried
+    /// after its `Retry-After`, or after a growing pause; a rejected credential (401) is
+    /// resolved again once, since a saved login's organization token is short-lived; any
+    /// other failure ends the watch.
+    async fn watch(&mut self, mut response: Response, interval: Duration) -> Result<()> {
+        // Each read would otherwise draw a status line over the table.
+        self.api.terminal = self.api.terminal.quieted();
+        let live = self.out.on_terminal();
+        let _screen = live.then(LiveScreen::enter);
+        let mut seen = watch::Seen::default();
+        let mut failure = None;
+        let mut backoff = Backoff::new(interval, watch::BACKOFF_CEILING);
+        let mut pause = response.retry_after.unwrap_or(interval);
+        let mut reauthorized = false;
+        loop {
+            let changes = seen.update(&response.body);
+            if live {
+                let marked: Vec<String> = changes
+                    .iter()
+                    .filter(|(_, _, change)| *change != watch::Change::Snapshot)
+                    .map(|(id, _, _)| id.clone())
+                    .collect();
+                let header = watch_header(interval, failure.as_ref(), self.api.terminal);
+                self.out.live_frame(&header, &response.body, &marked)?;
+            } else {
+                for (id, payment, change) in changes {
+                    let event = Envelope::event(payment, change.as_str().into(), Some(id));
+                    self.out.write(event, &self.api.secrets())?;
+                }
+            }
+            tokio::time::sleep(pause).await;
+            let operation = self.invocation.operation;
+            let sent = self
+                .api
+                .send(
+                    operation.method,
+                    &self.request.path,
+                    &self.request.query,
+                    None,
+                )
+                .await;
+            match sent {
+                Ok(next) => {
+                    pause = next.retry_after.unwrap_or(interval);
+                    response = next;
+                    failure = None;
+                    reauthorized = false;
+                    backoff = Backoff::new(interval, watch::BACKOFF_CEILING);
+                }
+                Err(error) if error.response_status() == Some(401) && !reauthorized => {
+                    self.api.authorization =
+                        Authorization::resolve(self.invocation, self.resolver, self.scope).await?;
+                    reauthorized = true;
+                    pause = Duration::ZERO;
+                }
+                Err(error) if watch::retries(&error) => {
+                    pause = error.retry_after.unwrap_or_else(|| backoff.pause());
+                    failure = Some(error);
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -1233,6 +1328,8 @@ pub struct SubmissionState {
     /// The saved login whose profile offer is under way. Kept apart from `session`: the
     /// offer's own refresh or token exchange sets and settles a session change of its own.
     profile_offer: Mutex<Option<String>>,
+    /// `payments list --watch` is running, so Ctrl-C is how it ends rather than a cut-off.
+    watching: AtomicBool,
 }
 
 /// A login change that the server and the saved credentials can disagree about.
@@ -1271,6 +1368,16 @@ impl SubmissionState {
 
     pub(crate) fn session_settled(&self) {
         *self.session.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// Marks a watch, which only reads and ends with Ctrl-C.
+    fn watching(&self) {
+        self.watching.store(true, Ordering::Relaxed);
+    }
+
+    /// A watch was running, so Ctrl-C is how it ended rather than a failure to report.
+    pub fn is_watching(&self) -> bool {
+        self.watching.load(Ordering::Relaxed)
     }
 
     /// Marks the profile offer after a login, which is saved by then, as under way or done.
@@ -1506,6 +1613,25 @@ impl Call<'_> {
     }
 }
 
+/// The live watch's first line: what it is, how often it refreshes, how to stop, and why
+/// the last refresh failed, if it did.
+fn watch_header(interval: Duration, failure: Option<&Error>, terminal: Terminal) -> Line {
+    let separator = terminal.glyphs().separator;
+    let mut line = Line::default()
+        .styled(Role::Emphasis, "Watching payments")
+        .text(&format!(
+            " {separator} every {} {separator} Ctrl-C to stop",
+            terminal::elapsed(interval)
+        ));
+    if let Some(error) = failure {
+        line = line
+            .text(&format!(" {separator} "))
+            .paint(Role::Caution, "last refresh failed:")
+            .text(&format!(" {}", error.message));
+    }
+    line
+}
+
 /// Copy and render a ready BOLT11 invoice as requested; both go to stderr.
 fn present_invoice(
     invoice: &str,
@@ -1696,6 +1822,29 @@ fn next_page(body: &Value, request: &Request) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_watch_header_says_how_to_stop_and_why_a_refresh_failed() {
+        let terminal = Terminal::new(false, true);
+        let separator = terminal.glyphs().separator;
+        let shown = |line: Line| anstream::adapter::strip_str(line.as_str()).to_string();
+        assert_eq!(
+            shown(watch_header(Duration::from_secs(5), None, terminal)),
+            format!("Watching payments {separator} every 5s {separator} Ctrl-C to stop")
+        );
+        let failure = Error::transport("Connection reset");
+        assert_eq!(
+            shown(watch_header(
+                Duration::from_secs(5),
+                Some(&failure),
+                terminal
+            )),
+            format!(
+                "Watching payments {separator} every 5s {separator} Ctrl-C to stop \
+                 {separator} last refresh failed: Connection reset"
+            )
+        );
+    }
     use crate::{
         cli::{Command, Invocation},
         config::Config,

@@ -400,6 +400,28 @@ struct WaitFlags {
 }
 
 #[derive(Debug, Args)]
+struct WatchFlags {
+    /// Keep listing until Ctrl-C: a live table on a terminal, else one event per new or
+    /// changed payment
+    #[arg(
+        long,
+        conflicts_with_all = ["all", "cursor", "sort-key", "sort-order"],
+        help_heading = "Waiting and presentation"
+    )]
+    watch: bool,
+    /// Seconds between refreshes while watching
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value = "5",
+        value_parser = parse_timeout,
+        requires = "watch",
+        help_heading = "Waiting and presentation"
+    )]
+    interval: Duration,
+}
+
+#[derive(Debug, Args)]
 struct InvoiceFlags {
     /// Render a ready BOLT11 invoice as a QR code to scan; implies --wait ready
     #[arg(long, help_heading = "Waiting and presentation")]
@@ -622,6 +644,8 @@ pub struct ApiInvocation {
     pub token_file: Option<InputSource>,
     pub origin: Option<Origin>,
     pub wait: Option<WaitTarget>,
+    /// `payments list --watch`: refresh at this interval until interrupted.
+    pub watch: Option<Duration>,
     pub qr: bool,
     pub copy: bool,
     pub body: Option<BodySource>,
@@ -812,6 +836,7 @@ fn api_invocation(
     let checkout = parse_if::<CheckoutFlags>(operation.auth.is_checkout(), m)?;
     let origin = parse_if::<OriginFlags>(takes_origin(operation), m)?;
     let wait = parse_if::<WaitFlags>(operation.id.supports_wait(), m)?;
+    let watch = parse_if::<WatchFlags>(operation.id == OperationId::GetPayments, m)?;
     let invoice = parse_if::<InvoiceFlags>(operation.id.presents_invoice(), m)?;
     let data = parse_if::<DataFlags>(operation.body, m)?;
     let body = match data {
@@ -832,6 +857,9 @@ fn api_invocation(
         token_file: checkout.and_then(|flags| flags.token_file),
         origin: origin.and_then(|flags| flags.origin),
         wait: wait.and_then(|flags| flags.wait),
+        watch: watch
+            .filter(|flags| flags.watch)
+            .map(|flags| flags.interval),
         qr: invoice.as_ref().is_some_and(|flags| flags.qr),
         copy: invoice.as_ref().is_some_and(|flags| flags.copy),
         body,
@@ -1055,6 +1083,9 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     }
     if takes_origin(operation) {
         cmd = OriginFlags::augment_args(cmd);
+    }
+    if operation.id == OperationId::GetPayments {
+        cmd = WatchFlags::augment_args(cmd);
     }
     if operation.id.supports_wait() {
         cmd = WaitFlags::augment_args(cmd);
@@ -1585,6 +1616,40 @@ mod tests {
             OperationId::GetAllOrganizationsWalletsAsUser
         );
         assert!(api.body.is_none());
+    }
+
+    #[test]
+    fn only_payments_list_watches_and_its_interval_needs_the_watch() {
+        let watched = api(&["payments", "list", "--watch"]);
+        assert_eq!(watched.watch, Some(Duration::from_secs(5)));
+        let quick = api(&["payments", "list", "--watch", "--interval", "2"]);
+        assert_eq!(quick.watch, Some(Duration::from_secs(2)));
+        assert_eq!(api(&["payments", "list"]).watch, None);
+        for args in [
+            &["voltage", "payments", "list", "--interval", "2"][..],
+            &["voltage", "payments", "list", "--watch", "--all"],
+            &["voltage", "payments", "list", "--watch", "--cursor", "c1"],
+            &[
+                "voltage",
+                "payments",
+                "list",
+                "--watch",
+                "--sort-key",
+                "created_at",
+            ],
+            &[
+                "voltage",
+                "payments",
+                "list",
+                "--watch",
+                "--sort-order",
+                "ASC",
+            ],
+            &["voltage", "payments", "list", "--watch", "--interval", "0"],
+            &["voltage", "wallets", "list", "--watch"],
+        ] {
+            assert!(Invocation::try_parse_from(args).is_err(), "{args:?}");
+        }
     }
 
     #[test]
