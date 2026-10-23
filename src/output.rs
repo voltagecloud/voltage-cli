@@ -187,6 +187,7 @@ pub struct Output {
     format: OutputFormat,
     show_secrets: bool,
     file: Option<File>,
+    color: ColorChoice,
 }
 
 /// Reserve `--output-file`. It is reserved before any request, so a refusal sent nothing; the
@@ -212,12 +213,14 @@ impl Output {
         format: OutputFormat,
         show_secrets: bool,
         output_file: Option<&Path>,
+        color: ColorChoice,
     ) -> Result<Self> {
         let file = output_file.map(reserve_output_file).transpose()?;
         Ok(Self {
             format,
             show_secrets,
             file,
+            color,
         })
     }
 
@@ -247,24 +250,34 @@ impl Output {
         if !self.show_secrets {
             redact(&mut envelope.data, secrets);
         }
-        let mut bytes = match self.format {
-            OutputFormat::Table => {
-                let mut buf = Vec::new();
-                human::render(&mut buf, &envelope, terminal::width())?;
-                buf
-            }
-            OutputFormat::Json | OutputFormat::Ndjson => serde_json::to_vec(&envelope)?,
-        };
-        if self.format != OutputFormat::Table {
-            bytes.push(b'\n');
+        if self.format == OutputFormat::Table {
+            // Styled as for a terminal; the stream strips styles when color is off there.
+            let view = human::View {
+                width: terminal::width(),
+                color: true,
+                ..human::View::plain()
+            };
+            let mut buf = Vec::new();
+            human::render(&mut buf, &envelope, view)?;
+            return write_stdout_styled(&buf, self.color);
         }
+        let mut bytes = serde_json::to_vec(&envelope)?;
+        bytes.push(b'\n');
         write_stdout(&bytes)
     }
 }
 
 /// Write rendered output; a closed stdout ends the pipeline successfully.
 pub fn write_stdout(bytes: &[u8]) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
+    finish_stdout(std::io::stdout().lock(), bytes)
+}
+
+/// `write_stdout` for human output, keeping its styles only when `color` allows them there.
+fn write_stdout_styled(bytes: &[u8], color: ColorChoice) -> Result<()> {
+    finish_stdout(style::stdout(color), bytes)
+}
+
+fn finish_stdout(mut stdout: impl Write, bytes: &[u8]) -> Result<()> {
     stdout
         .write_all(bytes)
         .and_then(|()| stdout.flush())

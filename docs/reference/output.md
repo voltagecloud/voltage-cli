@@ -5,9 +5,10 @@ On a terminal, results are readable tables; when piped, they are JSON. `--json` 
 ## Tables
 
 - Tables show up to seven of the fields a list's items share (ID, name, status, amount, and similar) with aligned columns, a result count, and the next cursor.
-- Amounts are shown in their base units (`msats` or `cents`).
+- Amounts are shown with grouped digits: every BTC amount in sats, with up to three decimals for msats (`150,000 sats`, `1.5 sats`), so a column never mixes units, and cents as dollars (`$1,234.56`). JSON keeps the API's integer and base unit.
 - A table wider than the terminal (its width, or `COLUMNS`) hides trailing columns and then shortens text cells with `…`, naming what it hid. IDs, timestamps, and amounts are never shortened.
-- Timestamps are shown in UTC to the second, such as `2024-02-27 01:58:51 UTC`; JSON keeps the exact value.
+- Table timestamps are relative to now, such as `3 minutes ago` or `in 2 days`; anything within a minute either way reads `just now`. A single resource shows the UTC time to the second with the relative time beside it, such as `2024-02-27 01:58:51 UTC (7 months ago)`. JSON keeps the exact value.
+- With color on, table headers and field names are bold, a known status is colored by meaning (`completed` green, `failed` red, `sending` yellow), and so is the outcome line (`accepted`, `dry_run`). Color is added after layout, so it never moves a column; an unknown status stays plain.
 - A table starts with the outcome only when it adds something, such as `accepted` or `dry_run`, or when there is no data to show.
 - A single resource is shown as aligned `field  value` lines, with nested fields joined by dots. `voltage context` shows each setting as `name  value  (source)`.
 

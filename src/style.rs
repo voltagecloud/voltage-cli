@@ -229,6 +229,11 @@ pub fn write_stderr(choice: ColorChoice, text: &str) {
     let _ = stderr.flush();
 }
 
+/// Locked stdout that keeps styles only when `choice` allows color there.
+pub fn stdout(choice: ColorChoice) -> anstream::AutoStream<std::io::StdoutLock<'static>> {
+    anstream::AutoStream::new(std::io::stdout().lock(), choice.as_stream())
+}
+
 /// Help and parse-error styles in cargo's manner, using only the 16 basic colors so the
 /// terminal's theme keeps them legible.
 pub const HELP: Styles = Styles::styled()

@@ -2565,6 +2565,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "unicode-width",
  "url",
  "uuid",
  "webbrowser",
