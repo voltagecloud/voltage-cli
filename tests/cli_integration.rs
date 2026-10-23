@@ -5729,6 +5729,78 @@ async fn a_submitted_payment_on_a_terminal_reads_as_a_timeline() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_described_change_on_a_terminal_says_what_it_would_do() {
+    let (server, dir) = fixture().await;
+    let args = [
+        "wallets", "delete", WALLET, "--org", ORG, "--output", "table",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(6), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    let summary = shown
+        .find("! Not sent: this would delete a wallet\r\n")
+        .expect(&shown);
+    assert!(
+        shown[summary..].starts_with(&format!(
+            "! Not sent: this would delete a wallet\r\n  wallet_id  {WALLET}\r\n\r\n"
+        )),
+        "{shown}"
+    );
+    // The details still follow on stdout, and the error line becomes how to send it.
+    assert!(run.stdout.contains("method"), "{}", run.stdout);
+    assert!(
+        shown.ends_with("› Send it: add --execute, or set VOLTAGE_EXECUTE=1\r\n"),
+        "{shown:?}"
+    );
+    assert!(!shown.contains("error:"), "{shown}");
+    assert!(
+        run.shown.contains("\u{1b}[1m\u{1b}[33m!"),
+        "{:?}",
+        run.shown
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // Redirected stderr keeps the error line, and nothing else changes.
+    let piped = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(args)
+        .assert()
+        .code(6);
+    let error = stderr(&piped);
+    assert!(error.starts_with("error: Described this change"), "{error}");
+    assert!(!error.contains("Not sent"), "{error}");
+
+    // On a terminal, JSON output gets neither the summary nor the line, only the JSON error.
+    let json = on_a_terminal(
+        dir.path(),
+        &server,
+        &["wallets", "delete", WALLET, "--org", ORG, "--json"],
+        &[],
+    )
+    .await;
+    assert_eq!(json.code, Some(6), "{}", json.shown);
+    assert!(json.shown.contains("\"exit_code\":6"), "{}", json.shown);
+    assert!(
+        !json.shown.contains("Not sent") && !json.shown.contains("Send it"),
+        "{}",
+        json.shown
+    );
+    // `--quiet` hides the summary but keeps how to send it.
+    let quiet = on_a_terminal(
+        dir.path(),
+        &server,
+        &[&args[..], &["--quiet"]].concat(),
+        &[],
+    )
+    .await;
+    assert_eq!(quiet.code, Some(6), "{}", quiet.shown);
+    let shown = strip_styles(&quiet.shown);
+    assert!(!shown.contains("Not sent"), "{shown}");
+    assert!(shown.contains("› Send it: add --execute"), "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {
     let (server, dir) = fixture().await;
     route("GET", payment_path())

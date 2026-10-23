@@ -600,7 +600,12 @@ pub async fn execute(
     let run = Run::plan(invocation, &request, scope);
     match execution {
         Execution::DescribeChange => {
-            out.write(dry_run::describe(invocation, global, &request, run)?, &[])?;
+            let described = dry_run::describe(invocation, global, &request, run)?;
+            let terminal = global.terminal();
+            if out.is_human() && terminal.decorates() {
+                dry_run::announce(terminal, invocation, &described);
+            }
+            out.write(described, &[])?;
             return Err(Error::new(
                 ErrorKind::NotExecuted,
                 format!(

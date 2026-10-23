@@ -105,6 +105,8 @@ pub enum Role {
     Success,
     /// The spinner and in-flight statuses such as `sending`
     Pending,
+    /// `!`: something was deliberately not done
+    Caution,
     /// A URL a person opens
     Link,
     /// A value a person reads or types, such as a device code
@@ -119,6 +121,7 @@ impl Role {
             Self::Muted => Style::new().dimmed(),
             Self::Success => AnsiColor::Green.on_default(),
             Self::Pending => AnsiColor::Yellow.on_default(),
+            Self::Caution => AnsiColor::Yellow.on_default().bold(),
             Self::Link => AnsiColor::Blue.on_default().underline(),
             Self::Emphasis => Style::new().bold(),
         }
@@ -283,6 +286,7 @@ mod tests {
             Role::Muted,
             Role::Success,
             Role::Pending,
+            Role::Caution,
             Role::Link,
             Role::Emphasis,
         ] {
