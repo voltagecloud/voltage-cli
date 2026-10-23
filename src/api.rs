@@ -1433,11 +1433,13 @@ impl Call<'_> {
                     {
                         qr::check(invoice)?;
                     }
-                    timeline.reached(outcome);
+                    // The record first, then how the wait ended, so the outcome is what
+                    // stays on screen; a ready invoice's code follows it.
                     self.out.write(
                         Envelope::new(Some(response.status), response.body, Some(id), outcome),
                         &api.secrets(),
                     )?;
+                    timeline.reached(outcome);
                     let Some(invoice) = invoice else {
                         return Ok(());
                     };

@@ -5,7 +5,7 @@
 use crate::{
     output::Outcome,
     payment::{PaymentStatus, StatusText},
-    style::{Line, Role},
+    style::{Glyphs, Line, Role},
     terminal::{self, Terminal},
 };
 use std::time::Duration;
@@ -106,9 +106,9 @@ impl Timeline {
     /// The wait reached its target.
     pub fn reached(&self, outcome: Outcome) {
         if self.terminal.decorates() {
-            let glyphs = self.terminal.glyphs();
+            let (role, symbol) = closing(outcome, self.terminal.glyphs());
             let line = Line::default()
-                .paint(Role::Success, glyphs.done)
+                .paint(role, symbol)
                 .text(&format!(" Payment {} ", self.id))
                 .paint(Role::Success, outcome.as_str());
             self.terminal.notice_line(self.waited(line));
@@ -154,6 +154,15 @@ fn with_status(line: Line, status: &StatusText) -> Line {
     }
 }
 
+/// A settled payment closes with the lightning bolt; a ready invoice, not yet paid, with a
+/// check mark.
+fn closing(outcome: Outcome, glyphs: Glyphs) -> (Role, &'static str) {
+    match outcome {
+        Outcome::Completed => (Role::Bolt, glyphs.paid),
+        _ => (Role::Success, glyphs.done),
+    }
+}
+
 fn is_final(status: &StatusText) -> bool {
     matches!(
         status,
@@ -177,6 +186,22 @@ fn status_role(status: PaymentStatus) -> Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settled_payment_closes_with_a_bolt_and_a_ready_one_with_a_check() {
+        assert_eq!(
+            closing(Outcome::Completed, Glyphs::UNICODE),
+            (Role::Bolt, "⚡")
+        );
+        assert_eq!(
+            closing(Outcome::Ready, Glyphs::UNICODE),
+            (Role::Success, "✓")
+        );
+        assert_eq!(
+            closing(Outcome::Completed, Glyphs::ASCII),
+            (Role::Bolt, "ok")
+        );
+    }
 
     #[test]
     fn statuses_are_colored_by_meaning_and_unknown_text_stays_plain() {
