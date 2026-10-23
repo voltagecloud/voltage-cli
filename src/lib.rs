@@ -20,6 +20,7 @@ mod price;
 pub mod registry;
 pub mod secret;
 mod startup;
+mod style;
 mod terminal;
 mod wallet_currency;
 mod wallet_shortlist;

@@ -9,6 +9,7 @@ use crate::{
     Error, Result,
     config::new_private,
     error::ErrorDetail,
+    style::{self, ColorChoice, Role},
     terminal::{self, scrub_line},
 };
 use clap::ValueEnum;
@@ -316,8 +317,9 @@ struct ErrorBody<'a> {
     detail: Option<&'a ErrorDetail>,
 }
 
-/// Print an error to stderr in the format the selected output uses.
-pub fn report_error(error: &Error, format: OutputFormat) {
+/// Print an error to stderr in the format the selected output uses; `color` styles only the
+/// human report's labels.
+pub fn report_error(error: &Error, format: OutputFormat, color: ColorChoice) {
     let report = ErrorReport {
         error: ErrorBody {
             message: &error.message,
@@ -332,25 +334,34 @@ pub fn report_error(error: &Error, format: OutputFormat) {
     if format.is_machine_readable() {
         eprintln!("{body}");
     } else {
-        // Messages can interpolate untrusted input; keep control characters off the terminal.
-        eprintln!("error: {}", scrub_line(&error.message));
-        if let Some(hint) = &error.hint {
-            // Hints can name saved credentials and profiles, so they are scrubbed like messages.
-            eprintln!("hint: {}", scrub_line(hint));
-        }
-        let repeated = error.detail.as_ref().is_some_and(ErrorDetail::repeats_hint);
-        if let Some(detail) =
-            human_detail(&body["error"]["detail"], &error.message).filter(|_| !repeated)
-        {
-            let mut lines = Vec::new();
-            if human::detail(&mut lines, &detail).is_ok() {
-                eprintln!("details:");
-                for line in String::from_utf8_lossy(&lines).lines() {
-                    eprintln!("  {line}");
-                }
+        style::write_stderr(color, &human_error(error, &body["error"]["detail"]));
+    }
+}
+
+/// The human error report with painted labels, which the stream strips when color is off.
+fn human_error(error: &Error, detail: &Value) -> String {
+    // Messages can interpolate untrusted input; keep control characters off the terminal.
+    let mut report = format!(
+        "{} {}\n",
+        style::paint(Role::Failure, "error:"),
+        scrub_line(&error.message)
+    );
+    if let Some(hint) = &error.hint {
+        // Hints can name saved credentials and profiles, so they are scrubbed like messages.
+        let hint = scrub_line(hint);
+        report.push_str(&format!("{} {hint}\n", style::paint(Role::Hint, "hint:")));
+    }
+    let repeated = error.detail.as_ref().is_some_and(ErrorDetail::repeats_hint);
+    if let Some(detail) = human_detail(detail, &error.message).filter(|_| !repeated) {
+        let mut lines = Vec::new();
+        if human::detail(&mut lines, &detail).is_ok() {
+            report.push_str(&format!("{}\n", style::paint(Role::Muted, "details:")));
+            for line in String::from_utf8_lossy(&lines).lines() {
+                report.push_str(&format!("  {line}\n"));
             }
         }
     }
+    report
 }
 
 /// The part of an error's detail a person needs. A client error (4xx) shows the API's error
@@ -440,6 +451,28 @@ mod tests {
         let pending = json!({"resource_id": "id", "outcome": "pending"});
         assert_eq!(human_detail(&pending, ""), Some(pending.clone()));
         assert_eq!(human_detail(&Value::Null, ""), None);
+    }
+
+    #[test]
+    fn human_errors_paint_only_their_labels() {
+        let hostile = "bad\u{1b}[2J\u{1b}]8;;https://evil.test\u{7}key";
+        let mut error = Error::usage(format!("Rejected {hostile}"));
+        error.hint = Some(format!("Try {hostile}").into());
+        let report = human_error(&error, &json!({"request_id": hostile}));
+        let plain = "error: Rejected bad [2J ]8;;https://evil.test key\n\
+            hint: Try bad [2J ]8;;https://evil.test key\n\
+            details:\n  request_id  bad [2J ]8;;https://evil.test key\n";
+        assert_eq!(anstream::adapter::strip_str(&report).to_string(), plain);
+        // Every escape sequence left is one of the three labels' styles.
+        let mut rest = report.clone();
+        for (role, label) in [
+            (Role::Failure, "error:"),
+            (Role::Hint, "hint:"),
+            (Role::Muted, "details:"),
+        ] {
+            rest = rest.replacen(&style::paint(role, label), label, 1);
+        }
+        assert_eq!(rest, plain);
     }
 
     #[test]

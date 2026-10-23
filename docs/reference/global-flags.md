@@ -23,6 +23,8 @@ Generated from the command definitions by `VOLTAGE_BLESS=1 cargo test`; do not e
 | `-o`, `--output OUTPUT` | Output format (`table`, `json`, `ndjson`) |
 | `--output-file PATH` | Save the complete response to a new owner-only file |
 | `--show-secrets` | Explicitly allow secrets in result output |
+| `--color WHEN` | When to color human output and help (`auto`, `always`, `never`); default `auto` |
+| `--no-color` | Same as --color never |
 | `-q`, `--quiet` | Hide optional progress and notices, not errors, results, or recovery IDs |
 
 ## Safety

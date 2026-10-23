@@ -15,6 +15,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "=4.6.7", features = ["derive", "string"] }
 clap_complete = "=4.6.11"
+# Colors the CLI's own labels with clap's policy: clap already depends on it, so it adds no
+# crate. It decides per stream (NO_COLOR, CLICOLOR, terminal) and strips styles otherwise.
+anstream = "=1.0.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["arbitrary_precision"] }
 toml = "=1.1.6"
