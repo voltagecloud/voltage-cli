@@ -3984,6 +3984,21 @@ async fn api_rejections_lead_with_the_reason_and_keep_the_response_for_json() {
     assert_eq!(report["error"]["detail"]["data"], rejection);
 }
 
+#[test]
+fn a_redirected_context_table_is_plain_fields_without_a_card() {
+    let dir = private_tempdir();
+    let result = Command::from_std(human_process_at(dir.path(), "http://127.0.0.1:9"))
+        .args(["context", "--output", "table", "--color", "always"])
+        .assert()
+        .success();
+    let shown = stdout(&result);
+    assert!(strip_styles(&shown).starts_with("account "), "{shown}");
+    assert!(
+        !shown.contains("voltage context") && !shown.contains('╭'),
+        "{shown}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tables_follow_the_color_choice_on_stdout_and_strip_to_the_plain_table() {
     let (server, dir) = fixture().await;

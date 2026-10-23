@@ -18,6 +18,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - Human output shows amounts with grouped digits, every BTC amount in sats (`150,000 sats`, `1.5 sats`) and cents as dollars (`$1,234.56`), and table timestamps relative to now (`3 minutes ago`); single resources show the UTC time with the relative time beside it. With color on, headers and field names are bold and known statuses are colored. JSON is unchanged.
 - Help headers and usage are Voltage orange where the terminal draws 256 or 24-bit color, and bold elsewhere. `FORCE_COLOR` is honored: `0` or `false` turns color off, other values turn it on when redirected; `--color` and `NO_COLOR` still win.
 - A successful `voltage login` on a terminal shows the `voltage` wordmark, a lightning bolt beside the name in Voltage orange, above `✓ Logged in as`.
+- `voltage context` and `voltage auth status` draw their fields in a titled card on a terminal, with sources dimmed. Redirected output is unchanged.
 
 ## 0.2.0 - 2026-10-22
 

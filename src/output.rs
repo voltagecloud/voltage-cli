@@ -9,7 +9,7 @@ use crate::{
     Error, Result,
     config::{EXECUTE_VARIABLE, new_private},
     error::{ErrorDetail, ErrorKind},
-    style::{self, ColorChoice, Glyphs, Line, Role},
+    style::{self, ColorChoice, Depth, Glyphs, Line, Role},
     terminal::{self, scrub_line},
 };
 use clap::ValueEnum;
@@ -125,6 +125,9 @@ pub struct Envelope {
     /// How a person reads the data; never part of the JSON.
     #[serde(skip)]
     pub layout: Layout,
+    /// On a terminal, a single result is drawn as a card with this title.
+    #[serde(skip)]
+    pub card: Option<&'static str>,
 }
 
 /// How table output lays out a single result. Decided by the command that built the data, not
@@ -152,6 +155,7 @@ impl Envelope {
             outcome,
             event: None,
             layout: Layout::Fields,
+            card: None,
         }
     }
 
@@ -171,6 +175,14 @@ impl Envelope {
             layout: Layout::Settings,
             ..Self::local(data)?
         })
+    }
+
+    /// Draw the result as a card with `title` on a terminal.
+    pub fn titled(self, title: &'static str) -> Self {
+        Self {
+            card: Some(title),
+            ..self
+        }
     }
 
     /// One checkout stream event.
@@ -255,6 +267,9 @@ impl Output {
             let view = human::View {
                 width: terminal::width(),
                 color: true,
+                cards: std::io::stdout().is_terminal(),
+                glyphs: Glyphs::detect(|name| std::env::var(name).ok()),
+                depth: Depth::detect(|name| std::env::var(name).ok()),
                 ..human::View::plain()
             };
             let mut buf = Vec::new();

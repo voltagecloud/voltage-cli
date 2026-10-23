@@ -10,7 +10,7 @@
 use super::{Envelope, Layout, Outcome};
 use crate::{
     Result,
-    style::{Line as Styled, Role},
+    style::{Depth, Glyphs, Line as Styled, Role},
     terminal::scrub_line,
 };
 use comfy_table::{ColumnConstraint, ContentArrangement, Row, Table, TableStyle, Width};
@@ -53,6 +53,12 @@ pub struct View {
     /// Seconds since the Unix epoch.
     pub now: i64,
     pub color: bool,
+    /// Draw a titled result as a card; only for a terminal.
+    pub cards: bool,
+    /// Unicode or ASCII box lines for a card.
+    pub glyphs: Glyphs,
+    /// The depth of the brand color for a card's title.
+    pub depth: Depth,
 }
 
 impl View {
@@ -62,6 +68,9 @@ impl View {
             width: None,
             now: unix_seconds(SystemTime::now()),
             color: false,
+            cards: false,
+            glyphs: Glyphs::ASCII,
+            depth: Depth::Basic,
         }
     }
 }
@@ -95,13 +104,137 @@ pub fn render(out: &mut impl Write, envelope: &Envelope, view: View) -> Result<(
         summary(out, data, items.len())?;
         return Ok(());
     }
-    let local = envelope.layout == Layout::Settings;
     match data {
         Value::Null => {}
-        Value::Object(map) => fields(out, map, local, view)?,
+        Value::Object(map) => object(out, envelope, map, view)?,
         other => writeln!(out, "{}", cell(other, view, Place::Field))?,
     }
     Ok(())
+}
+
+/// A single result's fields, inside a card when the result has a title and the card fits.
+fn object(
+    out: &mut impl Write,
+    envelope: &Envelope,
+    map: &Map<String, Value>,
+    view: View,
+) -> Result<()> {
+    let local = envelope.layout == Layout::Settings;
+    let Some(title) = envelope.card.filter(|_| view.cards) else {
+        return fields(out, map, local, view);
+    };
+    let mut lines = Vec::new();
+    fields(&mut lines, map, local, view)?;
+    let lines: Vec<String> = String::from_utf8_lossy(&lines)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    match card(title, &lines, view) {
+        Some(card) => {
+            for line in card {
+                writeln!(out, "{line}")?;
+            }
+            Ok(())
+        }
+        None => fields(out, map, local, view),
+    }
+}
+
+/// Box lines for a card: rounded corners where the terminal draws Unicode.
+struct Frame {
+    top_left: char,
+    top_right: char,
+    bottom_left: char,
+    bottom_right: char,
+    across: char,
+    down: char,
+}
+
+impl Frame {
+    fn for_glyphs(glyphs: Glyphs) -> Self {
+        if glyphs == Glyphs::UNICODE {
+            Self {
+                top_left: '╭',
+                top_right: '╮',
+                bottom_left: '╰',
+                bottom_right: '╯',
+                across: '─',
+                down: '│',
+            }
+        } else {
+            Self {
+                top_left: '+',
+                top_right: '+',
+                bottom_left: '+',
+                bottom_right: '+',
+                across: '-',
+                down: '|',
+            }
+        }
+    }
+}
+
+/// `lines` inside a box titled `title`, or `None` when the box would not fit the terminal.
+/// Widths are measured on the text without styles, so styled lines line up.
+fn card(title: &'static str, lines: &[String], view: View) -> Option<Vec<String>> {
+    let widths: Vec<usize> = lines
+        .iter()
+        .map(|line| display_width(&anstream::adapter::strip_str(line).to_string()))
+        .collect();
+    // The title sits in the top line as `╭─ title ─╮`, so the inside fits it with a dash each side.
+    let inner = widths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(title.len() + 2);
+    if view.width.is_some_and(|width| inner + 4 > width) {
+        return None;
+    }
+    let frame = Frame::for_glyphs(view.glyphs);
+    let border = |text: String| {
+        if view.color {
+            Styled::default()
+                .styled(Role::Muted, &text)
+                .as_str()
+                .to_owned()
+        } else {
+            text
+        }
+    };
+    let title_text = if view.color {
+        Styled::default()
+            .brand(view.depth, title)
+            .as_str()
+            .to_owned()
+    } else {
+        title.to_owned()
+    };
+    let across = |count: usize| frame.across.to_string().repeat(count);
+    let mut card = vec![format!(
+        "{}{title_text}{}",
+        border(format!("{}{} ", frame.top_left, frame.across)),
+        border(format!(
+            " {}{}",
+            across(inner - title.len() - 1),
+            frame.top_right
+        ))
+    )];
+    for (line, width) in lines.iter().zip(widths) {
+        card.push(format!(
+            "{} {line}{} {}",
+            border(frame.down.to_string()),
+            " ".repeat(inner - width),
+            border(frame.down.to_string())
+        ));
+    }
+    card.push(border(format!(
+        "{}{}{}",
+        frame.bottom_left,
+        across(inner + 2),
+        frame.bottom_right
+    )));
+    Some(card)
 }
 
 /// An error's detail as aligned `field  value` lines, or one line when it is not an object.
@@ -548,7 +681,15 @@ fn fields(out: &mut impl Write, map: &Map<String, Value>, local: bool, view: Vie
     } in lines
     {
         let source = source
-            .map(|source| format!("{GAP}({source})"))
+            .map(|source| {
+                let source = format!("({source})");
+                if view.color {
+                    let dim = Styled::default().styled(Role::Muted, &source);
+                    format!("{GAP}{}", dim.as_str())
+                } else {
+                    format!("{GAP}{source}")
+                }
+            })
             .unwrap_or_default();
         for (index, value) in values.iter().enumerate() {
             let (key, source) = if index == 0 {
@@ -642,7 +783,7 @@ mod tests {
         View {
             width,
             now: NOW,
-            color: false,
+            ..View::plain()
         }
     }
 
@@ -833,6 +974,78 @@ mod tests {
             "{}    w\n",
             Styled::default().styled(Role::Emphasis, "id").as_str()
         )));
+    }
+
+    fn carded(width: Option<usize>, color: bool, glyphs: Glyphs) -> String {
+        let envelope = Envelope::new(
+            None,
+            json!({"account": "me", "kind": "user"}),
+            None,
+            Outcome::Succeeded,
+        )
+        .titled("voltage auth status");
+        let view = View {
+            cards: true,
+            color,
+            glyphs,
+            ..view(width)
+        };
+        let mut out = Vec::new();
+        render(&mut out, &envelope, view).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_titled_result_is_a_card_that_fits_its_title_and_widest_line() {
+        // The title is wider than every field, so it sets the width.
+        assert_eq!(
+            carded(None, false, Glyphs::UNICODE),
+            "╭─ voltage auth status ─╮\n\
+             │ account  me           │\n\
+             │ kind     user         │\n\
+             ╰───────────────────────╯\n"
+        );
+        assert_eq!(
+            carded(Some(25), false, Glyphs::ASCII),
+            "+- voltage auth status -+\n\
+             | account  me           |\n\
+             | kind     user         |\n\
+             +-----------------------+\n"
+        );
+        // Styles do not move the borders.
+        let styled = carded(None, true, Glyphs::UNICODE);
+        assert!(styled.contains("\u{1b}[2m"), "{styled:?}");
+        assert_eq!(strip(&styled), carded(None, false, Glyphs::UNICODE));
+    }
+
+    #[test]
+    fn a_card_too_wide_for_the_terminal_or_off_a_terminal_is_plain_fields() {
+        let plain = "account  me\nkind     user\n";
+        assert_eq!(carded(Some(24), false, Glyphs::UNICODE), plain);
+        let envelope = Envelope::new(
+            None,
+            json!({"account": "me", "kind": "user"}),
+            None,
+            Outcome::Succeeded,
+        )
+        .titled("voltage auth status");
+        let mut out = Vec::new();
+        render(&mut out, &envelope, view(None)).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), plain);
+    }
+
+    #[test]
+    fn color_dims_a_settings_source() {
+        let envelope =
+            Envelope::settings(json!({"account": {"value": "me", "source": "flag"}})).unwrap();
+        let text = styled(&envelope, None);
+        assert!(
+            text.contains(&format!(
+                "me  {}",
+                Styled::default().styled(Role::Muted, "(flag)").as_str()
+            )),
+            "{text:?}"
+        );
     }
 
     #[test]

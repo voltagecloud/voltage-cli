@@ -11,6 +11,7 @@ On a terminal, results are readable tables; when piped, they are JSON. `--json` 
 - With color on, table headers and field names are bold, a known status is colored by meaning (`completed` green, `failed` red, `sending` yellow), and so is the outcome line (`accepted`, `dry_run`). Color is added after layout, so it never moves a column; an unknown status stays plain.
 - A table starts with the outcome only when it adds something, such as `accepted` or `dry_run`, or when there is no data to show.
 - A single resource is shown as aligned `field  value` lines, with nested fields joined by dots. `voltage context` shows each setting as `name  value  (source)`.
+- On a terminal, `voltage context` and `voltage auth status` draw those lines inside a titled card (rounded corners, or `+-|` without a UTF-8 locale). A card wider than the terminal falls back to the plain lines, and redirected output always gets them.
 
 The table layout may change between releases; scripts should use JSON.
 
