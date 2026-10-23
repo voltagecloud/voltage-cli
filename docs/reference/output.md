@@ -25,7 +25,9 @@ API fields stay inside `data`. With `--all`, JSON output collects the pages into
 
 ## Streams
 
-Diagnostics, prompts, and progress go to stderr. Interactive stderr shows immediate, cancellable status for network requests and waits, with the time waited so far on payment waits and device approval; redirected stderr gets no spinner/control codes. `-q, --quiet` suppresses optional status and notices, never requested results, errors, warnings, or recovery IDs.
+Diagnostics, prompts, and progress go to stderr. Interactive stderr shows an animated spinner for network requests and waits, with the time waited so far on payment waits and device approval and on any wait past two seconds; it is cut to the terminal's width and cleared when the wait ends or is cancelled. `VOLTAGE_SPINNER=0` (or `false`) or `TERM=dumb` draws it as a still line; a Windows console without ANSI support shows none. Redirected stderr gets no spinner or control codes.
+
+On interactive stderr a payment wait reads as a timeline: `› Payment ID accepted; waiting for completed`, one `› status · time` line each time the status changes, and a closing `✓ Payment ID completed · 4s` or `✗ Payment ID failed · 4s` before the error. Redirected stderr keeps the plain `Payment ID status: sending; waiting for completed.` lines, repeated every 15 seconds while the status holds. Symbols are Unicode when the locale is UTF-8 and `TERM` is not `dumb` or `linux` (on Windows, in Windows Terminal), and ASCII otherwise (`ok`, `x`, `>`). `-q, --quiet` suppresses optional status and notices, never requested results, errors, warnings, or recovery IDs.
 
 Human output and help are colored on a terminal: `error:` is red, `hint:` cyan, and `details:` dim, and color only marks a label, so the words read the same without it. `--color always|never` (or `--no-color`) decides; otherwise `NO_COLOR`, `CLICOLOR_FORCE`, `CLICOLOR`, `TERM=dumb`, and whether each stream is a terminal decide, separately for stdout and stderr. JSON, NDJSON, `--output-file`, and completions are never colored, even with `--color always`.
 

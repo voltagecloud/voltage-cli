@@ -53,9 +53,10 @@ not precedent. Reviews must approve and document exceptions.
   `auth`. Keep settings, credential storage, and private files in `config`.
   Keep payment values and payment read views in `payment`. Keep secret text
   in `secret`. Keep result envelopes, redaction, and rendering, including the
-  table layout in `output::human`, in `output`. Keep prompts, pickers, progress,
-  notices, the terminal's width, and scrubbing of untrusted text bound for the
-  terminal in `terminal`. Keep which commands ask for missing scope, and in what
+  table layout in `output::human`, in `output`. Keep prompts, pickers, notices, the
+  terminal's width, and scrubbing of untrusted text bound for the terminal in
+  `terminal`; the animated status line in `progress`; a payment wait's status
+  lines in `timeline`; and the color palette and symbols in `style`. Keep which commands ask for missing scope, and in what
   order, in `pick`. Keep the default `--currency` of a payment, read from its
   wallet's line of credit, in `wallet_currency`. Keep exit-code categories and
   typed error detail in `error`.

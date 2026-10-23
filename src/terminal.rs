@@ -1,27 +1,59 @@
 //! Terminal interaction policy: prompts, progress, and diagnostics on stderr. Results and
 //! errors are written by `output`.
 
-use crate::{Error, Result, secret::Secret};
+use crate::{
+    Error, Result,
+    progress::{Look, Progress},
+    secret::Secret,
+    style::{self, ColorChoice, Glyphs, Line},
+};
 use inquire::{InquireError, Select, Text};
 use std::{
     fmt::{self, Display},
     io::{ErrorKind, IsTerminal, Write},
     time::Duration,
 };
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::Instant};
 use uuid::Uuid;
 
-/// What the process may show to and ask of the person at the terminal, from `--quiet` and
-/// `--no-input`.
+/// What the process may show to and ask of the person at the terminal, from `--quiet`,
+/// `--no-input`, and `--color`.
 #[derive(Clone, Copy)]
 pub struct Terminal {
     quiet: bool,
     no_input: bool,
+    color: ColorChoice,
 }
 
 impl Terminal {
     pub fn new(quiet: bool, no_input: bool) -> Self {
-        Self { quiet, no_input }
+        Self {
+            quiet,
+            no_input,
+            color: ColorChoice::Auto,
+        }
+    }
+
+    pub fn with_color(self, color: ColorChoice) -> Self {
+        Self { color, ..self }
+    }
+
+    /// The same terminal with optional progress and notices hidden.
+    pub fn quieted(self) -> Self {
+        Self {
+            quiet: true,
+            ..self
+        }
+    }
+
+    /// Status lines get symbols and color only on an interactive stderr; redirected stderr
+    /// keeps plain sentences for logs.
+    pub fn decorates(self) -> bool {
+        std::io::stderr().is_terminal()
+    }
+
+    pub fn glyphs(self) -> Glyphs {
+        Glyphs::detect(|name| std::env::var(name).ok())
     }
 
     /// A prompt needs an interactive stdin and must not be disabled by `--no-input`.
@@ -32,12 +64,7 @@ impl Terminal {
     /// Optional status for a human, cleared when the guard drops; no control codes on
     /// redirected stderr.
     pub fn progress(self, label: impl Display) -> Progress {
-        let active = !self.quiet && std::io::stderr().is_terminal();
-        if active {
-            eprint!("{label}");
-            let _ = std::io::stderr().flush();
-        }
-        Progress { active }
+        self.status(label, None)
     }
 
     /// Show `label` while `work` runs. The status cannot outlive the work: it clears on
@@ -45,6 +72,30 @@ impl Terminal {
     pub async fn during<T>(self, label: impl Display, work: impl Future<Output = T>) -> T {
         let _progress = self.progress(label);
         work.await
+    }
+
+    /// `during` for one step of a longer wait: the line shows the time since `since`.
+    pub async fn waiting<T>(
+        self,
+        label: impl Display,
+        since: Instant,
+        work: impl Future<Output = T>,
+    ) -> T {
+        let _progress = self.status(label, Some(since));
+        work.await
+    }
+
+    fn status(self, label: impl Display, since: Option<Instant>) -> Progress {
+        if self.quiet || !self.decorates() || !draws_control_codes() {
+            return Progress::hidden();
+        }
+        let look = Look {
+            animate: animates(|name| std::env::var(name).ok()),
+            color: self.color.colors_stderr(),
+            glyphs: self.glyphs(),
+        };
+        // Labels are fixed text today; scrubbing keeps every escape the line's own.
+        Progress::show(scrub_line(&label.to_string()), since, look)
     }
 
     /// Optional information that `--quiet` suppresses.
@@ -57,6 +108,18 @@ impl Terminal {
     /// Information needed to confirm or recover an operation; `--quiet` never hides it.
     pub fn important(self, message: impl Display) {
         eprintln!("{}", scrub_text(&message.to_string()));
+    }
+
+    /// `notice` for a line with symbols or color.
+    pub fn notice_line(self, line: Line) {
+        if !self.quiet {
+            self.important_line(line);
+        }
+    }
+
+    /// `important` for a line with symbols or color.
+    pub fn important_line(self, line: Line) {
+        style::write_stderr(self.color, &format!("{}\n", line.as_str()));
     }
 
     /// A picker also draws on stderr, so it needs both streams to be interactive.
@@ -180,6 +243,15 @@ impl Display for Choice {
 /// size while stdout is interactive. crossterm falls back to running `tput` when the size
 /// query fails. `None` means output is not width-limited.
 pub fn width() -> Option<usize> {
+    width_when(std::io::stdout().is_terminal())
+}
+
+/// `width` for stderr, where status lines go.
+pub fn stderr_width() -> Option<usize> {
+    width_when(std::io::stderr().is_terminal())
+}
+
+fn width_when(interactive: bool) -> Option<usize> {
     if let Some(columns) = std::env::var("COLUMNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -187,7 +259,7 @@ pub fn width() -> Option<usize> {
     {
         return Some(columns);
     }
-    if !std::io::stdout().is_terminal() {
+    if !interactive {
         return None;
     }
     crossterm::terminal::size()
@@ -298,18 +370,24 @@ pub fn elapsed(duration: Duration) -> String {
     }
 }
 
-/// Clears its status line when dropped, including when Ctrl-C cancels the owning future.
-#[must_use = "progress is cleared as soon as the guard is dropped"]
-pub struct Progress {
-    active: bool,
+/// A spinner redraws its line; `TERM=dumb` cannot clear one, and `VOLTAGE_SPINNER=0` or
+/// `false` asks for a still line, as screen readers read every redraw.
+fn animates(var: impl Fn(&str) -> Option<String>) -> bool {
+    let still = var("VOLTAGE_SPINNER")
+        .is_some_and(|value| value == "0" || value.eq_ignore_ascii_case("false"));
+    var("TERM").as_deref() != Some("dumb") && !still
 }
 
-impl Drop for Progress {
-    fn drop(&mut self) {
-        if self.active {
-            eprint!("\r\x1b[2K");
-            let _ = std::io::stderr().flush();
-        }
+/// A status line clears itself with control codes. A Windows console without ANSI support
+/// would print them, so it gets no status line; crossterm turns ANSI on where it can.
+fn draws_control_codes() -> bool {
+    #[cfg(windows)]
+    {
+        crossterm::ansi_support::supports_ansi()
+    }
+    #[cfg(not(windows))]
+    {
+        true
     }
 }
 
@@ -317,6 +395,26 @@ impl Drop for Progress {
 mod tests {
     use super::*;
     use crate::error::ErrorKind as Exit;
+
+    #[test]
+    fn a_dumb_terminal_or_voltage_spinner_0_keeps_progress_still() {
+        let animates_with = |vars: &[(&str, &str)]| {
+            animates(|name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+        };
+        assert!(animates_with(&[]));
+        assert!(animates_with(&[
+            ("TERM", "xterm"),
+            ("VOLTAGE_SPINNER", "1")
+        ]));
+        assert!(!animates_with(&[("TERM", "dumb")]));
+        assert!(!animates_with(&[("VOLTAGE_SPINNER", "0")]));
+        assert!(!animates_with(&[("VOLTAGE_SPINNER", "FALSE")]));
+        assert!(animates_with(&[("VOLTAGE_SPINNER", "off")]));
+    }
 
     #[test]
     fn a_picker_answer_becomes_a_choice_nothing_an_interruption_or_a_transport_error() {

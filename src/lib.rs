@@ -17,11 +17,13 @@ mod output;
 mod payment;
 mod pick;
 mod price;
+mod progress;
 pub mod registry;
 pub mod secret;
 mod startup;
 mod style;
 mod terminal;
+mod timeline;
 mod wallet_currency;
 mod wallet_shortlist;
 
