@@ -1,6 +1,6 @@
 # API contracts
 
-`openapi.json` is the unmodified Voltage API snapshot from [the public OpenAPI endpoint](https://voltageapi.com/v1/openapi/docs.json), refreshed on 2026-09-18. It contains 47 operations. `commands.json` explicitly assigns each operation a human-facing command and positional resource ID.
+`openapi.json` is the unmodified Voltage API snapshot from [the public OpenAPI endpoint](https://voltageapi.com/v1/openapi/docs.json), refreshed on 2026-10-22. It contains 47 operations. Snapshot SHA-256: `782f57935dd9991a75991ad17e25ec34daf7ba85f2bcba677adda7781bd8f3c1`. `commands.json` explicitly assigns each operation a human-facing command and positional resource ID.
 
 `build.rs` derives HTTP methods, paths, authentication selection, parameters with their closed value sets, and body support from the snapshot, and takes each operation's command words and positional target from `commands.json`. The build fails on a snapshot operation without a mapping, a mapping without an operation, a command that is not lowercase kebab-case words, or a target that is not a placeholder in the operation's path. `src/registry.rs` deserializes the result into closed enums, so an operation ID, auth scheme, method, or target the code does not know fails `cargo test`. The integration suite exercises every registered operation through a mock HTTP server, including every query parameter, complete JSON bodies, empty responses, and credential selection.
 
