@@ -151,6 +151,11 @@ fn color_follows_the_flag_then_the_environment_and_never_reaches_json() {
         (&["--color=never"], &[("CLICOLOR_FORCE", "1")], false),
         (&["--no-color"], &[("CLICOLOR_FORCE", "1")], false),
         (&[], &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")], false),
+        (&[], &[("FORCE_COLOR", "1")], true),
+        // FORCE_COLOR=0 beats CLICOLOR_FORCE; NO_COLOR and a flag beat FORCE_COLOR.
+        (&[], &[("FORCE_COLOR", "0"), ("CLICOLOR_FORCE", "1")], false),
+        (&[], &[("FORCE_COLOR", "1"), ("NO_COLOR", "1")], false),
+        (&["--color", "never"], &[("FORCE_COLOR", "1")], false),
         (&["--color", "auto"], &[], false),
     ] {
         let shown = missing_org(&[&["--output", "table"], args].concat(), env);
@@ -161,7 +166,10 @@ fn color_follows_the_flag_then_the_environment_and_never_reaches_json() {
     // JSON errors are byte-identical whatever color asks for.
     let json = missing_org(&["--json"], &[]);
     assert_eq!(
-        missing_org(&["--json", "--color", "always"], &[("CLICOLOR_FORCE", "1")]),
+        missing_org(
+            &["--json", "--color", "always"],
+            &[("CLICOLOR_FORCE", "1"), ("FORCE_COLOR", "3")]
+        ),
         json
     );
     assert!(!json.contains('\u{1b}'));
@@ -171,7 +179,11 @@ fn color_follows_the_flag_then_the_environment_and_never_reaches_json() {
 fn help_and_parse_errors_follow_the_color_choice() {
     let voltage = || {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
-        cmd.env_remove("NO_COLOR").env_remove("CLICOLOR_FORCE");
+        cmd.env_remove("NO_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("FORCE_COLOR")
+            .env_remove("COLORTERM")
+            .env("TERM", "xterm");
         cmd
     };
     let help = |args: &[&str]| stdout(&voltage().args(args).arg("--help").assert().success());
@@ -179,6 +191,31 @@ fn help_and_parse_errors_follow_the_color_choice() {
     let colored = help(&["--color", "always"]);
     assert!(colored.contains('\u{1b}'));
     assert_eq!(strip_styles(&colored), help(&[]));
+    // Headers and usage are Voltage orange at the depth the terminal draws, else bold.
+    let help_with = |name: &str, value: &str, args: &[&str]| {
+        stdout(
+            &voltage()
+                .env(name, value)
+                .args(args)
+                .arg("--help")
+                .assert()
+                .success(),
+        )
+    };
+    let truecolor = help_with("COLORTERM", "truecolor", &["--color", "always"]);
+    assert!(
+        truecolor.contains("\u{1b}[1m\u{1b}[38;2;255;80;0mUsage:"),
+        "{truecolor:?}"
+    );
+    let ansi256 = help_with("TERM", "xterm-256color", &["--color", "always"]);
+    assert!(
+        ansi256.contains("\u{1b}[1m\u{1b}[38;5;202mUsage:"),
+        "{ansi256:?}"
+    );
+    assert!(colored.contains("\u{1b}[1mUsage:"), "{colored:?}");
+    // FORCE_COLOR=3 colors redirected help, in 24-bit color.
+    let forced = help_with("FORCE_COLOR", "3", &[]);
+    assert!(forced.contains("\u{1b}[38;2;255;80;0m"), "{forced:?}");
     let typo = stderr(
         &voltage()
             .args(["--color=always", "paymnts"])
@@ -273,6 +310,8 @@ fn human_process_at(dir: &Path, api_url: &str) -> std::process::Command {
         "NO_COLOR",
         "CLICOLOR",
         "CLICOLOR_FORCE",
+        "FORCE_COLOR",
+        "COLORTERM",
     ] {
         cmd.env_remove(name);
     }
