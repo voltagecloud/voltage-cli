@@ -19,6 +19,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - Help headers and usage are Voltage orange where the terminal draws 256 or 24-bit color, and bold elsewhere. `FORCE_COLOR` is honored: `0` or `false` turns color off, other values turn it on when redirected; `--color` and `NO_COLOR` still win.
 - A successful `voltage login` on a terminal shows the `voltage` wordmark, a lightning bolt beside the name in Voltage orange, above `✓ Logged in as`.
 - `voltage context` and `voltage auth status` draw their fields in a titled card on a terminal, with sources dimmed. Redirected output is unchanged.
+- `voltage wallets get` on a terminal leads with the wallet's name, its balances (with a USD estimate on mainnet), and a 14-day sparkline of completed payments.
 
 ## 0.2.0 - 2026-10-22
 

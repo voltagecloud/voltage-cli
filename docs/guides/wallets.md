@@ -38,6 +38,8 @@ voltage wallets ledger list WALLET_ID --profile prod --all
 voltage wallets payments summary WALLET_ID --profile prod
 ```
 
+On a terminal, `wallets get` first shows the wallet's name, each available balance, labelled `Available` (with a USD estimate for a BTC balance on mainnet, from the price service), and a sparkline of its completed payment volume over the last 14 days. That takes two extra reads, the BTC price on mainnet and the wallet's 100 newest completed payments (payment checks excluded), summed from each payment's amount in the wallet's currency. Each read has 5 seconds at most, and one that fails or is slow leaves its line out. The wallet's fields follow as usual, and redirected or `--json` output is unchanged.
+
 The ledger lists every credit, hold, capture, and release on the wallet. `--all` follows every page; with `--output ndjson` each page is written as it arrives.
 
 ## Change a wallet

@@ -7,6 +7,7 @@ mod all_orgs;
 mod api;
 mod auth;
 mod backoff;
+mod balance;
 mod cli;
 pub mod config;
 mod context;

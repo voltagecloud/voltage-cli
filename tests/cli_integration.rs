@@ -5886,6 +5886,166 @@ async fn a_described_change_on_a_terminal_says_what_it_would_do() {
     assert!(shown.contains("› Send it: add --execute"), "{shown}");
 }
 
+/// Run a command with stdin, stdout, and stderr all on one pseudo-terminal, as a person
+/// would, and return everything it showed.
+#[cfg(unix)]
+async fn fully_on_a_terminal(dir: &Path, server: &MockServer, args: &[&str]) -> String {
+    use std::io::Read;
+    use std::process::Stdio;
+    let (mut controller, terminal) = open_pty();
+    // A UTF-8 color terminal, whatever the test runner's own, as `on_a_terminal` pins it.
+    let child = human_process_at(dir, &server.uri())
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env_remove("VOLTAGE_SPINNER")
+        .env("COLUMNS", "200")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .spawn()
+        .unwrap();
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut shown = Vec::new();
+        // Linux PTYs return EIO rather than EOF when the terminal end closes.
+        let _ = controller.read_to_end(&mut shown);
+        shown
+    });
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    strip_styles(&String::from_utf8_lossy(&reader.await.unwrap()))
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_or_unreadable_price_leaves_the_estimate_out() {
+    let (server, dir) = fixture().await;
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(ok(json!({"id": WALLET, "name": "Treasury", "network": "mainnet",
+            "organization_id": ORG, "environment_id": ENV,
+            "balances": [{"available": {"amount": 150_000_000, "currency": "btc", "unit": "msats"}}]})))
+        .mount(&server)
+        .await;
+    route("GET", "/currency/BTCUSD/now")
+        .respond_with(in_order(vec![
+            ResponseTemplate::new(500),
+            ok(json!({"pair": "BTCUSD", "time": "2026-09-18T17:30:00Z", "price": "not a price"})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    route("GET", payments_path())
+        .respond_with(ok(json!({"items": []})))
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let args = ["wallets", "get", WALLET, "--org", ORG, "--price-url", &uri];
+    for _ in 0..2 {
+        let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+        assert!(
+            shown.contains("Treasury\r\nAvailable 150,000 sats\r\n"),
+            "{shown}"
+        );
+        assert!(!shown.contains('≈'), "{shown}");
+    }
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redirected_wallet_read_makes_no_extra_request() {
+    let (server, dir) = fixture().await;
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(ok(
+            json!({"id": WALLET, "name": "Treasury", "network": "mainnet",
+            "organization_id": ORG, "environment_id": ENV, "balances": []}),
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    route("GET", "/currency/BTCUSD/now")
+        .respond_with(ok(json!({})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    route("GET", payments_path())
+        .respond_with(ok(json!({"items": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let get = ["wallets", "get", WALLET, "--org", ORG, "--price-url", &uri];
+    cli(dir.path(), &server).args(get).assert().success();
+    Command::from_std(human_process_at(dir.path(), &uri))
+        .args(get)
+        .args(["--output", "table"])
+        .assert()
+        .success();
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wallet_on_a_terminal_leads_with_its_balance_and_activity() {
+    let (server, dir) = fixture().await;
+    let wallet = |network: &str| {
+        json!({"id": WALLET, "name": "Treasury", "network": network,
+            "organization_id": ORG, "environment_id": ENV,
+            "balances": [{"available": {"amount": 150_000_000, "currency": "btc", "unit": "msats"}}]})
+    };
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(in_order(vec![ok(wallet("mainnet")), ok(wallet("signet"))]))
+        .mount(&server)
+        .await;
+    respond_once(
+        &server,
+        route("GET", "/currency/BTCUSD/now"),
+        ok(json!({"pair":"BTCUSD","time":"2026-09-18T17:30:00Z","price":"60000"})),
+    )
+    .await;
+    // The activity read asks as `payments list` does: the wallet's completed payments,
+    // newest first, by cursor. The first answers; the second fails, leaving its line out.
+    route("GET", payments_path())
+        .and(query_param("wallet_id", WALLET))
+        .and(query_param("statuses[]", "completed"))
+        .and(query_param("check_only", "false"))
+        .and(query_param("sort_order", "DESC"))
+        .and(query_param("pagination", "cursor"))
+        .and(query_param("limit", "100"))
+        .respond_with(in_order(vec![
+            ok(
+                json!({"items": [{"status": "completed", "created_at": "2020-01-01T00:00:00Z",
+                "data": {"amount": {"amount": 1000, "currency": "btc", "unit": "msats"}}}]}),
+            ),
+            ResponseTemplate::new(500),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let args = ["wallets", "get", WALLET, "--org", ORG, "--price-url", &uri];
+    let mainnet = fully_on_a_terminal(dir.path(), &server, &args).await;
+    assert!(
+        mainnet.contains(
+            "Treasury\r\nAvailable 150,000 sats  ≈ $90.00\r\n\
+             Activity  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁  no completed payments in 14 days\r\n\r\n"
+        ),
+        "{mainnet}"
+    );
+    assert!(mainnet.contains("balances "), "{mainnet}");
+    // A test network gets no USD estimate, and a failed activity read no activity line.
+    let signet = fully_on_a_terminal(dir.path(), &server, &args).await;
+    assert!(
+        signet.contains("Treasury\r\nAvailable 150,000 sats\r\n\r\n"),
+        "{signet}"
+    );
+    assert!(!signet.contains("Activity"), "{signet}");
+    server.verify().await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {

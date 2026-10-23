@@ -5,6 +5,8 @@
 
 mod human;
 
+pub use human::{epoch_seconds, readable_amount};
+
 use crate::{
     Error, Result,
     config::{EXECUTE_VARIABLE, new_private},
@@ -244,6 +246,20 @@ impl Output {
     /// Human output, where a next step on stderr is read rather than parsed.
     pub fn is_human(&self) -> bool {
         !self.format.is_machine_readable()
+    }
+
+    /// Human output to an interactive stdout, where a headline can lead the result.
+    pub fn on_terminal(&self) -> bool {
+        self.format == OutputFormat::Table && self.file.is_none() && std::io::stdout().is_terminal()
+    }
+
+    /// Lines that lead the result on an interactive stdout, such as a wallet's balance.
+    pub fn preface(&self, lines: &[Line]) -> Result<()> {
+        let text: String = lines
+            .iter()
+            .map(|line| format!("{}\n", line.as_str()))
+            .collect();
+        write_stdout_styled(text.as_bytes(), self.color)
     }
 
     /// JSON output collects `--all` pages into one envelope; NDJSON streams them.

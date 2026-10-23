@@ -171,6 +171,14 @@ impl Line {
         self
     }
 
+    /// Untrusted or variable text in the brand color, such as a wallet's name.
+    pub fn styled_brand(mut self, depth: Depth, text: &str) -> Self {
+        let style = brand(depth);
+        self.0
+            .push_str(&format!("{style}{}{style:#}", scrub_line(text)));
+        self
+    }
+
     /// Fixed text in the brand color, at the depth the terminal draws.
     pub fn brand(mut self, depth: Depth, label: &'static str) -> Self {
         let style = brand(depth);
