@@ -162,6 +162,11 @@ pub struct Error {
     pub hint: Option<Cow<'static, str>>,
     pub detail: Option<ErrorDetail>,
     pub(crate) stdout_closed: bool,
+    /// The HTTP status of a response that came back as an error, also when the response was
+    /// not JSON and so has no HTTP detail. Only retry decisions read it.
+    pub(crate) response_status: Option<u16>,
+    /// The server's `Retry-After` on that response.
+    pub(crate) retry_after: Option<Duration>,
 }
 
 /// How long a request had to get a response.
@@ -303,6 +308,8 @@ impl Error {
             hint: None,
             detail: None,
             stdout_closed: false,
+            response_status: None,
+            retry_after: None,
         }
     }
 
@@ -355,6 +362,11 @@ impl Error {
             Some(ErrorDetail::Http { http_status, .. }) => Some(http_status),
             _ => None,
         }
+    }
+
+    /// The status of the response this error came from, whether or not it carried JSON.
+    pub fn response_status(&self) -> Option<u16> {
+        self.http_status().or(self.response_status)
     }
 
     pub fn is_transport(&self) -> bool {

@@ -10,7 +10,7 @@ use crate::{
     },
     config::{self, Profile, Scope, Settings},
     context,
-    error::CredentialSources,
+    error::{CredentialSources, ErrorKind},
     output::{Envelope, Output, OutputFormat, report_error, write_stdout},
     pick,
     price::{PRICE_URL, PriceService},
@@ -33,6 +33,7 @@ pub async fn run() -> ExitCode {
     };
     let format = invocation.global.output_format();
     let color = invocation.global.color();
+    let quiet = invocation.global.quiet;
     let submission = SubmissionState::default();
     // Biased, with the interrupt first: tokio installs the SIGINT handler when `ctrl_c` is
     // first polled. Polled second, a command that reaches a prompt without awaiting would leave
@@ -56,6 +57,13 @@ pub async fn run() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.is_stdout_closed() => ExitCode::SUCCESS,
+        // Ctrl-C is how a watch ends; it keeps the interrupt's exit code without an error.
+        Err(error) if error.kind == ErrorKind::Interrupted && submission.is_watching() => {
+            if !quiet {
+                eprintln!("Stopped watching payments.");
+            }
+            process_exit(error.kind.exit_code())
+        }
         Err(error) => fail(error, format, color),
     }
 }

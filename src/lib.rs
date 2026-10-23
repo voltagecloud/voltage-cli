@@ -28,6 +28,7 @@ mod terminal;
 mod timeline;
 mod wallet_currency;
 mod wallet_shortlist;
+mod watch;
 mod wordmark;
 
 pub(crate) use error::{Error, Result};

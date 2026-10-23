@@ -6217,6 +6217,403 @@ async fn a_qr_code_for_a_ready_invoice_comes_last_so_it_stays_on_screen() {
     server.verify().await;
 }
 
+/// Two reads of a payments list: payment A receiving; then B new and A completed.
+#[cfg(unix)]
+async fn watched_payments(server: &MockServer) {
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    route("GET", payments_path())
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving", "updated_at": "2026-10-20T00:00:00Z"}]})),
+            ok(json!({"items": [
+                {"id": b, "status": "receiving", "updated_at": "2026-10-20T00:00:01Z"},
+                {"id": a, "status": "completed", "updated_at": "2026-10-20T00:00:02Z"}
+            ]})),
+        ]))
+        .mount(server)
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redirected_watch_writes_one_event_per_new_or_changed_payment() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    watched_payments(&server).await;
+    let mut child = process_at(dir.path(), &server.uri())
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let events = tokio::task::spawn_blocking(move || {
+        BufReader::new(stdout)
+            .lines()
+            .take(3)
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .collect::<Vec<_>>()
+    });
+    let events = tokio::time::timeout(Duration::from_secs(10), events)
+        .await
+        .unwrap()
+        .unwrap();
+    let summary: Vec<(String, String, String)> = events
+        .iter()
+        .map(|event| {
+            (
+                event["event"].as_str().unwrap().to_owned(),
+                event["id"].as_str().unwrap().to_owned(),
+                event["data"]["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "snapshot".into(),
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                "receiving".into()
+            ),
+            (
+                "new".into(),
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                "receiving".into()
+            ),
+            (
+                "updated".into(),
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                "completed".into()
+            ),
+        ]
+    );
+    assert!(events.iter().all(|event| event["outcome"] == "event"));
+    interrupt(&child);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Stopped watching payments.\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_retries_a_server_error_and_ends_on_a_client_error() {
+    let (server, dir) = fixture().await;
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    // Every refresh asks for the most recently updated first. A gateway's HTML 502 and a
+    // 429 with `Retry-After` are retried; the change after them still arrives; a 403 ends it.
+    route("GET", payments_path())
+        .and(query_param("sort_key", "updated_at"))
+        .and(query_param("sort_order", "DESC"))
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving"}]})),
+            ResponseTemplate::new(502).set_body_string("<html>Bad Gateway</html>"),
+            ResponseTemplate::new(429).insert_header("Retry-After", "1"),
+            ok(json!({"items": [{"id": a, "status": "completed"}]})),
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"detail": "Forbidden"}})),
+        ]))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .code(3);
+    let statuses: Vec<String> = stdout(&result)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|event| {
+            format!(
+                "{} {}",
+                event["event"].as_str().unwrap(),
+                event["data"]["status"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(statuses, ["snapshot receiving", "updated completed"]);
+    server.verify().await;
+}
+
+/// What a pseudo-terminal has shown so far, and whether it has closed.
+#[cfg(unix)]
+#[derive(Default)]
+struct Shown {
+    bytes: Vec<u8>,
+    closed: bool,
+}
+
+/// A pseudo-terminal's output, read on its own thread as it arrives.
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct Drained {
+    shown: Arc<std::sync::Mutex<Shown>>,
+    changed: Arc<std::sync::Condvar>,
+}
+
+#[cfg(unix)]
+impl Drained {
+    /// Block until `ready` holds for the output so far, the terminal closes, or `limit` passes.
+    fn until(&self, limit: Duration, ready: impl Fn(&str) -> bool) {
+        let guard = self.shown.lock().unwrap();
+        let _ = self
+            .changed
+            .wait_timeout_while(guard, limit, |shown| {
+                !shown.closed && !ready(&String::from_utf8_lossy(&shown.bytes))
+            })
+            .unwrap();
+    }
+
+    /// Everything the terminal showed, once the process has closed it.
+    fn finish(&self) -> String {
+        self.until(Duration::from_secs(10), |_| false);
+        String::from_utf8_lossy(&self.shown.lock().unwrap().bytes).into_owned()
+    }
+}
+
+#[cfg(unix)]
+fn drain(mut controller: std::fs::File) -> Drained {
+    use std::io::Read;
+    let drained = Drained::default();
+    let writer = drained.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        // Linux PTYs return EIO rather than EOF when the terminal end closes.
+        while let Ok(read @ 1..) = controller.read(&mut chunk) {
+            writer
+                .shown
+                .lock()
+                .unwrap()
+                .bytes
+                .extend_from_slice(&chunk[..read]);
+            writer.changed.notify_all();
+        }
+        writer.shown.lock().unwrap().closed = true;
+        writer.changed.notify_all();
+    });
+    drained
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_on_a_saved_login_exchanges_again_when_its_token_expires() {
+    let (server, dir) = fixture().await;
+    let _settings = seeded_login(dir.path(), &server, false);
+    // The first organization token is rejected on the second read; a new exchange follows.
+    organization_exchange(&server, LOGIN_ACCESS, ORG, "org-token-1", 1).await;
+    organization_exchange(&server, LOGIN_ACCESS, ORG, "org-token-2", 1).await;
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    route("GET", payments_path())
+        .and(header("authorization", "Bearer org-token-1"))
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving"}]})),
+            ResponseTemplate::new(401).set_body_json(json!({"error": {"detail": "expired"}})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    route("GET", payments_path())
+        .and(header("authorization", "Bearer org-token-2"))
+        .respond_with(ok(json!({"items": [{"id": a, "status": "completed"}]})))
+        .mount(&server)
+        .await;
+    let mut child = process_at(dir.path(), &server.uri())
+        .env_remove("VOLTAGE_API_KEY")
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--account",
+            LOGIN_NAME,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let events = tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader};
+        BufReader::new(stdout)
+            .lines()
+            .take(2)
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .map(|event| {
+                format!(
+                    "{} {}",
+                    event["event"].as_str().unwrap(),
+                    event["data"]["status"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let events = tokio::time::timeout(Duration::from_secs(15), events)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(events, ["snapshot receiving", "updated completed"]);
+    interrupt(&child);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_watch_that_ends_in_an_error_puts_the_screen_back_first() {
+    let (server, dir) = fixture().await;
+    route("GET", payments_path())
+        .respond_with(in_order(vec![
+            ok(json!({"items": []})),
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"detail": "Forbidden"}})),
+        ]))
+        .mount(&server)
+        .await;
+    let args = [
+        "payments",
+        "list",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--watch",
+        "--interval",
+        "1",
+    ];
+    let (controller, terminal) = open_pty();
+    let child = human_process_at(dir.path(), &server.uri())
+        .env("TERM", "xterm-256color")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(terminal))
+        .spawn()
+        .unwrap();
+    let shown = drain(controller);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let raw = shown.finish();
+    let left = raw.find("\u{1b}[?25h\u{1b}[?1049l").expect(&raw);
+    let error = raw.find("error:").expect(&raw);
+    assert!(left < error, "{raw:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_on_a_terminal_is_a_live_table_that_marks_changes() {
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    watched_payments(&server).await;
+    let (controller, terminal) = open_pty();
+    let child = human_process_at(dir.path(), &server.uri())
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env("COLUMNS", "200")
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .spawn()
+        .unwrap();
+    // Stop once three frames are drawn: the snapshot, B new and A changed, then a quiet one.
+    let shown = drain(controller);
+    let wait = shown.clone();
+    tokio::task::spawn_blocking(move || {
+        wait.until(Duration::from_secs(10), |text| {
+            text.matches("Watching payments").count() >= 3
+        })
+    })
+    .await
+    .unwrap();
+    interrupt(&child);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    let raw = shown.finish();
+    // The alternate screen is entered, then left with the cursor shown again.
+    let entered = raw.find("\u{1b}[?1049h\u{1b}[?25l").expect(&raw);
+    let left = raw.find("\u{1b}[?25h\u{1b}[?1049l").expect(&raw);
+    assert!(entered < left, "{raw:?}");
+    assert!(
+        raw[left..].contains("Stopped watching payments."),
+        "{raw:?}"
+    );
+    let shown = strip_styles(&raw);
+    assert!(
+        shown.contains("Watching payments · every 1s · Ctrl-C to stop"),
+        "{shown}"
+    );
+    // Each refresh is a frame. The snapshot marks nothing; the frame where B first appears
+    // marks B as new and A as changed; later frames, with nothing new, mark nothing.
+    let frames: Vec<&str> = shown.split("Watching payments").skip(1).collect();
+    assert!(!frames[0].contains('●'), "{}", frames[0]);
+    let changed = frames
+        .iter()
+        .position(|frame| frame.contains("bbbbbbbb"))
+        .expect(&shown);
+    assert!(changed > 0, "{shown}");
+    let frame = frames[changed];
+    assert!(
+        frame.contains("● bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        "{frame}"
+    );
+    assert!(
+        frame.contains("● aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "{frame}"
+    );
+    for later in &frames[changed + 1..] {
+        assert!(!later.contains('●'), "{later}");
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {

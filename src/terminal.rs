@@ -268,6 +268,17 @@ pub fn width() -> Option<usize> {
     width_when(std::io::stdout().is_terminal())
 }
 
+/// The terminal's height in rows while stdout is interactive, for a screen that redraws.
+pub fn height() -> Option<usize> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    crossterm::terminal::size()
+        .ok()
+        .map(|(_, rows)| usize::from(rows))
+        .filter(|rows| *rows > 0)
+}
+
 /// `width` for stderr, where status lines go.
 pub fn stderr_width() -> Option<usize> {
     width_when(std::io::stderr().is_terminal())
