@@ -10,6 +10,8 @@ Install the CLI from the [install guide](guides/install.md), then sign in throug
 voltage login --account me
 ```
 
+Run `voltage` on its own at any time to see who you are signed in as, your saved scope, and a few commands to try.
+
 ## 2. Save your scope as a profile
 
 Find your organization and environment, then save both with your login as a profile:

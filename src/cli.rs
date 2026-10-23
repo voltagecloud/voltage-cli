@@ -22,7 +22,12 @@ use clap::{
     error::ErrorKind,
 };
 use clap_complete::Shell;
-use std::{collections::BTreeSet, ffi::OsStr, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet,
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    time::Duration,
+};
 use uuid::Uuid;
 
 /// Friendly payment commands beside `create_payment`'s generated command.
@@ -129,6 +134,28 @@ pub struct GlobalFlags {
 impl GlobalFlags {
     pub fn output_format(&self) -> OutputFormat {
         OutputFormat::select(self.json, self.output)
+    }
+
+    /// The global flags of a command line that names no command, such as bare `voltage` or
+    /// `voltage --profile prod`; `None` when it names one or does not parse.
+    pub fn without_command(args: &[OsString]) -> Option<Self> {
+        let missing = command()
+            .try_get_matches_from(args)
+            .err()
+            .is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                        | ErrorKind::MissingSubcommand
+                )
+            });
+        if !missing {
+            return None;
+        }
+        // The same flags in front of `context`, the local command that reads only them.
+        let with_context = args.iter().cloned().chain([OsString::from("context")]);
+        let matches = command().try_get_matches_from(with_context).ok()?;
+        parse(leaf(&matches).1).ok()
     }
 
     /// `--color` or `--no-color`, else `FORCE_COLOR`, else automatic.
@@ -1616,6 +1643,31 @@ mod tests {
             OperationId::GetAllOrganizationsWalletsAsUser
         );
         assert!(api.body.is_none());
+    }
+
+    #[test]
+    fn global_flags_without_a_command_are_read_for_the_greeting() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        let bare = GlobalFlags::without_command(&args(&["voltage"])).unwrap();
+        assert_eq!(bare.profile, None);
+        let profiled =
+            GlobalFlags::without_command(&args(&["voltage", "--profile", "prod"])).unwrap();
+        assert_eq!(profiled.profile.as_deref(), Some("prod"));
+        assert!(
+            GlobalFlags::without_command(&args(&["voltage", "--json"]))
+                .unwrap()
+                .json
+        );
+        for named in [
+            &["voltage", "context"][..],
+            &["voltage", "--help"],
+            &["voltage", "--bogus"],
+        ] {
+            assert!(
+                GlobalFlags::without_command(&args(named)).is_none(),
+                "{named:?}"
+            );
+        }
     }
 
     #[test]

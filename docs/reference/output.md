@@ -13,6 +13,10 @@ On a terminal, results are readable tables; when piped, they are JSON. `--json` 
 - A single resource is shown as aligned `field  value` lines, with nested fields joined by dots. `voltage context` shows each setting as `name  value  (source)`.
 - On a terminal, `voltage context` and `voltage auth status` draw those lines inside a titled card (rounded corners, or `+-|` without a UTF-8 locale). A card wider than the terminal falls back to the plain lines, and redirected output always gets them.
 
+- With human output on a terminal, an unfiltered empty `wallets list`, `payments list`, or `webhooks list` ends with a `›` line naming the command that makes the first one, and `profiles create` ends with a command that uses the new profile (keeping `--config-dir`). The line comes after the result. `--quiet` hides it, and JSON or redirected output never has it.
+
+`voltage` with no command, on a terminal, greets you: the wordmark, who you are signed in as (read from the configuration, without a network request), your profile, organization, and wallet when set, and three commands to try; it exits 0. When commands would reject the credential, the greeting leads with that problem instead, such as `VOLTAGE_API_KEY is empty` or `Multiple credentials are saved`, with its next step first. Off a terminal, or with `--json`, it prints its usage and exits 2 as before.
+
 The table layout may change between releases; scripts should use JSON.
 
 ## JSON

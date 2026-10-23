@@ -130,6 +130,25 @@ pub struct Envelope {
     /// On a terminal, a single result is drawn as a card with this title.
     #[serde(skip)]
     pub card: Option<&'static str>,
+    /// The command to run next, shown after human output on a terminal.
+    #[serde(skip)]
+    pub next: Option<NextStep>,
+}
+
+/// A `›` line after a result: what to do, and the command that does it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NextStep {
+    pub what: &'static str,
+    pub command: String,
+}
+
+impl NextStep {
+    pub fn line(&self, glyphs: Glyphs) -> Line {
+        Line::default()
+            .paint(Role::Hint, glyphs.step)
+            .text(&format!(" {}: ", self.what))
+            .styled(Role::Emphasis, &self.command)
+    }
 }
 
 /// How table output lays out a single result. Decided by the command that built the data, not
@@ -158,6 +177,7 @@ impl Envelope {
             event: None,
             layout: Layout::Fields,
             card: None,
+            next: None,
         }
     }
 
@@ -202,6 +222,8 @@ pub struct Output {
     show_secrets: bool,
     file: Option<File>,
     color: ColorChoice,
+    /// `--quiet`, which hides a result's next step.
+    quiet: bool,
 }
 
 /// Reserve `--output-file`. It is reserved before any request, so a refusal sent nothing; the
@@ -228,6 +250,7 @@ impl Output {
         show_secrets: bool,
         output_file: Option<&Path>,
         color: ColorChoice,
+        quiet: bool,
     ) -> Result<Self> {
         let file = output_file.map(reserve_output_file).transpose()?;
         Ok(Self {
@@ -235,7 +258,22 @@ impl Output {
             show_secrets,
             file,
             color,
+            quiet,
         })
+    }
+
+    /// Whether a next step belongs after the output: human output on interactive stdout and
+    /// stderr, without `--quiet`. Redirected or machine-readable output never gets one.
+    pub fn suggests(&self) -> bool {
+        !self.quiet && self.on_terminal() && std::io::stderr().is_terminal()
+    }
+
+    /// The `›` line after the output, when it belongs there.
+    pub fn suggest(&self, next: &NextStep) {
+        if self.suggests() {
+            let glyphs = Glyphs::detect(|name| std::env::var(name).ok());
+            style::write_stderr(self.color, &format!("{}\n", next.line(glyphs).as_str()));
+        }
     }
 
     /// One-time secrets may only go to a private file or an explicitly unredacted stream.
@@ -341,7 +379,11 @@ impl Output {
             };
             let mut buf = Vec::new();
             human::render(&mut buf, &envelope, view)?;
-            return write_stdout_styled(&buf, self.color);
+            write_stdout_styled(&buf, self.color)?;
+            if let Some(next) = &envelope.next {
+                self.suggest(next);
+            }
+            return Ok(());
         }
         let mut bytes = serde_json::to_vec(&envelope)?;
         bytes.push(b'\n');

@@ -18,7 +18,7 @@ use crate::{
     dry_run,
     error::{CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     input::{PaginationMode, Request},
-    output::{Envelope, LiveScreen, Outcome, Output},
+    output::{Envelope, LiveScreen, NextStep, Outcome, Output},
     payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
     price::{PRICE_URL, PriceService, UsdPerBtc},
     qr,
@@ -942,7 +942,21 @@ impl Call<'_> {
                 if operation.id == OperationId::GetWallet && self.out.on_terminal() {
                     self.lead_with_balance(&response.body).await?;
                 }
-                self.write_pages(response, Outcome::Retrieved, follow).await
+                let empty = watch::items(&response.body).is_empty();
+                self.write_pages(response, Outcome::Retrieved, follow)
+                    .await?;
+                // Only an unfiltered list is empty because nothing was made yet.
+                let unfiltered =
+                    self.invocation.filters.is_empty() && self.invocation.query.is_empty();
+                if let Some((what, command)) =
+                    empty_list_next_step(operation.id).filter(|_| empty && unfiltered)
+                {
+                    self.out.suggest(&NextStep {
+                        what,
+                        command: command.into(),
+                    });
+                }
+                Ok(())
             }
         }
     }
@@ -1613,6 +1627,20 @@ impl Call<'_> {
     }
 }
 
+/// What to run when a list a person reads is empty: how to make its first item.
+fn empty_list_next_step(operation: OperationId) -> Option<(&'static str, &'static str)> {
+    match operation {
+        OperationId::GetAllOrganizationsWalletsAsUser => {
+            Some(("Create a wallet", "voltage wallets create --help"))
+        }
+        OperationId::GetPayments => Some(("Receive a payment", "voltage payments receive --help")),
+        OperationId::GetWebhooksAsUser => {
+            Some(("Create a webhook", "voltage webhooks create --help"))
+        }
+        _ => None,
+    }
+}
+
 /// The live watch's first line: what it is, how often it refreshes, how to stop, and why
 /// the last refresh failed, if it did.
 fn watch_header(interval: Duration, failure: Option<&Error>, terminal: Terminal) -> Line {
@@ -1822,6 +1850,26 @@ fn next_page(body: &Value, request: &Request) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_lists_suggest_a_command_that_exists() {
+        for operation in [
+            OperationId::GetAllOrganizationsWalletsAsUser,
+            OperationId::GetPayments,
+            OperationId::GetWebhooksAsUser,
+        ] {
+            let (_, command) = empty_list_next_step(operation).unwrap();
+            let error = crate::cli::command()
+                .try_get_matches_from(command.split(' '))
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "{command}"
+            );
+        }
+        assert_eq!(empty_list_next_step(OperationId::GetWallet), None);
+    }
 
     #[test]
     fn the_watch_header_says_how_to_stop_and_why_a_refresh_failed() {
