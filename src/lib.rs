@@ -26,6 +26,7 @@ mod terminal;
 mod timeline;
 mod wallet_currency;
 mod wallet_shortlist;
+mod wordmark;
 
 pub(crate) use error::{Error, Result};
 pub use startup::run;

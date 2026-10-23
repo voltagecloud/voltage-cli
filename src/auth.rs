@@ -17,6 +17,7 @@ use crate::{
     secret::Secret,
     style::{Line, Role},
     terminal::Terminal,
+    wordmark,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -743,6 +744,7 @@ fn show_logged_in(terminal: Terminal, outcome: &LoginOutcome) {
     if !terminal.decorates() {
         return;
     }
+    wordmark::show(terminal);
     let who = outcome.email.as_deref().unwrap_or(&outcome.account);
     let mut line = Line::default()
         .paint(Role::Success, terminal.glyphs().done)

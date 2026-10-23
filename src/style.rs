@@ -126,6 +126,8 @@ pub enum Role {
     Link,
     /// A value a person reads or types, such as a device code
     Emphasis,
+    /// The wordmark's lightning bolt; decoration, never a status
+    Bolt,
 }
 
 impl Role {
@@ -139,6 +141,7 @@ impl Role {
             Self::Caution => AnsiColor::Yellow.on_default().bold(),
             Self::Link => AnsiColor::Blue.on_default().underline(),
             Self::Emphasis => Style::new().bold(),
+            Self::Bolt => AnsiColor::Yellow.on_default().bold(),
         }
     }
 }
@@ -165,6 +168,13 @@ impl Line {
         let style = role.style();
         self.0
             .push_str(&format!("{style}{}{style:#}", scrub_line(text)));
+        self
+    }
+
+    /// Fixed text in the brand color, at the depth the terminal draws.
+    pub fn brand(mut self, depth: Depth, label: &'static str) -> Self {
+        let style = brand(depth);
+        self.0.push_str(&format!("{style}{label}{style:#}"));
         self
     }
 
@@ -351,6 +361,7 @@ mod tests {
             Role::Caution,
             Role::Link,
             Role::Emphasis,
+            Role::Bolt,
         ] {
             let painted = paint(role, "error:");
             assert!(painted.starts_with('\u{1b}') && painted.ends_with("\u{1b}[0m"));

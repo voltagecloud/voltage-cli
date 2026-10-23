@@ -17,6 +17,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - A change described without `--execute` starts, on a terminal, with what it would do and the values it would use (`! Not sent: this would send a payment`) and ends with how to send it, instead of an `error:` line. Exit code 6 is unchanged.
 - Human output shows amounts with grouped digits, every BTC amount in sats (`150,000 sats`, `1.5 sats`) and cents as dollars (`$1,234.56`), and table timestamps relative to now (`3 minutes ago`); single resources show the UTC time with the relative time beside it. With color on, headers and field names are bold and known statuses are colored. JSON is unchanged.
 - Help headers and usage are Voltage orange where the terminal draws 256 or 24-bit color, and bold elsewhere. `FORCE_COLOR` is honored: `0` or `false` turns color off, other values turn it on when redirected; `--color` and `NO_COLOR` still win.
+- A successful `voltage login` on a terminal shows the `voltage` wordmark, a lightning bolt beside the name in Voltage orange, above `✓ Logged in as`.
 
 ## 0.2.0 - 2026-10-22
 
