@@ -11,11 +11,11 @@ use crate::{
     config::{self, Profile, Scope, Settings},
     context,
     error::{CredentialSources, ErrorKind},
-    output::{Envelope, Output, OutputFormat, report_error, write_stdout},
+    greeting,
+    output::{Envelope, NextStep, Output, OutputFormat, report_error, write_stdout},
     pick,
     price::{PRICE_URL, PriceService},
     style::ColorChoice,
-    terminal::Terminal,
     wallet_currency, wallet_shortlist,
 };
 use serde::Serialize;
@@ -27,6 +27,12 @@ pub async fn run() -> ExitCode {
     let json_errors = cli::json_errors_requested(std::env::args_os());
     let color = ColorChoice::requested(std::env::args_os())
         .with_environment(|name| std::env::var(name).ok());
+    if let Some(global) = greeting::wanted(&std::env::args_os().collect::<Vec<_>>()) {
+        return match greeting::show(&global) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error, OutputFormat::Table, color),
+        };
+    }
     let invocation = match Invocation::from_env(color) {
         Ok(invocation) => invocation,
         Err(failure) => return fail_parse(failure, json_errors, color),
@@ -117,6 +123,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             global.show_secrets,
             global.output_file.as_deref().filter(|_| reserve),
             global.color(),
+            global.quiet,
         )
     };
     // Price commands need neither configuration nor credentials.
@@ -241,7 +248,7 @@ impl<'a> Session<'a> {
             LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?)
                 .map(|context| context.titled("voltage context")),
             LocalCommand::Profiles { command } => {
-                profiles(command, &mut self.settings, scope, global.terminal()).await
+                profiles(command, &mut self.settings, scope, global).await
             }
             LocalCommand::Completions { .. }
             | LocalCommand::Price(_)
@@ -315,8 +322,9 @@ async fn profiles(
     command: ProfileCommand,
     settings: &mut Settings,
     scope: &Scope,
-    terminal: Terminal,
+    global: &GlobalFlags,
 ) -> Result<Envelope> {
+    let terminal = global.terminal();
     if let ProfileCommand::Create { name } = command {
         settings
             .create_profile(&name, terminal, |settings| {
@@ -327,9 +335,31 @@ async fn profiles(
                 })
             })
             .await?;
-        return Envelope::local(ProfileCreated {
+        // A command that uses the new profile, with the same configuration directory.
+        let config_dir = global
+            .config_dir
+            .as_ref()
+            .map(|dir| {
+                format!(
+                    " --config-dir {}",
+                    config::shell_word(&dir.to_string_lossy())
+                )
+            })
+            .unwrap_or_default();
+        let next = NextStep {
+            what: "Use it",
+            command: format!(
+                "voltage wallets list --profile {}{config_dir}",
+                config::shell_word(&name)
+            ),
+        };
+        let created = Envelope::local(ProfileCreated {
             profile: name,
             created: true,
+        })?;
+        return Ok(Envelope {
+            next: Some(next),
+            ..created
         });
     }
     let _lock = settings.lock(terminal).await?;

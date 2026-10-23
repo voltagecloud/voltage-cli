@@ -338,14 +338,18 @@ fn stderr(assertion: &Assert) -> String {
     String::from_utf8_lossy(&assertion.get_output().stderr).into_owned()
 }
 
-/// Text without SGR styles (`ESC [ ... m`), the only escape sequences color adds.
+/// Text without CSI sequences (`ESC [`, parameters, one final byte): the styles color adds
+/// and the line clearing a status line does.
 fn strip_styles(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("\u{1b}[") {
         plain.push_str(&rest[..start]);
-        let end = rest[start..].find('m').unwrap();
-        rest = &rest[start + end + 1..];
+        let after = &rest[start + 2..];
+        let parameters = after
+            .find(|c: char| !(c.is_ascii_digit() || c == ';' || c == '?'))
+            .unwrap_or(after.len());
+        rest = after.get(parameters + 1..).unwrap_or("");
     }
     plain.push_str(rest);
     plain
@@ -5894,6 +5898,18 @@ async fn a_described_change_on_a_terminal_says_what_it_would_do() {
 /// would, and return everything it showed.
 #[cfg(unix)]
 async fn fully_on_a_terminal(dir: &Path, server: &MockServer, args: &[&str]) -> String {
+    let (code, shown) = fully_on_a_terminal_ending(dir, server, args).await;
+    assert_eq!(code, Some(0), "{shown}");
+    shown
+}
+
+/// `fully_on_a_terminal`, for a command that may fail: its exit code and what it showed.
+#[cfg(unix)]
+async fn fully_on_a_terminal_ending(
+    dir: &Path,
+    server: &MockServer,
+    args: &[&str],
+) -> (Option<i32>, String) {
     use std::io::Read;
     use std::process::Stdio;
     let (mut controller, terminal) = open_pty();
@@ -5920,8 +5936,8 @@ async fn fully_on_a_terminal(dir: &Path, server: &MockServer, args: &[&str]) -> 
     let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
         .await
         .unwrap();
-    assert!(output.status.success());
-    strip_styles(&String::from_utf8_lossy(&reader.await.unwrap()))
+    let shown = strip_styles(&String::from_utf8_lossy(&reader.await.unwrap()));
+    (output.status.code(), shown)
 }
 
 #[cfg(unix)]
@@ -6612,6 +6628,109 @@ async fn a_watch_on_a_terminal_is_a_live_table_that_marks_changes() {
     for later in &frames[changed + 1..] {
         assert!(!later.contains('●'), "{later}");
     }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn voltage_without_a_command_greets_on_a_terminal_and_fails_when_piped() {
+    let (server, dir) = fixture().await;
+    // The harness passes only global flags (`--config-dir`, `--api-url`), so no command.
+    let shown = fully_on_a_terminal(dir.path(), &server, &[]).await;
+    assert!(shown.contains("/_  /  |___/"), "{shown}");
+    assert!(
+        shown.contains("✓ Using the API key in VOLTAGE_API_KEY\r\n\r\nTry\r\n"),
+        "{shown}"
+    );
+    assert!(shown.contains("› voltage wallets list\r\n"), "{shown}");
+    assert!(shown.contains("› voltage --help"), "{shown}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+    // Off a terminal it stays a usage error.
+    let piped = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .assert()
+        .code(2);
+    assert!(stderr(&piped).contains("requires a subcommand"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_list_and_a_new_profile_name_the_next_command_on_a_terminal() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(in_order(vec![
+            ok(json!({"items": []})),
+            ok(json!({"items": [{"id": WALLET, "name": "Treasury"}]})),
+        ]))
+        .mount(&server)
+        .await;
+    let list = ["wallets", "list", "--org", ORG];
+    let empty = fully_on_a_terminal(dir.path(), &server, &list).await;
+    let hint = empty
+        .find("› Create a wallet: voltage wallets create --help")
+        .expect(&empty);
+    // The hint follows the result.
+    assert!(empty.find("No results.").expect(&empty) < hint, "{empty}");
+    let listed = fully_on_a_terminal(dir.path(), &server, &list).await;
+    assert!(!listed.contains("Create a wallet"), "{listed}");
+    // Redirected stdout never gets a hint, even with stderr on a terminal.
+    let piped = on_a_terminal(
+        dir.path(),
+        &server,
+        &[&list[..], &["--output", "table"]].concat(),
+        &[],
+    )
+    .await;
+    assert!(
+        !strip_styles(&piped.shown).contains("Create a wallet"),
+        "{}",
+        piped.shown
+    );
+
+    let _settings = seeded_login(dir.path(), &server, false);
+    let create = |name: &'static str| {
+        [
+            "profiles",
+            "create",
+            name,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--account",
+            LOGIN_NAME,
+        ]
+    };
+    let created = fully_on_a_terminal(dir.path(), &server, &create("stage")).await;
+    // After the result, and with the configuration directory the command used.
+    let use_it = format!(
+        "› Use it: voltage wallets list --profile stage --config-dir {}",
+        dir.path().display()
+    );
+    let hint = created.find(&use_it).expect(&created);
+    assert!(created.find("created").expect(&created) < hint, "{created}");
+    // `--json` and `--quiet` get no hint.
+    for flag in ["--json", "--quiet"] {
+        let args = [
+            &create(if flag == "--json" { "json" } else { "quiet" })[..],
+            &[flag],
+        ]
+        .concat();
+        let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+        assert!(!shown.contains("Use it"), "{flag}: {shown}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_greeting_that_cannot_read_its_scope_reports_the_error() {
+    let (server, dir) = fixture().await;
+    let (code, shown) =
+        fully_on_a_terminal_ending(dir.path(), &server, &["--profile", "missing"]).await;
+    assert_eq!(code, Some(2), "{shown}");
+    assert!(
+        shown.contains("error:") && shown.contains("missing"),
+        "{shown}"
+    );
+    assert!(!shown.contains("Try"), "{shown}");
 }
 
 #[cfg(unix)]
