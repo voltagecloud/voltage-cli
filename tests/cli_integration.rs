@@ -5773,11 +5773,15 @@ async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
     // Each status gets one line, and the wait ends with a symbol; color marks only words.
     assert!(shown.contains("› sending · 0s"), "{shown}");
     assert!(
-        shown.contains(&format!("✓ Payment {RESOURCE} completed · ")),
+        shown.contains(&format!("⚡ Payment {RESOURCE} completed · ")),
         "{shown}"
     );
     assert!(!shown.contains("status: sending"), "{shown}");
-    assert!(run.shown.contains("\u{1b}[32m✓"), "{:?}", run.shown);
+    assert!(
+        run.shown.contains("\u{1b}[1m\u{1b}[33m⚡"),
+        "{:?}",
+        run.shown
+    );
     server.verify().await;
 }
 
@@ -5806,7 +5810,7 @@ async fn a_submitted_payment_on_a_terminal_reads_as_a_timeline() {
         .expect(&shown);
     let receiving = shown.find("› receiving · ").expect(&shown);
     let done = shown
-        .find(&format!("✓ Payment {RESOURCE} completed · "))
+        .find(&format!("⚡ Payment {RESOURCE} completed · "))
         .expect(&shown);
     assert!(accepted < receiving && receiving < done, "{shown}");
     // An unchanged status is not repeated on a terminal.
@@ -6141,6 +6145,38 @@ async fn a_qr_code_on_a_terminal_is_framed_for_scanning_under_a_caption() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settled_payment_ends_with_its_closing_line_below_the_record() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": "sending"})),
+            ok(json!({"id": RESOURCE, "status": "completed", "type": "bolt11"})),
+        ]))
+        .mount(&server)
+        .await;
+    let args = [
+        "payments",
+        "get",
+        RESOURCE,
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--wait",
+        "completed",
+    ];
+    let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+    let record = shown.find("type ").expect(&shown);
+    let closing = shown
+        .find(&format!("⚡ Payment {RESOURCE} completed · "))
+        .expect(&shown);
+    assert!(record < closing, "{shown}");
+    // Nothing follows the closing line.
+    assert_eq!(shown[closing..].trim_end().lines().count(), 1, "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_qr_code_for_a_ready_invoice_comes_last_so_it_stays_on_screen() {
     let (server, dir) = fixture().await;
     respond_once(&server, route("POST", payments_path()), accepted()).await;
@@ -6169,10 +6205,13 @@ async fn a_qr_code_for_a_ready_invoice_comes_last_so_it_stays_on_screen() {
         "--execute",
     ]);
     let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
-    // The result's fields come first; the caption and code end the output.
+    // The result's fields, then how the wait ended, then the caption and code.
     let fields = shown.find("payment_request").expect(&shown);
+    let ready = shown
+        .find(&format!("✓ Payment {RESOURCE} ready"))
+        .expect(&shown);
     let caption = shown.find("Scan to pay").expect(&shown);
-    assert!(fields < caption, "{shown}");
+    assert!(fields < ready && ready < caption, "{shown}");
     assert!(!shown[caption..].contains("payment_request"), "{shown}");
     assert!(shown.contains("● mutinynet · Scan to pay"), "{shown}");
     server.verify().await;

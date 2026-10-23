@@ -21,6 +21,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - `voltage context` and `voltage auth status` draw their fields in a titled card on a terminal, with sources dimmed. Redirected output is unchanged.
 - `voltage wallets get` on a terminal leads with the wallet's name, its balances (with a USD estimate on mainnet), and a 14-day sparkline of completed payments.
 - `--qr` on a terminal draws the invoice black on white with a quiet zone, so it scans on dark themes, under a `Scan to pay` caption with the amount, memo, and expiry, and after the result so it stays on screen; `--wait completed` counts down to the expiry. The caption leads with the network, its dot in the website's color.
+- A payment that settles on a terminal closes with `⚡ Payment ID completed` instead of a check mark, printed after the payment's record so it stays on screen.
 
 ## 0.2.0 - 2026-10-22
 

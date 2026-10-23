@@ -218,6 +218,8 @@ impl Line {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glyphs {
     pub done: &'static str,
+    /// A settled payment: the lightning bolt.
+    pub paid: &'static str,
     pub failed: &'static str,
     pub step: &'static str,
     /// Separates a status line's facts, as in `completed · 4s`.
@@ -228,6 +230,7 @@ pub struct Glyphs {
 impl Glyphs {
     pub const UNICODE: Self = Self {
         done: "✓",
+        paid: "⚡",
         failed: "✗",
         step: "›",
         separator: "·",
@@ -235,6 +238,7 @@ impl Glyphs {
     };
     pub const ASCII: Self = Self {
         done: "ok",
+        paid: "ok",
         failed: "x",
         step: ">",
         separator: "-",
