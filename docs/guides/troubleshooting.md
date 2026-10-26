@@ -72,7 +72,7 @@ When you sign in as the same user, the new login replaces the saved one, and the
 
 ### needs a browser login
 
-`organizations list` and `environments list` need a browser login; an API key cannot list them. Pass `--account NAME` for a saved login, or unset `VOLTAGE_API_KEY`.
+`organizations list`, `environments list`, and `environments create` need a browser login; an API key cannot run them. Pass `--account NAME` for a saved login, or unset `VOLTAGE_API_KEY`.
 
 ### HTTP 401
 

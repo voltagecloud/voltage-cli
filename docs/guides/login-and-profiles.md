@@ -29,9 +29,19 @@ secret-manager-command | voltage auth import-key --stdin --account ci --org ORG_
 VOLTAGE_API_KEY=... voltage wallets list --org ORG_ID
 ```
 
-An imported key remembers the organization and environment it belongs to, and a command that selects a different one fails before any request is sent. `VOLTAGE_API_KEY` is used only when neither `--profile` nor `--account` is given. `organizations list` and `environments list` require a browser login.
+An imported key remembers the organization and environment it belongs to, and a command that selects a different one fails before any request is sent. `VOLTAGE_API_KEY` is used only when neither `--profile` nor `--account` is given. `organizations list`, `environments list`, and `environments create` require a browser login.
 
 With several saved credentials, select one with `--account` or through a profile.
+
+## Create an environment
+
+`environments create` adds an environment to the selected organization through the auth service. Like any change, it only describes the request (exit code 6) until you add `--execute`:
+
+```sh
+voltage environments create --account me --org ORG_ID --name staging --execute
+```
+
+The CLI generates the environment's ID unless you pass `--id UUID`, and reports it in `resource_id` and in the result's `environment_id`, so the next command can use it. On a terminal, the result suggests a `voltage profiles create` command for the new environment. The description omits the name unless you pass `--show-secrets`. If the request gets no response, the environment may have been created: run `voltage environments list` and look for the reported ID before you run the command again.
 
 ## Scope
 

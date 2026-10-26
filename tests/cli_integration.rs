@@ -502,6 +502,11 @@ fn settings_at(dir: &Path) -> Settings {
 
 /// A saved browser login stored in a private file, expired or good for ten minutes.
 fn seeded_login(dir: &Path, auth: &MockServer, expired: bool) -> Settings {
+    seeded_login_at(dir, &auth.uri(), expired)
+}
+
+/// `seeded_login` with an auth service that is not a mock server.
+fn seeded_login_at(dir: &Path, auth_url: &str, expired: bool) -> Settings {
     let mut settings = settings_at(dir);
     settings.config.accounts.insert(
         LOGIN_NAME.into(),
@@ -511,7 +516,7 @@ fn seeded_login(dir: &Path, auth: &MockServer, expired: bool) -> Settings {
             email: Some(LOGIN_EMAIL.into()),
             organization_id: None,
             environment_id: None,
-            auth_url: auth.uri(),
+            auth_url: auth_url.into(),
         },
     );
     settings
@@ -4903,6 +4908,14 @@ async fn discovery_with_an_api_key_says_which_key_was_used() {
             .contains("VOLTAGE_API_KEY from the environment"),
         "{error}"
     );
+    let result = cli(dir.path(), &server)
+        .args(["environments", "create", "--org", ORG, "--name", "staging"])
+        .assert()
+        .code(3);
+    assert_eq!(
+        json_error(&result)["error"]["message"],
+        "environments create needs a browser login, but this command used VOLTAGE_API_KEY from the environment"
+    );
 
     // A saved API key selected without the ambient one is named instead.
     seeded_api_key(dir.path(), "saved", "saved-key");
@@ -4911,6 +4924,18 @@ async fn discovery_with_an_api_key_says_which_key_was_used() {
         (
             &["environments", "list", "--org", ORG][..],
             "environments list",
+        ),
+        (
+            &[
+                "environments",
+                "create",
+                "--org",
+                ORG,
+                "--name",
+                "staging",
+                "--execute",
+            ][..],
+            "environments create",
         ),
     ] {
         let result = cli(dir.path(), &server)
@@ -7091,6 +7116,345 @@ async fn documented_changes_describe_themselves_offline() {
 async fn help_examples_describe_themselves_offline() {
     let dir = private_tempdir();
     assert_changes_describe_offline(help_examples(dir.path()), 15).await;
+}
+
+// ---------------------------------------------------------------------------------------
+// Environments
+// ---------------------------------------------------------------------------------------
+
+fn environments_path() -> String {
+    format!("/organizations/{ORG}/environments")
+}
+
+/// `environments create` with the saved login, in `ORG`, followed by `extra`.
+fn create_environment_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "environments",
+        "create",
+        "--account",
+        LOGIN_NAME,
+        "--org",
+        ORG,
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn environments_create_describes_the_request_without_sending_it() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    let args = create_environment_args(&["--name", "staging", "--id", RESOURCE]);
+    for variable in [None, Some("0")] {
+        let mut command = cli(dir.path(), &api);
+        command.env_remove("VOLTAGE_EXECUTE");
+        if let Some(value) = variable {
+            command.env("VOLTAGE_EXECUTE", value);
+        }
+        let result = command.args(&args).assert().code(6);
+        let described = json_stdout(&result);
+        assert_eq!(described["outcome"], "dry_run");
+        assert_eq!(described["http_status"], Value::Null);
+        assert_eq!(described["resource_id"], RESOURCE);
+        assert_eq!(described["data"]["method"], "POST");
+        assert_eq!(
+            described["data"]["url"],
+            format!("{}{}", auth.uri(), environments_path())
+        );
+        // The name is private by default, like any free text in a described body.
+        assert_eq!(
+            described["data"]["body"],
+            json!({"environment_id": RESOURCE, "organization_id": ORG, "name": "[OMITTED]"})
+        );
+        assert_eq!(described["data"]["values_omitted"], true);
+        assert_eq!(json_error(&result)["error"]["exit_code"], 6);
+    }
+
+    // Without --id the description reports the ID it generated; --show-secrets shows the name.
+    let result = cli(dir.path(), &api)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(create_environment_args(&[
+            "--name",
+            "staging",
+            "--show-secrets",
+        ]))
+        .assert()
+        .code(6);
+    let described = json_stdout(&result);
+    assert_eq!(described["data"]["body"]["name"], "staging");
+    assert_eq!(described["data"]["values_omitted"], false);
+    assert_eq!(
+        described["data"]["body"]["environment_id"],
+        described["resource_id"]
+    );
+    assert!(
+        described["data"]["notes"]
+            .to_string()
+            .contains("a real run generates a new one unless you pass --id"),
+        "{described}"
+    );
+    assert!(auth.received_requests().await.unwrap().is_empty());
+    assert!(api.received_requests().await.unwrap().is_empty());
+
+    // With no saved login, the description names the auth service --auth-url selects.
+    let empty = private_tempdir();
+    let result = cli(empty.path(), &api)
+        .env_remove("VOLTAGE_EXECUTE")
+        .env_remove("VOLTAGE_API_KEY")
+        .args([
+            "environments",
+            "create",
+            "--org",
+            ORG,
+            "--name",
+            "staging",
+            "--auth-url",
+            "http://127.0.0.1:9/api/v1/",
+        ])
+        .assert()
+        .code(6);
+    assert_eq!(
+        json_stdout(&result)["data"]["url"],
+        format!("http://127.0.0.1:9/api/v1{}", environments_path())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn environments_create_sends_the_environment_once_and_reports_its_id() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    organization_exchange(&auth, LOGIN_ACCESS, ORG, "org-access", 3).await;
+    respond_once(
+        &auth,
+        route("POST", environments_path())
+            .and(header("authorization", "Bearer org-access"))
+            .and(body_json(
+                json!({"environment_id": RESOURCE, "organization_id": ORG, "name": "staging"}),
+            )),
+        ResponseTemplate::new(201),
+    )
+    .await;
+    let result = cli(dir.path(), &api)
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(create_environment_args(&[
+            "--name",
+            "staging",
+            "--id",
+            RESOURCE,
+            "--execute",
+        ]))
+        .assert()
+        .success();
+    assert_eq!(
+        json_stdout(&result),
+        json!({
+            "http_status": 201,
+            "data": {"environment_id": RESOURCE, "organization_id": ORG, "name": "staging"},
+            "resource_id": RESOURCE,
+            "outcome": "succeeded"
+        })
+    );
+
+    // VOLTAGE_EXECUTE=1 sends it too, and says so; the generated ID is the one sent.
+    respond_once(
+        &auth,
+        route("POST", environments_path()).and(body_string_contains("\"name\":\"preview\"")),
+        ResponseTemplate::new(201),
+    )
+    .await;
+    let result = cli(dir.path(), &api)
+        .args(create_environment_args(&["--name", "preview"]))
+        .assert()
+        .success();
+    assert!(stderr(&result).contains("Sending this change because VOLTAGE_EXECUTE is set."));
+    let created = json_stdout(&result);
+    let sent = auth
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .rfind(|request| request.url.path() == environments_path())
+        .unwrap();
+    let sent: Value = serde_json::from_slice(&sent.body).unwrap();
+    assert_eq!(sent["environment_id"], created["resource_id"]);
+    assert_eq!(created["data"]["environment_id"], created["resource_id"]);
+
+    // Table output leads with the new environment's ID, for the next command to use.
+    respond_once(
+        &auth,
+        route("POST", environments_path()).and(body_string_contains("\"name\":\"qa\"")),
+        ResponseTemplate::new(201),
+    )
+    .await;
+    let output = human_process_at(dir.path(), &api.uri())
+        .args(create_environment_args(&["--name", "qa", "--id", WALLET]))
+        .args(["--output", "table"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let table = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        table
+            .lines()
+            .any(|line| line.starts_with("environment_id") && line.trim_end().ends_with(WALLET)),
+        "{table}"
+    );
+    assert!(api.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn environments_create_reports_a_rejection_without_retrying() {
+    let forbidden_hint = "Your login cannot create environments in this organization. Ask an organization admin to create it, or to give you that permission.";
+    for (status, body, exit_code, reason, hint) in [
+        (
+            400,
+            json!({"error": "invalid_request"}),
+            1,
+            "invalid_request",
+            None,
+        ),
+        (409, json!({"detail": "taken"}), 1, "request_rejected", None),
+        (
+            401,
+            json!({"error": "invalid_token"}),
+            3,
+            "invalid_token",
+            None,
+        ),
+        (403, json!({}), 3, "request_rejected", Some(forbidden_hint)),
+    ] {
+        let auth = MockServer::start().await;
+        let (api, dir) = fixture().await;
+        seeded_login(dir.path(), &auth, false);
+        organization_exchange(&auth, LOGIN_ACCESS, ORG, "org-access", 1).await;
+        respond_once(
+            &auth,
+            route("POST", environments_path()),
+            ResponseTemplate::new(status).set_body_json(body),
+        )
+        .await;
+        let result = cli(dir.path(), &api)
+            .args(create_environment_args(&[
+                "--name", "staging", "--id", RESOURCE,
+            ]))
+            .assert()
+            .code(exit_code);
+        assert!(result.get_output().stdout.is_empty());
+        let error = json_error(&result)["error"].clone();
+        assert_eq!(
+            error["message"],
+            format!("The auth service did not create the environment (HTTP {status}, {reason})")
+        );
+        assert_eq!(error["hint"].as_str(), hint, "{status}");
+        auth.verify().await;
+    }
+}
+
+#[test]
+fn environments_create_reports_an_unanswered_request_with_its_id() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    // An auth service that issues the organization token, then drops the creation request.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let auth = format!("http://{}", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        for answer in [true, false] {
+            let (socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut length = 0;
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).unwrap();
+            assert_eq!(first.starts_with("POST /oauth/token "), answer, "{first}");
+            if answer {
+                let body = r#"{"access_token":"org-access","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":600}"#;
+                write!(
+                    reader.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        }
+    });
+    let dir = private_tempdir();
+    seeded_login_at(dir.path(), &auth, false);
+    let result = cli_at(dir.path(), "http://127.0.0.1:9")
+        .args(create_environment_args(&[
+            "--name", "staging", "--id", RESOURCE,
+        ]))
+        .assert()
+        .code(4);
+    peer.join().unwrap();
+    let error = json_error(&result)["error"].clone();
+    assert_eq!(
+        error["message"],
+        format!(
+            "Environment creation request failed: the connection closed before a response arrived; environment {RESOURCE} may have been created"
+        )
+    );
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("The change may have been applied."),
+        "{error}"
+    );
+    assert_eq!(error["detail"]["resource_id"], RESOURCE);
+    assert_eq!(error["detail"]["organization_id"], ORG);
+    assert_eq!(error["detail"]["outcome"], "unknown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn environments_create_checks_its_flags_and_scope_before_any_request() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    let missing_org = cli(dir.path(), &api)
+        .args([
+            "environments",
+            "create",
+            "--account",
+            LOGIN_NAME,
+            "--name",
+            "staging",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(
+        json_error(&missing_org)["error"]["message"],
+        "--org is required"
+    );
+    let missing_name = cli(dir.path(), &api)
+        .args(create_environment_args(&[]))
+        .assert()
+        .code(2);
+    assert!(stderr(&missing_name).contains("--name <NAME>"));
+    let blank_name = cli(dir.path(), &api)
+        .args(create_environment_args(&["--name", "  "]))
+        .assert()
+        .code(2);
+    assert!(stderr(&blank_name).contains("the name must not be empty"));
+    let bad_id = cli(dir.path(), &api)
+        .args(create_environment_args(&[
+            "--name", "staging", "--id", "nope",
+        ]))
+        .assert()
+        .code(2);
+    assert!(stderr(&bad_id).contains("--id <UUID>"));
+    assert!(auth.received_requests().await.unwrap().is_empty());
+    assert!(api.received_requests().await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------
