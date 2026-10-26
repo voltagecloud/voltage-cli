@@ -12,6 +12,7 @@ mod cli;
 pub mod config;
 mod context;
 mod dry_run;
+mod environment;
 mod error;
 mod greeting;
 mod input;

@@ -617,16 +617,9 @@ pub async fn execute(
                 dry_run::announce(terminal, invocation, &described);
             }
             out.write(described, &[])?;
-            return Err(Error::new(
-                ErrorKind::NotExecuted,
-                format!(
-                    "Described this change without sending it; pass --execute or set {EXECUTE_VARIABLE}=1 to send it"
-                ),
-            ));
+            return Err(not_sent());
         }
-        Execution::SendFromEnvironment => global.terminal().notice(format!(
-            "Sending this change because {EXECUTE_VARIABLE} is set."
-        )),
+        Execution::SendFromEnvironment => sending_from_environment(global.terminal()),
         Execution::Send => {}
     }
     if operation.id.returns_one_time_secret() && !out.secure_destination() {
@@ -762,8 +755,15 @@ impl Execution {
     /// changes are described.
     pub fn resolve(invocation: &ApiInvocation, execute_variable: Option<bool>) -> Self {
         match invocation.requested {
-            Requested::Execute => Self::Send,
             Requested::Unspecified if invocation.operation.method == Method::Get => Self::Send,
+            requested => Self::change(requested, execute_variable),
+        }
+    }
+
+    /// `resolve` for a change, such as `environments create`, which is never a read.
+    pub fn change(requested: Requested, execute_variable: Option<bool>) -> Self {
+        match requested {
+            Requested::Execute => Self::Send,
             Requested::Unspecified if execute_variable == Some(true) => Self::SendFromEnvironment,
             Requested::Unspecified => Self::DescribeChange,
         }
@@ -773,6 +773,23 @@ impl Execution {
     pub fn describes(self) -> bool {
         self == Self::DescribeChange
     }
+}
+
+/// The error after a described change, whose exit code tells a script nothing was sent.
+pub fn not_sent() -> Error {
+    Error::new(
+        ErrorKind::NotExecuted,
+        format!(
+            "Described this change without sending it; pass --execute or set {EXECUTE_VARIABLE}=1 to send it"
+        ),
+    )
+}
+
+/// Say that `VOLTAGE_EXECUTE`, not the command line, sends this change.
+pub fn sending_from_environment(terminal: Terminal) {
+    terminal.notice(format!(
+        "Sending this change because {EXECUTE_VARIABLE} is set."
+    ));
 }
 
 pub const OFFSET_PAGINATION_DEPRECATED: &str =
@@ -1359,7 +1376,7 @@ pub(crate) enum SessionChange {
 }
 
 struct SubmittedWrite {
-    operation: OperationId,
+    payment: bool,
     resource_id: Option<Uuid>,
     organization_id: Option<Uuid>,
     environment_ids: Vec<Uuid>,
@@ -1369,8 +1386,18 @@ impl SubmissionState {
     /// A command sends at most one mutation, so the first record is the only one.
     fn record(&self, operation: OperationId, resource_id: Option<Uuid>, scope: &Scope) {
         let _ = self.write.set(SubmittedWrite {
-            operation,
+            payment: operation.submits_payment(),
             resource_id,
+            organization_id: scope.org,
+            environment_ids: scope.envs.clone(),
+        });
+    }
+
+    /// `record` for a change sent to the auth service, which is never a payment.
+    pub(crate) fn record_auth_change(&self, resource_id: Uuid, scope: &Scope) {
+        let _ = self.write.set(SubmittedWrite {
+            payment: false,
+            resource_id: Some(resource_id),
             organization_id: scope.org,
             environment_ids: scope.envs.clone(),
         });
@@ -1442,7 +1469,7 @@ impl SubmissionState {
             };
         };
         let message = match write.resource_id {
-            Some(id) if write.operation.submits_payment() => format!(
+            Some(id) if write.payment => format!(
                 "Interrupted after payment {id} may have been submitted; query its original ID before resubmitting. The payment was not cancelled."
             ),
             _ => "Interrupted after the request may have been submitted; check its result before retrying. The request was not cancelled.".to_owned(),

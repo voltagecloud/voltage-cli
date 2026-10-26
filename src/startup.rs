@@ -5,11 +5,11 @@ use crate::{
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery, Resolver},
     cli::{
-        self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
-        ParseFailure, PriceFlags, ProfileCommand,
+        self, AuthCommand, Command, ConvertFlags, EnvironmentCommand, GlobalFlags, Invocation,
+        LocalCommand, ParseFailure, PriceFlags, ProfileCommand,
     },
     config::{self, Profile, Scope, Settings},
-    context,
+    context, environment,
     error::{CredentialSources, ErrorKind},
     greeting,
     output::{Envelope, NextStep, Output, OutputFormat, report_error, write_stdout},
@@ -150,6 +150,22 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             let mut out = output(!execution.describes())?;
             api::execute(&api, execution, &global, resolver, &session.scope, &mut out).await
         }
+        Command::Local(LocalCommand::Environments {
+            command: EnvironmentCommand::Create(flags),
+        }) => {
+            let execution = Execution::change(flags.requested(), config::execute_variable()?);
+            let mut out = output(!execution.describes())?;
+            let resolver = session.resolver();
+            environment::create(
+                &flags,
+                execution,
+                &global,
+                resolver,
+                &session.scope,
+                &mut out,
+            )
+            .await
+        }
         Command::Local(local) => {
             let mut out = output(true)?;
             let envelope = session.local(local).await?;
@@ -240,7 +256,9 @@ impl<'a> Session<'a> {
                     .discover(scope, Discovery::Organizations)
                     .await?,
             ),
-            LocalCommand::Environments { .. } => Envelope::local(
+            LocalCommand::Environments {
+                command: EnvironmentCommand::List,
+            } => Envelope::local(
                 self.resolver()
                     .discover(scope, Discovery::Environments)
                     .await?,
@@ -253,6 +271,10 @@ impl<'a> Session<'a> {
             LocalCommand::Completions { .. }
             | LocalCommand::Price(_)
             | LocalCommand::Convert(_) => Err(Error::usage("This command needs no configuration")),
+            // `execute` runs it, because a description must not reserve --output-file.
+            LocalCommand::Environments {
+                command: EnvironmentCommand::Create(_),
+            } => Err(Error::usage("This command writes its own output")),
         }
     }
 }

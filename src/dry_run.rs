@@ -138,12 +138,18 @@ pub fn describe(
 /// On a terminal, say in words what the described change would do and the values it would
 /// use, before the description's full details. It shows only what the description shows.
 pub fn announce(terminal: Terminal, invocation: &ApiInvocation, described: &Envelope) {
+    announce_change(terminal, &action(invocation), &facts(invocation, described));
+}
+
+/// `announce` for any change: what it would do, such as "create an environment", and the
+/// values it would use.
+pub fn announce_change(terminal: Terminal, action: &str, facts: &Value) {
     let caution = Line::default()
         .paint(Role::Caution, "!")
         .text(" Not sent: this would ")
-        .styled(Role::Emphasis, &action(invocation));
+        .styled(Role::Emphasis, action);
     terminal.notice_line(caution);
-    for line in output::field_lines(&facts(invocation, described)) {
+    for line in output::field_lines(facts) {
         terminal.notice_line(Line::default().text(&format!("  {line}")));
     }
     terminal.notice_line(Line::default());

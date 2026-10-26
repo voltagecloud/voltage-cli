@@ -381,6 +381,10 @@ mod tests {
             Needs::new(true, false, false)
         );
         assert_eq!(
+            needs_of(&["environments", "create", "--name", "staging"]),
+            Needs::new(true, false, false)
+        );
+        assert_eq!(
             needs_of(&["profiles", "create", "prod"]),
             Needs::new(true, true, false)
         );

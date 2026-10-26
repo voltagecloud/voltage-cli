@@ -4,6 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- `voltage environments create --org ORG_ID --name NAME` adds an environment to an organization with a browser login. Without `--execute` it only describes the request and exits 6. The new environment's ID, generated unless you pass `--id`, is in `resource_id`.
 - Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type adjustment`, from the refreshed API contract. Omit `--event-type` for payment ledger entries. Filters carry across pagination.
 - `webhooks test WEBHOOK_ID` without `--data` sends a test event, with a new `delivery_id` and a payload of type `test` and event `created`. Before, it failed with "This operation requires --data". `--data` still sends your own payload.
 - A list that returns every item in one response, such as `wallets list`, accepts `--all` and ignores it, because there are no more pages. Before, it rejected `--all`. `--all` still pages through lists that take `--limit`.
