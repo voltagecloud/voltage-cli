@@ -476,14 +476,15 @@ async fn result_output_treats_an_early_closing_pipe_as_success_without_resubmitt
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     drop(child.stdout.take());
-    let output = tokio::time::timeout(
+    let output = exit_within(
+        child,
+        running,
         Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+        "the command did not exit after its stdout closed",
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     assert!(
         output.status.success(),
         "{}",
@@ -1987,6 +1988,51 @@ fn open_pty() -> (std::fs::File, std::fs::File) {
     }
 }
 
+/// Kills a CLI process when dropped, until `exit_within` reaps it. A test that fails while
+/// the process still runs, for example at a prompt that never appears, would otherwise leave
+/// it running, and with it each blocking task that waits for it or reads its terminal. The
+/// test runtime waits for those tasks when it shuts down, so one failure would hang the run.
+#[cfg(unix)]
+struct KillOnDrop(Option<u32>);
+
+#[cfg(unix)]
+impl KillOnDrop {
+    fn new(child: &std::process::Child) -> Self {
+        Self(Some(child.id()))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Until the process is reaped, its ID stays its own, so a kill after it exited does
+        // nothing.
+        if let Some(pid) = self.0 {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+    }
+}
+
+/// Wait up to `limit` for `child` to exit. If it does not, fail with `what`, and `running`
+/// kills it as the test unwinds. A reaped child's ID can be reused, so `running` is disarmed
+/// once the child is reaped.
+#[cfg(unix)]
+async fn exit_within(
+    child: std::process::Child,
+    mut running: KillOnDrop,
+    limit: Duration,
+    what: &str,
+) -> std::process::Output {
+    let waited = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap());
+    let Ok(output) = tokio::time::timeout(limit, waited).await else {
+        panic!("{what}");
+    };
+    running.0 = None;
+    output.unwrap()
+}
+
 /// Deliver SIGINT, as Ctrl-C does on a terminal.
 #[cfg(unix)]
 fn interrupt(child: &std::process::Child) {
@@ -2026,18 +2072,19 @@ async fn interrupt_in_flight(
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     // Generous: a device login waits out its first poll interval before any request.
     tokio::time::timeout(Duration::from_secs(15), arrived.notified())
         .await
         .unwrap();
     interrupt(&child);
-    let output = tokio::time::timeout(
+    let output = exit_within(
+        child,
+        running,
         Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+        "Ctrl-C during a request did not end the process",
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     assert_eq!(
         output.status.code(),
         Some(130),
@@ -2079,15 +2126,20 @@ async fn progress_is_terminal_only_and_cleared_on_completion() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     let reader = tokio::task::spawn_blocking(move || {
         let mut shown = Vec::new();
         // Linux PTYs return EIO rather than EOF when the terminal end closes.
         let _ = controller.read_to_end(&mut shown);
         shown
     });
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = exit_within(
+        child,
+        running,
+        Duration::from_secs(10),
+        "the listing did not exit",
+    )
+    .await;
     assert!(output.status.success());
     let shown = reader.await.unwrap();
     let shown = String::from_utf8_lossy(&shown);
@@ -2229,6 +2281,7 @@ async fn interrupt_the_hidden_key_prompt(ctrl_c: CtrlC) -> (Option<i32>, bool, S
         });
     }
     let child = command.spawn().unwrap();
+    let running = KillOnDrop::new(&child);
     // A session leader's exit waits for its terminal output to drain, so the controller is
     // read until the child closes the terminal, not only until the prompt appears.
     let (prompted, prompt) = tokio::sync::oneshot::channel();
@@ -2261,20 +2314,15 @@ async fn interrupt_the_hidden_key_prompt(ctrl_c: CtrlC) -> (Option<i32>, bool, S
         CtrlC::Signal => interrupt(&child),
         CtrlC::Typed => (&observer).write_all(b"\x03").unwrap(),
     }
-    let pid = child.id().to_string();
-    let exited = tokio::time::timeout(
+    let code = exit_within(
+        child,
+        running,
         Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+        "Ctrl-C at the hidden key prompt did not end the process",
     )
-    .await;
-    let Ok(output) = exited else {
-        std::process::Command::new("kill")
-            .args(["-KILL", &pid])
-            .status()
-            .unwrap();
-        panic!("Ctrl-C at the hidden key prompt did not end the process");
-    };
-    let code = output.unwrap().status.code();
+    .await
+    .status
+    .code();
     let echo = local_modes(&observer) & libc::ECHO != 0;
     // The controller reports end of input once the last terminal descriptor closes.
     drop(command);
@@ -2520,6 +2568,7 @@ async fn interrupt_while_a_request_body_is_still_being_read() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     // Held open and never written, so the CLI's read blocks until the process ends.
     let _writer = tokio::time::timeout(
         Duration::from_secs(15),
@@ -2531,20 +2580,13 @@ async fn interrupt_while_a_request_body_is_still_being_read() {
     .unwrap()
     .unwrap();
     interrupt(&child);
-    let pid = child.id().to_string();
-    let Ok(output) = tokio::time::timeout(
+    let output = exit_within(
+        child,
+        running,
         Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+        "Ctrl-C during a blocked --data read did not end the process",
     )
-    .await
-    else {
-        std::process::Command::new("kill")
-            .args(["-KILL", &pid])
-            .status()
-            .unwrap();
-        panic!("Ctrl-C during a blocked --data read did not end the process");
-    };
-    let output = output.unwrap();
+    .await;
     assert_eq!(
         output.status.code(),
         Some(130),
@@ -5084,6 +5126,7 @@ async fn interrupting_checkout_stream_returns_130_without_leaking_its_token() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     let (mut socket, _) = tokio::task::spawn_blocking(move || listener.accept().unwrap())
         .await
         .unwrap();
@@ -5107,13 +5150,13 @@ async fn interrupting_checkout_stream_returns_130_without_leaking_its_token() {
         .args(["-INT", &child.id().to_string()])
         .status()
         .unwrap();
-    let output = tokio::time::timeout(
+    let output = exit_within(
+        child,
+        running,
         Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+        "Ctrl-C did not end the checkout event stream",
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     assert_eq!(
         output.status.code(),
         Some(130),
@@ -5149,6 +5192,12 @@ async fn on_a_terminal(
 ) -> TerminalRun {
     on_a_terminal_with(dir, server, args, steps, |_| {}).await
 }
+
+/// How long a terminal step may take: until its prompt is shown, and until the command exits.
+/// A device login waits out its 5-second poll interval before its first prompt, and a loaded
+/// machine is slower still. A passing step finishes well within this; it only bounds a failure.
+#[cfg(unix)]
+const TERMINAL_STEP: Duration = Duration::from_secs(30);
 
 /// `on_a_terminal`, calling `meanwhile` with each step's index once its prompt is shown and
 /// before its keys are typed, as another command could run while a prompt is open.
@@ -5190,6 +5239,7 @@ async fn on_a_terminal_with(
         });
     }
     let child = command.spawn().unwrap();
+    let running = KillOnDrop::new(&child);
     let mut prompts = steps
         .iter()
         .map(|&(prompt, _)| prompt.as_bytes())
@@ -5216,7 +5266,7 @@ async fn on_a_terminal_with(
         String::from_utf8_lossy(&shown).into_owned()
     });
     for (index, &(_, keys)) in steps.iter().enumerate() {
-        tokio::time::timeout(Duration::from_secs(10), shown_prompt.recv())
+        tokio::time::timeout(TERMINAL_STEP, shown_prompt.recv())
             .await
             .unwrap()
             .unwrap();
@@ -5227,20 +5277,13 @@ async fn on_a_terminal_with(
             (&observer).write_all(keys).unwrap();
         }
     }
-    let pid = child.id().to_string();
-    let Ok(output) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()),
+    let output = exit_within(
+        child,
+        running,
+        TERMINAL_STEP,
+        "the command on the terminal did not exit",
     )
-    .await
-    else {
-        std::process::Command::new("kill")
-            .args(["-KILL", &pid])
-            .status()
-            .unwrap();
-        panic!("the command on the terminal did not exit");
-    };
-    let output = output.unwrap();
+    .await;
     let after = local_modes(&observer);
     drop(command);
     let shown = tokio::time::timeout(Duration::from_secs(5), drain)
@@ -5927,15 +5970,20 @@ async fn fully_on_a_terminal_ending(
         .stderr(Stdio::from(terminal))
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     let reader = tokio::task::spawn_blocking(move || {
         let mut shown = Vec::new();
         // Linux PTYs return EIO rather than EOF when the terminal end closes.
         let _ = controller.read_to_end(&mut shown);
         shown
     });
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = exit_within(
+        child,
+        running,
+        TERMINAL_STEP,
+        "the command on the terminal did not exit",
+    )
+    .await;
     let shown = strip_styles(&String::from_utf8_lossy(&reader.await.unwrap()));
     (output.status.code(), shown)
 }
@@ -6273,6 +6321,7 @@ async fn a_redirected_watch_writes_one_event_per_new_or_changed_payment() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     let stdout = child.stdout.take().unwrap();
     let events = tokio::task::spawn_blocking(move || {
         BufReader::new(stdout)
@@ -6317,9 +6366,13 @@ async fn a_redirected_watch_writes_one_event_per_new_or_changed_payment() {
     );
     assert!(events.iter().all(|event| event["outcome"] == "event"));
     interrupt(&child);
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = exit_within(
+        child,
+        running,
+        Duration::from_secs(5),
+        "Ctrl-C did not end the payment watch",
+    )
+    .await;
     assert_eq!(output.status.code(), Some(130));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
@@ -6478,6 +6531,7 @@ async fn a_watch_on_a_saved_login_exchanges_again_when_its_token_expires() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     let stdout = child.stdout.take().unwrap();
     let events = tokio::task::spawn_blocking(move || {
         use std::io::{BufRead, BufReader};
@@ -6500,9 +6554,13 @@ async fn a_watch_on_a_saved_login_exchanges_again_when_its_token_expires() {
         .unwrap();
     assert_eq!(events, ["snapshot receiving", "updated completed"]);
     interrupt(&child);
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = exit_within(
+        child,
+        running,
+        Duration::from_secs(5),
+        "Ctrl-C did not end the payment watch",
+    )
+    .await;
     assert_eq!(output.status.code(), Some(130));
     server.verify().await;
 }
@@ -6538,10 +6596,15 @@ async fn a_live_watch_that_ends_in_an_error_puts_the_screen_back_first() {
         .stderr(std::process::Stdio::from(terminal))
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     let shown = drain(controller);
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = exit_within(
+        child,
+        running,
+        TERMINAL_STEP,
+        "the watch did not end on its error",
+    )
+    .await;
     assert_eq!(output.status.code(), Some(3));
     let raw = shown.finish();
     let left = raw.find("\u{1b}[?25h\u{1b}[?1049l").expect(&raw);
@@ -6578,6 +6641,7 @@ async fn a_watch_on_a_terminal_is_a_live_table_that_marks_changes() {
         .stderr(Stdio::from(terminal))
         .spawn()
         .unwrap();
+    let running = KillOnDrop::new(&child);
     // Stop once three frames are drawn: the snapshot, B new and A changed, then a quiet one.
     let shown = drain(controller);
     let wait = shown.clone();
@@ -6589,9 +6653,13 @@ async fn a_watch_on_a_terminal_is_a_live_table_that_marks_changes() {
     .await
     .unwrap();
     interrupt(&child);
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = exit_within(
+        child,
+        running,
+        Duration::from_secs(5),
+        "Ctrl-C did not end the live payment watch",
+    )
+    .await;
     assert_eq!(output.status.code(), Some(130));
     let raw = shown.finish();
     // The alternate screen is entered, then left with the cursor shown again.
