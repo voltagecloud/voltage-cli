@@ -5,12 +5,13 @@ use crate::{
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery, Resolver},
     cli::{
-        self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
-        ParseFailure, PriceFlags, ProfileCommand,
+        self, AuthCommand, Command, ConvertFlags, FeedbackFlags, GlobalFlags, Invocation,
+        LocalCommand, ParseFailure, PriceFlags, ProfileCommand,
     },
     config::{self, Profile, Scope, Settings},
     context,
     error::{CredentialSources, ErrorKind},
+    feedback::{self, Reporter},
     greeting,
     output::{Envelope, NextStep, Output, OutputFormat, report_error, write_stdout},
     pick,
@@ -25,6 +26,7 @@ const BINARY_NAME: &str = "voltage";
 
 pub async fn run() -> ExitCode {
     let json_errors = cli::json_errors_requested(std::env::args_os());
+    feedback::report_panics(Reporter::detect(feedback::interactive(json_errors)));
     let color = ColorChoice::requested(std::env::args_os())
         .with_environment(|name| std::env::var(name).ok());
     if let Some(global) = greeting::wanted(&std::env::args_os().collect::<Vec<_>>()) {
@@ -126,6 +128,10 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             global.quiet,
         )
     };
+    // Feedback needs neither configuration nor credentials.
+    if let Command::Local(LocalCommand::Feedback(flags)) = &command {
+        return file_feedback(flags, &global, output(true)?);
+    }
     // Price commands need neither configuration nor credentials.
     let command = match PriceQuery::try_from(command) {
         Ok(query) => {
@@ -156,6 +162,16 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             out.write(envelope, &[])
         }
     }
+}
+
+/// `voltage feedback`: a person at a terminal reads two links; anything else gets the report.
+fn file_feedback(flags: &FeedbackFlags, global: &GlobalFlags, mut out: Output) -> Result<()> {
+    let terminal = global.terminal();
+    let filed = feedback::run(flags, out.on_terminal() && terminal.can_prompt());
+    if out.on_terminal() {
+        return out.preface(&filed.lines(terminal.glyphs().step));
+    }
+    out.write(Envelope::local(filed)?, &[])
 }
 
 /// One command once its configuration is read and its scope is complete: what the flags
@@ -251,6 +267,7 @@ impl<'a> Session<'a> {
                 profiles(command, &mut self.settings, scope, global).await
             }
             LocalCommand::Completions { .. }
+            | LocalCommand::Feedback(_)
             | LocalCommand::Price(_)
             | LocalCommand::Convert(_) => Err(Error::usage("This command needs no configuration")),
         }

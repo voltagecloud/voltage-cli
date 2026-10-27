@@ -11,7 +11,7 @@ Start with the [README](../README.md) for install and a quick start, or follow [
 - [Requests](guides/requests.md): request bodies, friendly flags, filters, paging
 - [Webhooks](guides/webhooks.md): create with a saved secret, events, deliveries, key rotation
 - [Checkout](guides/checkout.md): session and stream tokens, events
-- [Troubleshooting](guides/troubleshooting.md): what each exit code and error means, and the fix
+- [Troubleshooting](guides/troubleshooting.md): what each exit code and error means, and the fix, and how to report a problem
 - [Scripting](guides/scripting.md): JSON, `VOLTAGE_EXECUTE`, running without a person
 
 ## Look it up

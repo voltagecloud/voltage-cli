@@ -27,6 +27,7 @@ AUTH_COMMANDS = [
     ('voltage profiles list', []),
     ('voltage profiles delete NAME', []),
     ('voltage completions SHELL', []),
+    ('voltage feedback', []),
 ]
 # Commands that use the coinprice service, with the routes they call.
 PRICE_COMMANDS = [

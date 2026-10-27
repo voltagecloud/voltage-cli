@@ -40,7 +40,7 @@ const SECRET_KEYS: [&str; 12] = [
     "preimage",
 ];
 
-const REDACTED: &str = "[REDACTED]";
+pub(crate) const REDACTED: &str = "[REDACTED]";
 
 /// Stdout rendering selected by `--json`, `--output`, or the terminal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

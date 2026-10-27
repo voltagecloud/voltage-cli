@@ -112,4 +112,18 @@ The CLI refuses a USD payment without `--quote` itself, with `A USD payment need
 
 When the detail names a quoted amount, the quote does not convert to exactly the payment's amount. Check what it converts to with `voltage quotes get QUOTE_ID`. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount with `--unit sats --to usd`. See [quotes and lines of credit](payments.md#quotes-and-lines-of-credit).
 
+## Report a problem
+
+When the CLI does something wrong, `voltage feedback` prints a link that opens a new GitHub issue with the build, the platform, and a form for what happened and how to reproduce it. On a terminal it also opens the link in your browser; `--no-browser` only prints it. Name the command that misbehaved after `--`: the report keeps its command words and flag names, never their values.
+
+```sh
+voltage feedback --title Balance-looks-wrong -- wallets get WALLET_ID --json
+```
+
+Search the existing issues first; the command prints that link too, and you can add to a matching issue instead of opening another. Before you submit, replace IDs, invoices, addresses, and keys with placeholders such as `WALLET_ID`.
+
+Off a terminal, or with `--json`, the command never opens a browser and marks the report as written by an AI agent. `--json` returns the issue's `title`, `labels`, `body`, `url`, and `search_url`, so an agent can search with `search_url` and then file it with `gh issue create --title TITLE --body BODY`, or give the `url` to a person. Leave the agent box checked when an agent wrote the report.
+
+If the CLI itself fails unexpectedly (a panic, exit code 101), it prints the same kind of link after the panic message, with the source line and a scrubbed message filled in. Scrubbing removes words that look like IDs, keys, tokens, invoices, addresses, emails, or URLs.
+
 Related: [exit codes](../reference/exit-codes.md), [environment variables](../reference/environment.md), [log in and use profiles](login-and-profiles.md).

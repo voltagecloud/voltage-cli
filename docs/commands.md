@@ -20,6 +20,7 @@ These commands use the auth service (`https://auth.voltage.cloud/api/v1`, overri
 | `voltage profiles list` | local only |
 | `voltage profiles delete NAME` | local only |
 | `voltage completions SHELL` | local only |
+| `voltage feedback` | local only |
 
 - Every organization API call first exchanges the saved login for an organization token with `POST /api/v1/oauth/token`, and an expiring login is refreshed there as well.
 - A failed login revokes its new session with `POST /api/v1/oauth/revoke` so nothing is left running on the server.
