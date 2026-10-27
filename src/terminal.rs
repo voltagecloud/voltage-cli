@@ -7,14 +7,20 @@ use crate::{
     secret::Secret,
     style::{self, ColorChoice, Glyphs, Line},
 };
+use crossterm::{
+    Command, cursor,
+    event::{self, DisableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    terminal,
+};
 use inquire::{InquireError, Select, Text};
 use std::{
     fmt::{self, Display},
-    io::{ErrorKind, IsTerminal, Write},
+    io::{IsTerminal, Write},
     time::Duration,
 };
 use tokio::{sync::oneshot, time::Instant};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// What the process may show to and ask of the person at the terminal, from `--quiet`,
 /// `--no-input`, and `--color`.
@@ -153,8 +159,7 @@ impl Terminal {
     /// `None` means they pressed Esc. Raw mode turns a typed Ctrl-C into a key, so the picker
     /// reports Ctrl-C as an interruption.
     pub async fn pick(self, question: &'static str, choices: Vec<Choice>) -> Result<Option<Uuid>> {
-        #[cfg(unix)]
-        let _modes = TerminalModes::save();
+        let _raw = RawMode;
         let _screen = PickerScreen;
         picked(
             read_detached(move || Select::new(question, choices).with_page_size(12).prompt())
@@ -168,26 +173,86 @@ impl Terminal {
         question: &'static str,
         default: &'static str,
     ) -> Result<Option<String>> {
-        #[cfg(unix)]
-        let _modes = TerminalModes::save();
+        let _raw = RawMode;
         let _screen = PickerScreen;
         answered(read_detached(move || Text::new(question).with_default(default).prompt()).await?)
     }
 
-    /// Read a secret without echo.
+    /// Read a secret without echo. The prompt goes to stderr, and raw mode hides the typed
+    /// characters and turns a typed Ctrl-C into a key.
     pub async fn read_hidden(self, prompt: &'static str) -> Result<Secret> {
-        // The detached read restores echo only when it returns, and Ctrl-C does not wait for
-        // it. This guard restores the terminal when the read completes or is cancelled.
-        #[cfg(unix)]
-        let _modes = TerminalModes::save();
-        match read_detached(move || rpassword::prompt_password(prompt).map(Secret::new)).await? {
-            // rpassword turns off terminal signals, so a typed Ctrl-C reaches it as a
-            // character. It raises SIGINT itself and then returns this error; waiting here
-            // lets the interrupt handler report the interruption instead of an I/O failure.
-            Err(error) if error.kind() == ErrorKind::Interrupted => std::future::pending().await,
-            read => Ok(read?),
+        eprint!("{prompt}");
+        let _ = std::io::stderr().flush();
+        // The detached read cannot be cancelled, and Ctrl-C does not wait for it. Raw mode is
+        // turned on here, not on the reading thread, so this guard restores the terminal
+        // whether the read completes or is cancelled.
+        let raw = match RawMode::enable() {
+            Ok(raw) => raw,
+            Err(error) => return hidden(Err(error)),
+        };
+        let read = read_detached(read_hidden_keys).await?;
+        drop(raw);
+        eprintln!();
+        hidden(read)
+    }
+}
+
+/// What a hidden prompt's read means: the secret, Ctrl-C (`None`) as an interruption, and a
+/// terminal that cannot be put in raw mode or read as a transport error.
+fn hidden(read: std::io::Result<Option<Secret>>) -> Result<Secret> {
+    match read {
+        Ok(Some(secret)) => Ok(secret),
+        Ok(None) => Err(Error::interrupted(
+            "Interrupted before any resource change was submitted",
+        )),
+        Err(_) => Err(Error::transport(
+            "Could not read the secret from the terminal",
+        )),
+    }
+}
+
+/// Keys typed at a hidden prompt, until Enter. `None` means Ctrl-C.
+fn read_hidden_keys() -> std::io::Result<Option<Secret>> {
+    let mut typed = Zeroizing::new(String::new());
+    loop {
+        if let Event::Key(key) = event::read()? {
+            match type_hidden(&mut typed, key) {
+                Hidden::Typing => {}
+                Hidden::Entered => return Ok(Some(Secret::from(typed))),
+                Hidden::Interrupted => return Ok(None),
+            }
         }
     }
+}
+
+/// Where a hidden prompt stands after a key.
+#[derive(Debug, PartialEq)]
+enum Hidden {
+    Typing,
+    Entered,
+    Interrupted,
+}
+
+/// Apply one key to the secret typed so far. Enter, or Ctrl-J for a pasted newline, ends the
+/// read; Backspace removes a character; Ctrl-U clears the line. Releases and other control
+/// keys change nothing.
+fn type_hidden(typed: &mut String, key: KeyEvent) -> Hidden {
+    if key.kind == KeyEventKind::Release {
+        return Hidden::Typing;
+    }
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') if control => return Hidden::Interrupted,
+        KeyCode::Enter => return Hidden::Entered,
+        KeyCode::Char('j') if control => return Hidden::Entered,
+        KeyCode::Char('u') if control => typed.clear(),
+        KeyCode::Backspace => {
+            typed.pop();
+        }
+        KeyCode::Char(c) if !control && !key.modifiers.contains(KeyModifiers::ALT) => typed.push(c),
+        _ => {}
+    }
+    Hidden::Typing
 }
 
 fn picked(answer: std::result::Result<Choice, InquireError>) -> Result<Option<Uuid>> {
@@ -215,10 +280,38 @@ struct PickerScreen;
 
 impl Drop for PickerScreen {
     fn drop(&mut self) {
+        let undo = format!("{}{}", ansi(DisableBracketedPaste), ansi(cursor::Show));
         let mut stderr = std::io::stderr();
-        let _ = stderr.write_all(b"\x1b[?2004l\x1b[?25h");
+        let _ = stderr.write_all(undo.as_bytes());
         let _ = stderr.flush();
     }
+}
+
+/// Raw mode, which turns off echo and terminal signals. crossterm saves the terminal's modes
+/// when it turns raw mode on and restores them when it turns it off. A prompt's read restores
+/// them only when it returns; a signal that ends the command first leaves that to this guard.
+/// Dropping it when raw mode is already off does nothing.
+struct RawMode;
+
+impl RawMode {
+    fn enable() -> std::io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+/// A crossterm command's ANSI sequence, for output written as ordered bytes. crossterm's
+/// `execute!` would instead call the Windows console API, out of order with buffered text.
+pub fn ansi(command: impl Command) -> String {
+    let mut sequence = String::new();
+    let _ = command.write_ansi(&mut sequence);
+    sequence
 }
 
 /// One resource a person can pick: its name, scrubbed because the API supplied it, and its ID.
@@ -356,42 +449,6 @@ pub async fn read_detached<T: Send + 'static>(
         .map_err(|_| Error::transport("Terminal input ended unexpectedly"))
 }
 
-/// The controlling terminal's attributes, put back when dropped. `rpassword` turns off echo
-/// on `/dev/tty` and turns it back on only when its read returns.
-#[cfg(unix)]
-struct TerminalModes {
-    tty: std::fs::File,
-    saved: libc::termios,
-}
-
-#[cfg(unix)]
-impl TerminalModes {
-    /// `None` without a controlling terminal, where there is nothing to restore.
-    fn save() -> Option<Self> {
-        use std::os::fd::AsRawFd;
-        let tty = std::fs::File::open("/dev/tty").ok()?;
-        let mut saved = std::mem::MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: the descriptor is open for the duration of the call, and tcgetattr fully
-        // initializes `saved` when it returns 0.
-        if unsafe { libc::tcgetattr(tty.as_raw_fd(), saved.as_mut_ptr()) } != 0 {
-            return None;
-        }
-        // SAFETY: tcgetattr returned 0 above.
-        let saved = unsafe { saved.assume_init() };
-        Some(Self { tty, saved })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for TerminalModes {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: the descriptor is still owned by `tty`, and `saved` holds attributes read
-        // from the same terminal.
-        unsafe { libc::tcsetattr(self.tty.as_raw_fd(), libc::TCSANOW, &self.saved) };
-    }
-}
-
 /// How long a wait has run, for a status line that would otherwise look stuck: `42s`, or
 /// `3m 05s` from a minute on.
 pub fn elapsed(duration: Duration) -> String {
@@ -459,7 +516,7 @@ mod tests {
         // A terminal that goes away or is not one fails the read; no choice is assumed.
         for failure in [
             InquireError::NotTTY,
-            InquireError::IO(std::io::Error::from(ErrorKind::BrokenPipe)),
+            InquireError::IO(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
         ] {
             let error = picked(Err(failure)).unwrap_err();
             assert_eq!(error.kind, Exit::Transport);
@@ -468,6 +525,73 @@ mod tests {
                 "Could not read the selection from the terminal"
             );
         }
+    }
+
+    #[test]
+    fn a_hidden_prompt_edits_the_secret_until_enter_or_ctrl_c() {
+        let press = |code, modifiers| KeyEvent::new(code, modifiers);
+        let none = KeyModifiers::NONE;
+        let mut typed = String::new();
+        for key in [
+            press(KeyCode::Char('x'), none),
+            press(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            press(KeyCode::Char('a'), none),
+            press(KeyCode::Char('B'), KeyModifiers::SHIFT),
+            press(KeyCode::Char('z'), none),
+            press(KeyCode::Backspace, none),
+            press(KeyCode::Char('c'), none),
+            // Alt and control chords, other keys, and releases type nothing.
+            press(KeyCode::Char('d'), KeyModifiers::ALT),
+            press(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            press(KeyCode::Left, none),
+            KeyEvent::new_with_kind(KeyCode::Char('f'), none, KeyEventKind::Release),
+        ] {
+            assert_eq!(type_hidden(&mut typed, key), Hidden::Typing, "{key:?}");
+        }
+        assert_eq!(typed, "aBc");
+        assert_eq!(
+            type_hidden(&mut typed, press(KeyCode::Enter, none)),
+            Hidden::Entered
+        );
+        // A pasted newline reaches a raw terminal as Ctrl-J.
+        assert_eq!(
+            type_hidden(&mut typed, press(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            Hidden::Entered
+        );
+        assert_eq!(
+            type_hidden(&mut typed, press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Hidden::Interrupted
+        );
+        assert_eq!(typed, "aBc");
+    }
+
+    #[test]
+    fn a_hidden_read_becomes_the_secret_an_interruption_or_a_transport_error() {
+        assert_eq!(
+            hidden(Ok(Some(Secret::new("k".into())))).unwrap().expose(),
+            "k"
+        );
+        let interrupted = hidden(Ok(None)).unwrap_err();
+        assert_eq!(interrupted.kind, Exit::Interrupted);
+        assert_eq!(
+            interrupted.message,
+            "Interrupted before any resource change was submitted"
+        );
+        // No terminal to put in raw mode, or one that goes away mid-read; no secret is assumed.
+        let error =
+            hidden(Err(std::io::Error::from(std::io::ErrorKind::NotConnected))).unwrap_err();
+        assert_eq!(error.kind, Exit::Transport);
+        assert_eq!(error.message, "Could not read the secret from the terminal");
+    }
+
+    #[test]
+    fn crossterm_commands_become_their_ansi_sequences() {
+        assert_eq!(ansi(DisableBracketedPaste), "\x1b[?2004l");
+        assert_eq!(ansi(cursor::Show), "\x1b[?25h");
+        assert_eq!(
+            ansi(terminal::Clear(terminal::ClearType::CurrentLine)),
+            "\x1b[2K"
+        );
     }
 
     #[test]

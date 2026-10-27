@@ -5,6 +5,7 @@ use crate::{
     style::{Glyphs, Role, paint},
     terminal,
 };
+use crossterm::terminal::{Clear, ClearType};
 use std::{
     io::Write,
     sync::{Arc, Mutex, PoisonError},
@@ -15,6 +16,11 @@ use tokio::{task::JoinHandle, time::Instant};
 const FRAME: Duration = Duration::from_millis(100);
 /// A quick wait shows no time; one the caller times shows it from the start.
 const SHOW_WAITED_AFTER: Duration = Duration::from_secs(2);
+
+/// A carriage return to the line's start, then the line cleared.
+fn clear_line() -> String {
+    format!("\r{}", terminal::ansi(Clear(ClearType::CurrentLine)))
+}
 
 /// How the status line is drawn on this stderr.
 #[derive(Clone, Copy, Debug)]
@@ -130,13 +136,13 @@ impl StatusLine {
             .expires
             .map(|expires| expires.saturating_duration_since(Instant::now()));
         let text = self.text(frame, self.since.elapsed(), left, self.width);
-        (self.write)(format!("\r\x1b[2K{text}").as_bytes());
+        (self.write)(format!("{}{text}", clear_line()).as_bytes());
     }
 
     fn clear(&self) {
         let mut cleared = self.cleared.lock().unwrap_or_else(PoisonError::into_inner);
         *cleared = true;
-        (self.write)(b"\r\x1b[2K");
+        (self.write)(clear_line().as_bytes());
     }
 
     /// The line for one frame, cut to fit `width` so clearing never leaves a wrapped remnant.

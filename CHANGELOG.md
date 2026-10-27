@@ -24,6 +24,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - A payment that settles on a terminal closes with `⚡ Payment ID completed` instead of a check mark, printed after the payment's record so it stays on screen.
 - `voltage payments list --watch` follows payments until Ctrl-C: a live table that marks new and changed payments on a terminal, or one `snapshot`, `new`, or `updated` event per payment when piped or with `--json`. `--interval` sets the refresh (default 5 seconds).
 - `voltage` with no command, on a terminal, greets you with the wordmark, who you are signed in as, your saved scope, and commands to try; off a terminal it is still a usage error. An empty wallet, payment, or webhook list, and a new profile, end with a `›` line naming the next command.
+- The hidden API-key prompt of `voltage auth import-key` is shown on stderr, accepts Ctrl-U to clear what was typed, and restores the terminal after Ctrl-C on every platform. Ctrl-C there exits 130 with `Interrupted before any resource change was submitted`, as it did on Unix.
 
 ## 0.2.0 - 2026-10-22
 
