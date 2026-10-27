@@ -40,6 +40,8 @@ voltage wallets payments summary WALLET_ID --profile prod
 
 On a terminal, `wallets get` first shows the wallet's name, each available balance, labelled `Available` (with a USD estimate for a BTC balance on mainnet, from the price service), and a sparkline of its completed payment volume over the last 14 days. That takes two extra reads, the BTC price on mainnet and the wallet's 100 newest completed payments (payment checks excluded), summed from each payment's amount in the wallet's currency. Each read has 5 seconds at most, and one that fails or is slow leaves its line out. The wallet's fields follow as usual, and redirected or `--json` output is unchanged.
 
+On a terminal, a read of one wallet without `WALLET_ID` or `--wallet`, such as `voltage wallets get --profile prod`, opens the [wallet picker](login-and-profiles.md#pick-the-scope-interactively) and shows the wallet you pick. A change, such as `wallets update` or `wallets delete`, always names its wallet and never offers a picker. Off a terminal, or with `--json` or `--no-input`, a read without a wallet fails as before and names both ways to pass it.
+
 The ledger lists every credit, hold, capture, and release on the wallet. `--all` follows every page; with `--output ndjson` each page is written as it arrives.
 
 ## Change a wallet
