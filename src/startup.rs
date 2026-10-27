@@ -5,8 +5,8 @@ use crate::{
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery, Resolver},
     cli::{
-        self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
-        ParseFailure, PriceFlags, ProfileCommand,
+        self, AuthCommand, Command, ContextFlags, ContextFormat, ConvertFlags, GlobalFlags,
+        Invocation, LocalCommand, ParseFailure, PriceFlags, ProfileCommand,
     },
     config::{self, Profile, Scope, Settings},
     context,
@@ -150,6 +150,14 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             let mut out = output(!execution.describes())?;
             api::execute(&api, execution, &global, resolver, &session.scope, &mut out).await
         }
+        // Dotenv lines for another tool, not a result envelope.
+        Command::Local(LocalCommand::Context(ContextFlags {
+            format: Some(ContextFormat::Env),
+        })) => write_stdout(
+            context::inspect(&session.settings, &global)?
+                .dotenv()?
+                .as_bytes(),
+        ),
         Command::Local(local) => {
             let mut out = output(true)?;
             let envelope = session.local(local).await?;
@@ -245,8 +253,10 @@ impl<'a> Session<'a> {
                     .discover(scope, Discovery::Environments)
                     .await?,
             ),
-            LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?)
-                .map(|context| context.titled("voltage context")),
+            LocalCommand::Context(_) => {
+                Envelope::settings(context::inspect(&self.settings, global)?)
+                    .map(|context| context.titled("voltage context"))
+            }
             LocalCommand::Profiles { command } => {
                 profiles(command, &mut self.settings, scope, global).await
             }
@@ -410,7 +420,7 @@ mod tests {
         // Any other command comes back unchanged, so `execute` can go on with it.
         assert!(matches!(
             PriceQuery::try_from(command(&["voltage", "context"])),
-            Err(Command::Local(LocalCommand::Context))
+            Err(Command::Local(LocalCommand::Context(_)))
         ));
         assert!(matches!(
             PriceQuery::try_from(command(&["voltage", "wallets", "list"])),

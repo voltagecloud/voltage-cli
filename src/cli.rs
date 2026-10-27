@@ -18,6 +18,7 @@ use crate::{
 };
 use clap::{
     Arg, ArgAction, ArgMatches, Args, Command as ClapCommand, FromArgMatches, Subcommand,
+    ValueEnum,
     builder::{PossibleValuesParser, TypedValueParser},
     error::ErrorKind,
 };
@@ -211,7 +212,7 @@ pub enum LocalCommand {
         command: ProfileCommand,
     },
     /// Show the effective profile, scope, credential, and config path without secrets
-    Context,
+    Context(ContextFlags),
     /// Show the BTC/USD price and the sats one dollar buys
     Price(PriceFlags),
     /// Convert an amount between BTC and USD at the current or a past price
@@ -221,6 +222,44 @@ pub enum LocalCommand {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct ContextFlags {
+    /// Print the organization, environment, and wallet as VOLTAGE_* dotenv lines instead
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub format: Option<ContextFormat>,
+}
+
+impl ContextFlags {
+    /// `--format` writes its own lines to stdout, so it takes no result format or file. Checked
+    /// on the typed flags because clap does not compare a global flag given before the
+    /// subcommand with the subcommand's own flags.
+    fn check(&self, global: &GlobalFlags) -> Result<()> {
+        let result_flag = if global.json {
+            Some("--json")
+        } else if global.output.is_some() {
+            Some("--output")
+        } else if global.output_file.is_some() {
+            Some("--output-file")
+        } else {
+            None
+        };
+        match (self.format, result_flag) {
+            (Some(_), Some(flag)) => Err(Error::usage(format!(
+                "--format cannot be combined with {flag}"
+            ))
+            .with_hint("Redirect stdout to save the lines, as in `voltage context --format env > scope.env`.")),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Another tool's format for `voltage context`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ContextFormat {
+    /// `NAME=VALUE` lines, the names the `voltage-api` skill's helper reads
+    Env,
 }
 
 #[derive(Debug, Args)]
@@ -752,6 +791,9 @@ impl Invocation {
             }
             Err(error) => return Err(Error::usage(error.to_string())),
         };
+        if let Command::Local(LocalCommand::Context(flags)) = &command {
+            flags.check(&global)?;
+        }
         Ok(Self { global, command })
     }
 }
@@ -1345,7 +1387,9 @@ fn local_examples(path: &[&str]) -> Option<&'static str> {
         }
         ["context"] => {
             "  # Show what a command with this profile would use, and where each value came from
-  voltage context --profile prod"
+  voltage context --profile prod
+  # Hand the profile's organization, environment, and wallet to another tool as dotenv lines
+  voltage context --profile prod --format env > scope.env"
         }
         ["convert"] => {
             "  # What $10 buys in bitcoin now, and 21,000 sats in dollars on a past date
@@ -1442,6 +1486,45 @@ mod tests {
             Command::Api(api) => *api,
             Command::Local(local) => panic!("expected an API command, got {local:?}"),
         }
+    }
+
+    #[test]
+    fn context_format_refuses_a_result_format_or_file_before_or_after_the_command() {
+        for (args, flag) in [
+            (
+                &["voltage", "--json", "context", "--format", "env"][..],
+                "--json",
+            ),
+            (
+                &["voltage", "context", "--format", "env", "--json"],
+                "--json",
+            ),
+            (
+                &["voltage", "-o", "table", "context", "--format", "env"],
+                "--output",
+            ),
+            (
+                &[
+                    "voltage",
+                    "context",
+                    "--format",
+                    "env",
+                    "--output-file",
+                    "scope.env",
+                ],
+                "--output-file",
+            ),
+        ] {
+            let error = Invocation::try_parse_from(args).err().unwrap();
+            assert_eq!(error.kind, Kind::Usage, "{args:?}");
+            assert_eq!(
+                error.message,
+                format!("--format cannot be combined with {flag}"),
+                "{args:?}"
+            );
+        }
+        assert!(Invocation::try_parse_from(["voltage", "context", "--json"]).is_ok());
+        assert!(Invocation::try_parse_from(["voltage", "context", "--format", "shell"]).is_err());
     }
 
     #[test]
@@ -1881,7 +1964,15 @@ mod tests {
             Invocation::try_parse_from(["voltage", "context"])
                 .unwrap()
                 .command,
-            Command::Local(LocalCommand::Context)
+            Command::Local(LocalCommand::Context(ContextFlags { format: None }))
+        ));
+        assert!(matches!(
+            Invocation::try_parse_from(["voltage", "context", "--format", "env"])
+                .unwrap()
+                .command,
+            Command::Local(LocalCommand::Context(ContextFlags {
+                format: Some(ContextFormat::Env)
+            }))
         ));
         assert!(matches!(
             Invocation::try_parse_from(["voltage", "price"])

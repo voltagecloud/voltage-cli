@@ -5,7 +5,7 @@
 //! makes a network request, or creates the configuration directory.
 
 use crate::{
-    Result,
+    Error, Result,
     auth::{self, Rejected, Selected},
     cli::GlobalFlags,
     config::{
@@ -207,4 +207,33 @@ pub fn inspect(settings: &Settings, global: &GlobalFlags) -> Result<Context> {
         },
         ignored_variables,
     })
+}
+
+impl Context {
+    /// The organization, environment, and wallet as dotenv lines, named as the `voltage-api`
+    /// skill's helper reads them, for `voltage context --format env`. An unset value is left
+    /// out, because the helper treats an empty variable as an override. A credential is never
+    /// printed: inspection reads no secret. A tool takes one environment, so more than one is
+    /// refused rather than choosing.
+    pub fn dotenv(&self) -> Result<String> {
+        let environment = match self.environment_ids.value.as_slice() {
+            [] => None,
+            [environment] => Some(*environment),
+            environments => {
+                return Err(Error::usage(format!(
+                    "--format env takes one environment, but {} are selected",
+                    environments.len()
+                ))
+                .with_hint("Select one with --env ENV_ID."));
+            }
+        };
+        Ok([
+            ("VOLTAGE_ORGANIZATION_ID", self.organization_id.value),
+            ("VOLTAGE_ENVIRONMENT_ID", environment),
+            ("VOLTAGE_WALLET_ID", self.wallet_id.value),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|id| format!("{name}={id}\n")))
+        .collect())
+    }
 }
