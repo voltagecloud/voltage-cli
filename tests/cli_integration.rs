@@ -2304,6 +2304,41 @@ async fn typed_ctrl_c_at_the_hidden_key_prompt_reports_an_interruption() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hidden_key_prompt_saves_the_edited_key_without_showing_it() {
+    let (server, dir) = fixture().await;
+    let import = [
+        "auth",
+        "import-key",
+        "--account",
+        "k",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--credential-store",
+        "file",
+    ];
+    // Ctrl-U clears the first attempt, and Backspace removes the X.
+    let keys = b"wrong\x15hidden-secX\x7fret\r";
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &import,
+        &[("Environment API key:", keys)],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert_eq!(run.modes.0, run.modes.1);
+    assert!(!run.shown.contains("hidden"), "{}", run.shown);
+    let settings = Settings::open(dir.path().to_path_buf()).unwrap();
+    let Credential::ApiKey(key) = settings.read_credential("k").unwrap() else {
+        panic!("expected an API key");
+    };
+    assert_eq!(key.expose(), "hidden-secret");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn interrupt_during_a_refresh_says_the_login_may_need_renewal() {
     let (server, dir) = fixture().await;
     seeded_login(dir.path(), &server, true);
