@@ -177,8 +177,14 @@ impl<'a> Session<'a> {
         global: &'a GlobalFlags,
         submission: &'a SubmissionState,
     ) -> Result<Self> {
-        let settings = Settings::open(config::directory(global.config_dir.clone())?)?;
+        let (dir, dir_source) = config::sourced_directory(global.config_dir.clone())?;
+        let settings = Settings::open(dir)?;
         let (mut scope, sources) = settings.sourced_scope(global.scope_selection())?;
+        // Before any prompt or request, so the warning precedes what the command does.
+        context::warn_ignored(
+            global,
+            &context::ignored_variables(global, &sources, dir_source),
+        );
         let credential_sources = auth::environment_key_sources(global, &sources);
         let resolver = Resolver {
             settings: &settings,

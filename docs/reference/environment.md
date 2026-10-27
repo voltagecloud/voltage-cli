@@ -1,6 +1,6 @@
 # Environment variables
 
-A flag beats a variable. A selected profile is a complete configuration, so `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMENT_ID`, `VOLTAGE_WALLET_ID`, and `VOLTAGE_API_KEY` are ignored while one is selected; `--account` alone ignores only `VOLTAGE_API_KEY`. `voltage context` lists every variable that is set but ignored, and where each value it uses came from.
+A flag beats a variable. A selected profile is a complete configuration, so `VOLTAGE_ORGANIZATION_ID`, `VOLTAGE_ENVIRONMENT_ID`, `VOLTAGE_WALLET_ID`, and `VOLTAGE_API_KEY` are ignored while one is selected; `--account` alone ignores only `VOLTAGE_API_KEY`. Every command that reads the configuration prints one `warning:` line on stderr for each variable that is set but ignored, before it prompts or sends a request, even with `--quiet`; stdout is unchanged. `voltage context` lists the same variables, and where each value it uses came from.
 
 | Variable | Used for | Flag that wins |
 |---|---|---|

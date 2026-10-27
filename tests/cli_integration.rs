@@ -934,16 +934,52 @@ async fn profile_credentials_override_ambient_key_and_scope() {
         ok(json!([])),
     )
     .await;
-    cli(dir.path(), &server)
+    let profiled = cli(dir.path(), &server)
         .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
         .env("VOLTAGE_ENVIRONMENT_ID", RESOURCE)
-        .args(["wallets", "list", "--profile", "stage"])
+        .args(["wallets", "list", "--profile", "stage", "--quiet"])
         .assert()
         .success();
+    // Each ignored variable is named on stderr, even under --quiet; stdout stays the result.
+    assert_eq!(
+        stderr(&profiled),
+        "warning: VOLTAGE_ORGANIZATION_ID is set but ignored because --profile stage is selected\n\
+         warning: VOLTAGE_ENVIRONMENT_ID is set but ignored because --profile stage is selected\n\
+         warning: VOLTAGE_API_KEY is set but ignored because --profile stage is selected\n"
+    );
+    assert_eq!(json_stdout(&profiled)["data"], json!([]));
     cli(dir.path(), &server)
         .args(["wallets", "list", "--profile", "stage", "--env", RESOURCE])
         .assert()
         .code(2);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_flag_over_a_set_variable_warns_and_a_used_variable_does_not() {
+    let (server, dir) = fixture().await;
+    respond(
+        &server,
+        route("GET", wallets_path(ORG)).and(header("x-api-key", ACCOUNT_KEY)),
+        ok(json!([])),
+        2,
+    )
+    .await;
+    let flagged = cli(dir.path(), &server)
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .success();
+    assert_eq!(
+        stderr(&flagged),
+        "warning: VOLTAGE_ORGANIZATION_ID is set but ignored because --org is given\n"
+    );
+    let ambient = cli(dir.path(), &server)
+        .env("VOLTAGE_ORGANIZATION_ID", ORG)
+        .args(["wallets", "list"])
+        .assert()
+        .success();
+    assert_eq!(stderr(&ambient), "");
     server.verify().await;
 }
 
