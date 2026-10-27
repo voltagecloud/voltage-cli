@@ -1,15 +1,20 @@
 //! Interactive scope: when a command lacks the organization, environment, or wallet it needs,
-//! a person at a terminal picks one instead of copying a UUID. Scripts never see a prompt.
+//! a person at a terminal picks one instead of copying a UUID. The same pickers browse: a
+//! wallet read without its wallet ID, and `organizations get` or `environments get` without a
+//! selected one, pick it and show it. Scripts never see a prompt.
 
 use crate::{
     Error, Result, api,
     api::{SubmissionState, profile_offer_interrupted},
     auth::{ApiCredential, Discovery, Resolver},
-    cli::{BodySource, Command, GlobalFlags, LocalCommand, ProfileCommand},
+    cli::{
+        BodySource, Command, DiscoveryCommand, GlobalFlags, LocalCommand, ProfileCommand,
+        missing_wallet,
+    },
     config::{Credential, Profile, Scope, Settings, shell_word},
     error::ErrorKind,
     output::OutputFormat,
-    registry::{OperationId, ParameterLocation, ScopeParameter},
+    registry::{Method, OperationId, ParameterLocation, ScopeParameter},
     terminal::{Choice, Terminal},
 };
 use serde_json::Value;
@@ -54,10 +59,16 @@ fn needs(command: &Command) -> Needs {
                 scopes.contains(&ScopeParameter::Environment)
                     || (friendly && operation.id == OperationId::CreateWallet),
                 scopes.contains(&ScopeParameter::Wallet)
-                    || (friendly && operation.id == OperationId::CreatePayment),
+                    || (friendly && operation.id == OperationId::CreatePayment)
+                    || (operation.targets_wallet() && api.resource_id.is_none()),
             )
         }
-        Command::Local(LocalCommand::Environments { .. }) => Needs::new(true, false, false),
+        Command::Local(LocalCommand::Organizations {
+            command: DiscoveryCommand::Get,
+        }) => Needs::new(true, false, false),
+        Command::Local(LocalCommand::Environments { command }) => {
+            Needs::new(true, *command == DiscoveryCommand::Get, false)
+        }
         Command::Local(LocalCommand::Profiles {
             command: ProfileCommand::Create { .. },
         }) => Needs::new(true, true, false),
@@ -66,7 +77,9 @@ fn needs(command: &Command) -> Needs {
             LocalCommand::Login(_)
             | LocalCommand::Logout(_)
             | LocalCommand::Auth { .. }
-            | LocalCommand::Organizations { .. }
+            | LocalCommand::Organizations {
+                command: DiscoveryCommand::List,
+            }
             | LocalCommand::Profiles {
                 command:
                     ProfileCommand::List | ProfileCommand::Get { .. } | ProfileCommand::Delete { .. },
@@ -80,34 +93,70 @@ fn needs(command: &Command) -> Needs {
 }
 
 /// Ask for each missing part of the scope the command needs, in the order organization,
-/// environment, wallet. Without an interactive terminal, with `--no-input`, or for JSON
+/// environment, wallet. A wallet read without its own wallet asks for that wallet last and
+/// stops when none is picked. Without an interactive terminal, with `--no-input`, or for JSON
 /// output, nothing is asked and the command reports what is missing as before. Esc, an empty
 /// list, or a credential that cannot list choices also leaves the rest of the scope unset.
 pub async fn fill(
-    command: &Command,
+    command: &mut Command,
     global: &GlobalFlags,
     resolver: Resolver<'_>,
     scope: &mut Scope,
 ) -> Result<()> {
+    let can_ask = can_ask(global);
+    let target = wallet_target(command, can_ask)?;
     let needs = needs(command);
     let missing = Needs {
         org: needs.org && scope.org.is_none(),
         env: needs.env && scope.envs.is_empty(),
-        wallet: needs.wallet && scope.wallet.is_none(),
+        // The wallet a wallet command acts on never comes from the scope.
+        wallet: needs.wallet && (target || scope.wallet.is_none()),
     };
     let terminal = global.terminal();
-    if missing == Needs::default() || !can_ask(global) {
+    if missing == Needs::default() || !can_ask {
         return Ok(());
     }
     let picked = ask(missing, global, resolver, scope).await?;
-    if !picked.is_empty() {
+    if !picked.flags.is_empty() {
         let profile = match command {
             Command::Local(LocalCommand::Profiles { .. }) => "",
             _ => " or save a profile with voltage profiles create",
         };
-        terminal.notice(format!("Next time, pass {}{profile}.", picked.join(" ")));
+        terminal.notice(format!(
+            "Next time, pass {}{profile}.",
+            picked.flags.join(" ")
+        ));
     }
-    Ok(())
+    match command {
+        Command::Api(api) if target => {
+            api.resource_id = picked.wallet;
+            // Esc, or nothing to pick, leaves the command without its wallet.
+            match api.resource_id {
+                Some(_) => Ok(()),
+                None => Err(missing_wallet(api.operation)),
+            }
+        }
+        _ => {
+            scope.wallet = picked.wallet.or(scope.wallet);
+            Ok(())
+        }
+    }
+}
+
+/// Whether the command is a wallet read that names no wallet, which a terminal picks. A
+/// wallet change without one, or a read off a terminal, stops here, before any credential is
+/// resolved or request is sent.
+fn wallet_target(command: &Command, can_ask: bool) -> Result<bool> {
+    let Command::Api(api) = command else {
+        return Ok(false);
+    };
+    if !api.operation.targets_wallet() || api.resource_id.is_some() {
+        return Ok(false);
+    }
+    if !can_ask || api.operation.method != Method::Get {
+        return Err(missing_wallet(api.operation));
+    }
+    Ok(true)
 }
 
 /// Whether a missing scope is picked rather than reported: only for table output on an
@@ -211,20 +260,29 @@ async fn pin(
     Ok(Some(name))
 }
 
+/// What the pickers chose: the flags that select it again, and the wallet, which the caller
+/// places in the scope or as the command's own wallet.
+#[derive(Default)]
+struct Picked {
+    flags: Vec<String>,
+    wallet: Option<Uuid>,
+}
+
 /// The pickers themselves, with one credential resolution and at most one organization token
 /// exchange. An API key cannot list organizations or environments, so only its wallets are
-/// offered. Returns the flags for what was picked, which Esc or an empty list can cut short.
+/// offered. The organization and environment go into `scope`. Esc or an empty list can cut
+/// the picks short.
 async fn ask(
     missing: Needs,
     global: &GlobalFlags,
     resolver: Resolver<'_>,
     scope: &mut Scope,
-) -> Result<Vec<String>> {
+) -> Result<Picked> {
     let terminal = global.terminal();
     // Without a credential there is nothing to list. That, not the missing scope, is what the
     // person must fix first, so report it.
     let credential = resolver.resolve(scope).await?;
-    let mut picked = Vec::new();
+    let mut picked = Picked::default();
     if missing.org {
         let Credential::Login(login) = &credential else {
             terminal.notice("An API key cannot list organizations, so there is nothing to pick.");
@@ -238,7 +296,7 @@ async fn ask(
             return Ok(picked);
         };
         scope.org = Some(org);
-        picked.push(format!("--org {org}"));
+        picked.flags.push(format!("--org {org}"));
     }
     if !missing.env && !missing.wallet {
         return Ok(picked);
@@ -255,15 +313,15 @@ async fn ask(
             return Ok(picked);
         };
         scope.envs = vec![env];
-        picked.push(format!("--env {env}"));
+        picked.flags.push(format!("--env {env}"));
     }
     if missing.wallet {
         let listed = api::wallets(global, credential, resolver.credential_sources, scope).await?;
         let Some(wallet) = choose(terminal, "Wallet:", "wallets", &listed, false).await? else {
             return Ok(picked);
         };
-        scope.wallet = Some(wallet);
-        picked.push(format!("--wallet {wallet}"));
+        picked.wallet = Some(wallet);
+        picked.flags.push(format!("--wallet {wallet}"));
     }
     Ok(picked)
 }
@@ -294,12 +352,7 @@ async fn choose(
 /// The listed resources that carry a UUID `id`, sorted by name. A wallet also shows its
 /// currency when all of its balances report the same one.
 fn choices(listed: &Value) -> Vec<Choice> {
-    let items = listed
-        .as_array()
-        .or_else(|| listed.get("items").and_then(Value::as_array))
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let mut choices: Vec<Choice> = items
+    let mut choices: Vec<Choice> = items(listed)
         .iter()
         .filter_map(|item| {
             let id = item.get("id")?.as_str()?.parse().ok()?;
@@ -313,6 +366,15 @@ fn choices(listed: &Value) -> Vec<Choice> {
         .collect();
     choices.sort_by_key(|choice| choice.name().to_lowercase());
     choices
+}
+
+/// A listing's items: the response itself when it is an array, else its `items`.
+pub fn items(listed: &Value) -> &[Value] {
+    listed
+        .as_array()
+        .or_else(|| listed.get("items").and_then(Value::as_array))
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 /// The one currency a wallet's balances report, or `None` when they report none or disagree.
@@ -371,10 +433,19 @@ mod tests {
             needs_of(&["wallets", "create", "--name", "a"]),
             Needs::new(true, true, false)
         );
-        // The positional target is typed, not picked.
+        // A typed target is not picked; a missing wallet target is.
         assert_eq!(
             needs_of(&["wallets", "get", ID]),
             Needs::new(true, false, false)
+        );
+        assert_eq!(needs_of(&["wallets", "get"]), Needs::new(true, false, true));
+        assert_eq!(
+            needs_of(&["organizations", "get"]),
+            Needs::new(true, false, false)
+        );
+        assert_eq!(
+            needs_of(&["environments", "get"]),
+            Needs::new(true, true, false)
         );
         assert_eq!(
             needs_of(&["environments", "list"]),
@@ -386,6 +457,32 @@ mod tests {
         );
         for args in [&["organizations", "list"][..], &["context"], &["price"]] {
             assert_eq!(needs_of(args), Needs::default(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_wallet_read_on_a_terminal_picks_its_missing_wallet() {
+        let target = |args: &[&str], can_ask: bool| {
+            let mut full = vec!["voltage"];
+            full.extend_from_slice(args);
+            wallet_target(&Invocation::try_parse_from(full).unwrap().command, can_ask)
+        };
+        assert!(target(&["wallets", "get"], true).unwrap());
+        assert!(target(&["wallets", "policies", "get"], true).unwrap());
+        // A named wallet, or a command that acts on something else, needs no pick.
+        assert!(!target(&["wallets", "get", ID], true).unwrap());
+        assert!(!target(&["wallets", "get", "--wallet", ID], false).unwrap());
+        assert!(!target(&["wallets", "list"], false).unwrap());
+        assert!(!target(&["organizations", "get"], false).unwrap());
+        // A change always names its wallet, and a script is told how.
+        for (args, can_ask) in [
+            (&["wallets", "get"][..], false),
+            (&["wallets", "delete"], true),
+            (&["wallets", "update", "--name", "a"], true),
+        ] {
+            let error = target(args, can_ask).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Usage, "{args:?}");
+            assert!(error.message.ends_with("needs a wallet ID"), "{args:?}");
         }
     }
 

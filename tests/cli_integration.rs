@@ -4909,6 +4909,10 @@ async fn discovery_with_an_api_key_says_which_key_was_used() {
     for (args, command) in [
         (&["organizations", "list"][..], "organizations list"),
         (
+            &["organizations", "get", "--org", ORG][..],
+            "organizations get",
+        ),
+        (
             &["environments", "list", "--org", ORG][..],
             "environments list",
         ),
@@ -5705,6 +5709,189 @@ async fn a_failed_wallet_listing_or_two_environments_end_the_pick_with_their_own
     );
     assert!(!run.shown.contains("Wallet:"), "{}", run.shown);
     server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wallet_read_without_its_id_picks_the_wallet_and_a_change_still_names_it() {
+    let (server, dir) = fixture().await;
+    // Listed once for the pick and once for Esc; nothing else lists wallets.
+    respond(
+        &server,
+        route("GET", wallets_path(ORG)),
+        ok(json!([{"id": RESOURCE, "name": "ops"}, {"id": WALLET, "name": "Payroll"}])),
+        2,
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", format!("{}/{WALLET}", wallets_path(ORG))),
+        ok(json!({"id": WALLET, "name": "Payroll"})),
+    )
+    .await;
+    let get = ["wallets", "get", "--org", ORG, "--output", "table"];
+
+    // The picked wallet is read and shown, and the flag that names it is suggested.
+    let picked = on_a_terminal(dir.path(), &server, &get, &[("Wallet:", b"Payroll\r")]).await;
+    assert_eq!(picked.code, Some(0), "{}", picked.shown);
+    assert!(picked.stdout.contains(WALLET), "{}", picked.stdout);
+    assert!(
+        picked
+            .shown
+            .contains(&format!("Next time, pass --wallet {WALLET}")),
+        "{}",
+        picked.shown
+    );
+    assert_eq!(picked.modes.0, picked.modes.1);
+
+    // Esc leaves the read without a wallet, and it stops as it did before the picker.
+    let escaped = on_a_terminal(dir.path(), &server, &get, &[("Wallet:", b"\x1b")]).await;
+    assert_eq!(escaped.code, Some(2), "{}", escaped.shown);
+    assert!(
+        escaped.shown.contains("wallets get needs a wallet ID"),
+        "{}",
+        escaped.shown
+    );
+
+    // JSON output, --no-input, and a change never ask, and stop before any request.
+    let delete = ["wallets", "delete", "--org", ORG, "--output", "table"];
+    for (args, extra) in [(&get, "--json"), (&get, "--no-input"), (&delete, "--quiet")] {
+        let mut args = args.to_vec();
+        args.push(extra);
+        let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+        assert_eq!(run.code, Some(2), "{args:?}: {}", run.shown);
+        assert!(run.shown.contains("needs a wallet ID"), "{args:?}");
+        assert!(!run.shown.contains("Wallet:"), "{args:?}");
+    }
+    // Off a terminal, the error is the same.
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "ledger", "list", "--org", ORG])
+        .assert()
+        .code(2);
+    assert_eq!(
+        json_error(&result)["error"]["message"],
+        "wallets ledger list needs a wallet ID"
+    );
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn organizations_and_environments_get_pick_the_one_to_show_on_a_terminal() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    let organizations = json!({"organizations": [
+        {"id": ORG, "name": "Acme"}, {"id": OTHER_ORG, "name": "Beta"}
+    ]});
+    // Listed for the pick, then again to show the picked one.
+    respond(&auth, route("GET", "/users/current"), ok(organizations), 2).await;
+    let args = [
+        "organizations",
+        "get",
+        "--account",
+        LOGIN_NAME,
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal(dir.path(), &api, &args, &[("Organization:", b"Beta\r")]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(run.stdout.contains(OTHER_ORG), "{}", run.stdout);
+    assert!(!run.stdout.contains(ORG), "{}", run.stdout);
+    assert!(
+        run.shown
+            .contains(&format!("Next time, pass --org {OTHER_ORG}")),
+        "{}",
+        run.shown
+    );
+    auth.verify().await;
+
+    // An environment is picked within the organization the flag names.
+    let auth = MockServer::start().await;
+    seeded_login(dir.path(), &auth, false);
+    organization_exchange(&auth, LOGIN_ACCESS, ORG, "picker-access", 2).await;
+    respond(
+        &auth,
+        route("GET", format!("/organizations/{ORG}/environments")),
+        ok(json!([{"id": ENV, "name": "prod"}, {"id": RESOURCE, "name": "staging"}])),
+        2,
+    )
+    .await;
+    let args = [
+        "environments",
+        "get",
+        "--account",
+        LOGIN_NAME,
+        "--org",
+        ORG,
+        "--output",
+        "table",
+    ];
+    let run = on_a_terminal(dir.path(), &api, &args, &[("Environment:", b"staging\r")]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert!(run.stdout.contains(RESOURCE), "{}", run.stdout);
+    assert!(!run.stdout.contains(ENV), "{}", run.stdout);
+    assert!(!run.shown.contains("Organization:"), "{}", run.shown);
+    auth.verify().await;
+
+    // JSON output never asks, and reports the missing scope before any request.
+    let mut json = args.to_vec();
+    json.truncate(4);
+    json.push("--json");
+    let run = on_a_terminal(dir.path(), &api, &json, &[]).await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown.contains("Exactly one --env is required"),
+        "{}",
+        run.shown
+    );
+    assert!(!run.shown.contains("Environment:"), "{}", run.shown);
+    assert_eq!(auth.received_requests().await.unwrap().len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn organizations_get_shows_the_selected_organization_and_never_asks_a_script() {
+    let auth = MockServer::start().await;
+    let (api, dir) = fixture().await;
+    seeded_login(dir.path(), &auth, false);
+    let organizations = json!({"organizations": [
+        {"id": ORG, "name": "Acme"}, {"id": OTHER_ORG, "name": "Beta"}
+    ]});
+    respond(&auth, route("GET", "/users/current"), ok(organizations), 2).await;
+    let get = |org: &str| {
+        cli(dir.path(), &api)
+            .args([
+                "organizations",
+                "get",
+                "--account",
+                LOGIN_NAME,
+                "--org",
+                org,
+            ])
+            .assert()
+    };
+    let shown = get(ORG).success();
+    let shown: Value = serde_json::from_slice(&shown.get_output().stdout).unwrap();
+    assert_eq!(shown["data"], json!({"id": ORG, "name": "Acme"}));
+
+    let result = get(RESOURCE).code(2);
+    let error = json_error(&result);
+    assert_eq!(
+        error["error"]["message"],
+        format!("Organization {RESOURCE} is not visible to this login")
+    );
+    assert_eq!(
+        error["error"]["hint"],
+        "`voltage organizations list` shows the ones it can see."
+    );
+
+    // Without an organization, a script gets the missing scope error and no request.
+    let result = cli(dir.path(), &api)
+        .args(["organizations", "get", "--account", LOGIN_NAME])
+        .assert()
+        .code(2);
+    assert_eq!(json_error(&result)["error"]["message"], "--org is required");
+    auth.verify().await;
 }
 
 #[cfg(unix)]

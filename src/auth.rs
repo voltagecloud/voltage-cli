@@ -7,7 +7,7 @@
 use crate::{
     Error, Result,
     api::{SessionChange, SubmissionState},
-    cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
+    cli::{DiscoveryCommand, GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
         AUTH_URL, Account, AccountKind, Credential, CredentialProblem, CredentialStore,
         InputSource, LOCK_TIMEOUT, Login, Scope, ScopeSources, Settings, Source, name_in_use,
@@ -965,13 +965,20 @@ impl Resolver<'_> {
     }
 
     /// List organizations visible to the login, or environments in the selected organization.
-    pub async fn discover(self, scope: &Scope, what: Discovery) -> Result<Value> {
+    /// `command` names the subcommand in the error for an API key.
+    pub async fn discover(
+        self,
+        scope: &Scope,
+        what: Discovery,
+        command: DiscoveryCommand,
+    ) -> Result<Value> {
         // An API key cannot list organizations or environments; say which key was used.
         let requires_login = || {
-            let command = match what {
-                Discovery::Organizations => "organizations list",
-                Discovery::Environments => "environments list",
+            let noun = match what {
+                Discovery::Organizations => "organizations",
+                Discovery::Environments => "environments",
             };
+            let command = format!("{noun} {}", command.as_str());
             if ambient_api_key(self.flags).is_some() {
                 return Error::auth(format!(
                     "{command} needs a browser login, but this command used VOLTAGE_API_KEY from the environment"

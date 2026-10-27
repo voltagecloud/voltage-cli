@@ -198,12 +198,12 @@ pub enum LocalCommand {
     /// Organizations visible to the login
     Organizations {
         #[command(subcommand)]
-        command: ListCommand,
+        command: DiscoveryCommand,
     },
     /// Environments in the selected organization
     Environments {
         #[command(subcommand)]
-        command: ListCommand,
+        command: DiscoveryCommand,
     },
     /// Named organization, environment, and credential selections
     Profiles {
@@ -290,9 +290,23 @@ pub struct ImportKeyFlags {
     pub credential_store: CredentialStore,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum ListCommand {
+/// What `organizations` and `environments` show. `get` takes no ID: it shows the one the
+/// scope selects, so `--org` or `--env` names it, as for every other command.
+#[derive(Clone, Copy, Debug, Subcommand, Eq, PartialEq)]
+pub enum DiscoveryCommand {
+    /// List every one the login can see
     List,
+    /// Show the selected one; on a terminal, pick it when none is selected
+    Get,
+}
+
+impl DiscoveryCommand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Get => "get",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand, Eq, PartialEq)]
@@ -815,6 +829,8 @@ fn payment_alias_parent(create_payment: &Operation) -> &[String] {
 /// The operation's resource ID: its argument or `--id`. A wallet operation also takes an
 /// explicit `--wallet`, which names the wallet everywhere else; a profile's or
 /// `VOLTAGE_WALLET_ID`'s wallet never selects it, so a delete always names its wallet.
+/// Without either, a wallet operation's ID stays unset here: on a terminal a read picks it,
+/// and otherwise `pick` stops with [`missing_wallet`] before any request.
 fn target_id(
     operation: &Operation,
     target: Option<TargetFlags>,
@@ -829,16 +845,16 @@ fn target_id(
             "WALLET_ID {id} and --wallet {wallet} name different wallets"
         ))
         .with_hint("Pass the wallet once, as WALLET_ID or --wallet.")),
-        (Some(id), _) | (None, Some(id)) => Ok(Some(id)),
-        (None, None) => {
-            let command = operation.command.join(" ");
-            Err(
-                Error::usage(format!("{command} needs a wallet ID")).with_hint(format!(
-                    "Pass it as an argument or with --wallet, as in `voltage {command} WALLET_ID`. `voltage wallets list` shows the IDs."
-                )),
-            )
-        }
+        (id, wallet) => Ok(id.or(wallet)),
     }
+}
+
+/// The error for a wallet operation that names no wallet.
+pub fn missing_wallet(operation: &Operation) -> Error {
+    let command = operation.command.join(" ");
+    Error::usage(format!("{command} needs a wallet ID")).with_hint(format!(
+        "Pass it as an argument or with --wallet, as in `voltage {command} WALLET_ID`. `voltage wallets list` shows the IDs."
+    ))
 }
 
 fn api_invocation(
@@ -1040,7 +1056,8 @@ fn list_args(cmd: ClapCommand, operation: &Operation) -> ClapCommand {
 }
 
 /// The resource ID argument and `--id`, one of which is required. A wallet command can
-/// name its wallet with `--wallet` instead, so `target_id` checks that one was given.
+/// name its wallet with `--wallet` instead, or pick it on a terminal, so `pick` checks that
+/// one was given.
 fn target_args(cmd: ClapCommand, target: ResourceTarget, wallet: bool) -> ClapCommand {
     let cmd = TargetFlags::augment_args(cmd)
         .mut_arg("resource_id", |arg| arg.value_name(target.value_name()));
@@ -1203,6 +1220,12 @@ fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str
             "  # Send a complete payment request body from a file
   voltage payments create --profile prod --data @payment.json --execute"
         }
+        (OperationId::GetWallet, _) => {
+            "  # Show one wallet
+  voltage wallets get WALLET_ID --profile prod
+  # On a terminal, pick the wallet from a list
+  voltage wallets get --profile prod"
+        }
         (OperationId::GetPayment, _) => {
             "  # Wait up to two minutes for a payment to settle
   voltage payments get PAYMENT_ID --profile prod --wait completed --timeout 120"
@@ -1342,6 +1365,16 @@ fn local_examples(path: &[&str]) -> Option<&'static str> {
         ["profiles", "create"] => {
             "  # Save an organization, environment, and credential as `prod`
   voltage profiles create prod --org ORG_ID --env ENV_ID --account work"
+        }
+        ["organizations", "get"] => {
+            "  # Show one organization, or pick it from a list on a terminal
+  voltage organizations get --org ORG_ID
+  voltage organizations get"
+        }
+        ["environments", "get"] => {
+            "  # Show the environment a profile selects, or pick one from a list on a terminal
+  voltage environments get --profile prod
+  voltage environments get --org ORG_ID"
         }
         ["context"] => {
             "  # Show what a command with this profile would use, and where each value came from
@@ -1586,7 +1619,9 @@ mod tests {
             Some("Pass the wallet once, as WALLET_ID or --wallet.")
         );
 
-        let missing = Invocation::try_parse_from(["voltage", "wallets", "get"]).unwrap_err();
+        // Without either, the ID is left for `pick`, which asks on a terminal or stops.
+        assert_eq!(api(&["wallets", "get"]).resource_id, None);
+        let missing = missing_wallet(operation(OperationId::GetWallet));
         assert_eq!(missing.kind, Kind::Usage);
         assert_eq!(missing.message, "wallets get needs a wallet ID");
         assert!(

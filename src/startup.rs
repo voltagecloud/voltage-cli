@@ -5,8 +5,8 @@ use crate::{
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery, Resolver},
     cli::{
-        self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
-        ParseFailure, PriceFlags, ProfileCommand,
+        self, AuthCommand, Command, ConvertFlags, DiscoveryCommand, GlobalFlags, Invocation,
+        LocalCommand, ParseFailure, PriceFlags, ProfileCommand,
     },
     config::{self, Profile, Scope, Settings},
     context,
@@ -19,6 +19,7 @@ use crate::{
     wallet_currency, wallet_shortlist,
 };
 use serde::Serialize;
+use serde_json::Value;
 use std::process::ExitCode;
 
 const BINARY_NAME: &str = "voltage";
@@ -127,7 +128,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         )
     };
     // Price commands need neither configuration nor credentials.
-    let command = match PriceQuery::try_from(command) {
+    let mut command = match PriceQuery::try_from(command) {
         Ok(query) => {
             let mut out = output(true)?;
             let envelope = query.run(&global).await?;
@@ -135,7 +136,7 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         }
         Err(command) => command,
     };
-    let mut session = Session::open(&command, &global, submission).await?;
+    let mut session = Session::open(&mut command, &global, submission).await?;
     match command {
         Command::Api(api) if api.all_orgs => {
             let mut out = output(true)?;
@@ -171,9 +172,10 @@ struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// Read the configuration and select the scope, then ask for any scope the command needs
-    /// and lacks. The scope does not change after this.
+    /// and lacks, and for the wallet a wallet read acts on. The scope does not change after
+    /// this.
     async fn open(
-        command: &Command,
+        command: &mut Command,
         global: &'a GlobalFlags,
         submission: &'a SubmissionState,
     ) -> Result<Self> {
@@ -235,16 +237,12 @@ impl<'a> Session<'a> {
             } => {
                 Envelope::local(auth::import_key(&mut self.settings, scope, &flags, global).await?)
             }
-            LocalCommand::Organizations { .. } => Envelope::local(
-                self.resolver()
-                    .discover(scope, Discovery::Organizations)
-                    .await?,
-            ),
-            LocalCommand::Environments { .. } => Envelope::local(
-                self.resolver()
-                    .discover(scope, Discovery::Environments)
-                    .await?,
-            ),
+            LocalCommand::Organizations { command } => {
+                discover(self.resolver(), scope, Discovery::Organizations, command).await
+            }
+            LocalCommand::Environments { command } => {
+                discover(self.resolver(), scope, Discovery::Environments, command).await
+            }
             LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?)
                 .map(|context| context.titled("voltage context")),
             LocalCommand::Profiles { command } => {
@@ -253,6 +251,41 @@ impl<'a> Session<'a> {
             LocalCommand::Completions { .. }
             | LocalCommand::Price(_)
             | LocalCommand::Convert(_) => Err(Error::usage("This command needs no configuration")),
+        }
+    }
+}
+
+/// `organizations` or `environments`: the whole listing, or the one the scope selects. The
+/// auth service lists them but has no route for one, so `get` finds it in the listing.
+async fn discover(
+    resolver: Resolver<'_>,
+    scope: &Scope,
+    what: Discovery,
+    command: DiscoveryCommand,
+) -> Result<Envelope> {
+    let selected = match (command, what) {
+        (DiscoveryCommand::List, _) => None,
+        (DiscoveryCommand::Get, Discovery::Organizations) => Some(scope.require_org()?),
+        (DiscoveryCommand::Get, Discovery::Environments) => Some(scope.single_env()?),
+    };
+    let listed = resolver.discover(scope, what, command).await?;
+    let Some(id) = selected else {
+        return Envelope::local(listed);
+    };
+    let found = pick::items(&listed)
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(&id.to_string()));
+    match found {
+        Some(item) => Envelope::local(item),
+        None => {
+            let (noun, list) = match what {
+                Discovery::Organizations => ("Organization", "voltage organizations list"),
+                Discovery::Environments => ("Environment", "voltage environments list"),
+            };
+            Err(
+                Error::usage(format!("{noun} {id} is not visible to this login"))
+                    .with_hint(format!("`{list}` shows the ones it can see.")),
+            )
         }
     }
 }
