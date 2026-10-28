@@ -73,22 +73,21 @@ pub fn run(flags: &FeedbackFlags, interactive: bool) -> Feedback {
 
 impl Feedback {
     /// On a terminal, what a person reads instead of the report's fields: where to search
-    /// first, then the link that files the issue.
+    /// first, then the link that files the issue. The prefilled link wraps across many lines,
+    /// so it is printed only when no browser opened it.
     pub fn lines(&self, step: &'static str) -> Vec<Line> {
+        let file = Line::default().paint(Role::Hint, step);
         let file = if self.opened {
-            " Opened in your browser: "
+            file.text(" Opened the prefilled issue in your browser")
         } else {
-            " File the issue: "
+            file.text(" File the issue: ").link(&self.report.url)
         };
         vec![
             Line::default()
                 .paint(Role::Hint, step)
                 .text(" Search existing issues first: ")
                 .link(&self.report.search_url),
-            Line::default()
-                .paint(Role::Hint, step)
-                .text(file)
-                .link(&self.report.url),
+            file,
         ]
     }
 }
@@ -184,16 +183,20 @@ impl Draft {
             || "not given".into(),
             |command| format!("`{}`", scrub(command, MAX_COMMAND)),
         );
-        let agent = match self.reporter {
-            Reporter::Agent => "x",
-            Reporter::Person => " ",
+        // A person's link is printed on a terminal, so only an agent's report carries the
+        // instructions a person already read there.
+        let (agent, preface) = match self.reporter {
+            Reporter::Agent => (
+                "x",
+                "<!-- Search existing issues first and add to a matching one instead of filing \
+                 another. Agents: keep the box below checked, and give steps a person can run. \
+                 Replace IDs, invoices, addresses, and keys with placeholders such as \
+                 WALLET_ID. -->\n\n",
+            ),
+            Reporter::Person => (" ", ""),
         };
         format!(
-            "<!-- Search existing issues first and add to a matching one instead of filing \
-             another. Agents: keep the box below checked, and give steps a person can run. \
-             Replace IDs, invoices, addresses, and keys with placeholders such as WALLET_ID. -->
-
-### What happened
+            "{preface}### What happened
 
 {problem}
 
@@ -346,6 +349,8 @@ mod tests {
                 report.body
             );
         }
+        // A person read the instructions on the terminal, so the link leaves them out.
+        assert!(!report.body.contains("<!--"), "{}", report.body);
         // The URL is fully encoded: no raw space, newline, or `#` that would end it early.
         assert!(!report.url.contains([' ', '\n', '#']), "{}", report.url);
     }
@@ -428,7 +433,10 @@ mod tests {
         assert!(shown[0].starts_with("> Search existing issues first: https://"));
         assert!(shown[1].starts_with("> File the issue: https://"));
         filed.opened = true;
-        assert!(lines(&filed)[1].starts_with("> Opened in your browser: https://"));
+        assert_eq!(
+            lines(&filed)[1],
+            "> Opened the prefilled issue in your browser"
+        );
     }
 
     #[test]

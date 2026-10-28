@@ -114,7 +114,7 @@ When the detail names a quoted amount, the quote does not convert to exactly the
 
 ## Report a problem
 
-When the CLI does something wrong, `voltage feedback` prints a link that opens a new GitHub issue with the build, the platform, and a form for what happened and how to reproduce it. On a terminal it also opens the link in your browser; `--no-browser` only prints it. Name the command that misbehaved after `--`: the report keeps its command words and flag names, never their values.
+When the CLI does something wrong, `voltage feedback` prints a link that opens a new GitHub issue with the build, the platform, and a form for what happened and how to reproduce it. On a terminal it opens the link in your browser instead of printing it; `--no-browser` prints it. Name the command that misbehaved after `--`: the report keeps its command words and flag names, never their values.
 
 ```sh
 voltage feedback --title Balance-looks-wrong -- wallets get WALLET_ID --json
