@@ -216,6 +216,8 @@ pub enum LocalCommand {
     Price(PriceFlags),
     /// Convert an amount between BTC and USD at the current or a past price
     Convert(ConvertFlags),
+    /// Print a link that files a GitHub issue with this build and platform filled in
+    Feedback(FeedbackFlags),
     /// Print shell completions
     Completions {
         #[arg(value_enum)]
@@ -228,6 +230,30 @@ pub struct PriceFlags {
     /// Price at this UTC time, such as 2026-09-18T17:30:00Z, instead of now
     #[arg(long, value_name = "RFC3339")]
     pub at: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FeedbackFlags {
+    /// Issue title: what went wrong, in one line
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Print the link without opening it
+    #[arg(long)]
+    pub no_browser: bool,
+    /// The command that misbehaved, after `--`; the report keeps only its command words and
+    /// flag names, never their values
+    #[arg(last = true, value_name = "COMMAND")]
+    pub command: Vec<OsString>,
+}
+
+impl FeedbackFlags {
+    /// The misbehaving command as the report shows it, when one was given.
+    pub fn command_outline(&self) -> Option<String> {
+        let args: Vec<OsString> = std::iter::once(OsString::from("voltage"))
+            .chain(self.command.iter().cloned())
+            .collect();
+        (!self.command.is_empty()).then(|| outline(&args))
+    }
 }
 
 #[derive(Debug, Args)]
@@ -776,6 +802,34 @@ where
         .any(|arg| arg.as_ref() == OsStr::new("--json"))
 }
 
+/// A command line as an issue report shows it: `voltage`, the subcommand words, and each
+/// flag's name, without positional values or flag values, which can hold IDs and secrets.
+/// It reads the command tree, not a parse, so it works on a line that does not parse.
+pub fn outline(args: &[OsString]) -> String {
+    let root = command();
+    let mut current = &root;
+    let mut words = vec!["voltage".to_owned()];
+    for arg in args.iter().skip(1).map(|arg| arg.to_string_lossy()) {
+        if arg == "--" {
+            break;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            words.push(format!("--{}", long.split('=').next().unwrap_or_default()));
+        } else if let Some(short) = arg
+            .strip_prefix('-')
+            .and_then(|rest| rest.chars().next())
+            .filter(char::is_ascii_alphabetic)
+        {
+            // `-ojson` keeps only `-o`; `-5` is a value, not a flag.
+            words.push(format!("-{short}"));
+        } else if let Some(sub) = current.find_subcommand(arg.as_ref()) {
+            words.push(sub.get_name().to_owned());
+            current = sub;
+        }
+    }
+    words.join(" ")
+}
+
 fn parse<T: FromArgMatches>(matches: &ArgMatches) -> Result<T> {
     T::from_arg_matches(matches).map_err(|error| Error::usage(error.to_string()))
 }
@@ -1316,6 +1370,7 @@ fn guide(path: &[&str]) -> &'static str {
             ..,
         ] => "guides/payments.md",
         ["completions", ..] => "guides/install.md",
+        ["feedback", ..] => "guides/troubleshooting.md",
         _ => "README.md",
     }
 }
@@ -1346,6 +1401,12 @@ fn local_examples(path: &[&str]) -> Option<&'static str> {
         ["context"] => {
             "  # Show what a command with this profile would use, and where each value came from
   voltage context --profile prod"
+        }
+        ["feedback"] => {
+            "  # File an issue about a command; the link keeps its flag names, not their values
+  voltage feedback --title Balance-looks-wrong -- wallets get WALLET_ID --json
+  # Print the prefilled issue as JSON, for an agent that files it with `gh issue create`
+  voltage feedback --json"
         }
         ["convert"] => {
             "  # What $10 buys in bitcoin now, and 21,000 sats in dollars on a past date
@@ -1836,6 +1897,62 @@ mod tests {
         assert!(
             Invocation::try_parse_from(["voltage", "wallets", "list", "--timeout", "0"]).is_err()
         );
+    }
+
+    #[test]
+    fn an_outline_keeps_command_words_and_flag_names_but_no_values() {
+        let args = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            outline(&args(&[
+                "voltage",
+                "--profile",
+                "prod",
+                "wallets",
+                "get",
+                "6f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f",
+                "--data=@secret.json",
+                "-ojson",
+                "-q",
+            ])),
+            "voltage --profile wallets get --data -o -q"
+        );
+        // A negative amount is a value, and nothing after `--` is read.
+        assert_eq!(
+            outline(&args(&["voltage", "convert", "-5", "usd", "--", "--to"])),
+            "voltage convert"
+        );
+        // A line that does not parse still outlines.
+        assert_eq!(
+            outline(&args(&["voltage", "walets", "--bogus"])),
+            "voltage --bogus"
+        );
+        let feedback = |words: &[&str]| {
+            let Command::Local(LocalCommand::Feedback(flags)) =
+                Invocation::try_parse_from(words).unwrap().command
+            else {
+                panic!("expected feedback");
+            };
+            flags
+        };
+        let flags = feedback(&[
+            "voltage",
+            "feedback",
+            "--title",
+            "Broken",
+            "--no-browser",
+            "--",
+            "payments",
+            "send",
+            "lnbc1secret",
+            "--execute",
+        ]);
+        assert_eq!(flags.title.as_deref(), Some("Broken"));
+        assert!(flags.no_browser);
+        assert_eq!(
+            flags.command_outline().as_deref(),
+            Some("voltage payments send --execute")
+        );
+        assert_eq!(feedback(&["voltage", "feedback"]).command_outline(), None);
     }
 
     #[test]

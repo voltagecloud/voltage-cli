@@ -23,5 +23,6 @@ VOLTAGE_EXECUTE=1 ./pay-invoices.sh
 - `-q, --quiet` suppresses optional status and notices, never requested results, errors, warnings, or recovery IDs.
 - Diagnostics, prompts, and progress go to stderr, so stdout carries only results.
 - Branch on [exit codes](../reference/exit-codes.md). Exit code 4 means the outcome is unknown: check the payment ID before you retry.
+- An agent that finds a bug in the CLI can draft an issue with `voltage feedback --json`; see [report a problem](troubleshooting.md#report-a-problem).
 
 Related: [safety model](../concepts/safety-model.md), [output reference](../reference/output.md).

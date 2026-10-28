@@ -110,6 +110,48 @@ fn version_leads_with_the_cargo_version_and_marks_the_build_separately() {
 }
 
 #[test]
+fn feedback_prints_a_scrubbed_issue_link_without_configuration_or_a_browser() {
+    let dir = private_tempdir();
+    let wallet = "6f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f";
+    // An unreadable configuration directory does not matter: feedback reads no settings.
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .arg("--config-dir")
+        .arg(dir.path().join("missing"))
+        .args([
+            "feedback", "--json", "--title", "Wallet", "--", "wallets", "get",
+        ])
+        .args([wallet, "--profile", "secret-profile", "--json"])
+        .assert()
+        .success();
+    let output = json_stdout(&result);
+    let data = &output["data"];
+    assert_eq!(data["opened"], false);
+    assert_eq!(data["reporter"], "agent");
+    assert_eq!(data["labels"], json!(["bug"]));
+    let url = data["url"].as_str().unwrap();
+    assert!(
+        url.starts_with(
+            "https://github.com/voltagecloud/voltage-cli/issues/new?title=Wallet&body="
+        )
+    );
+    let body = data["body"].as_str().unwrap();
+    assert!(
+        body.contains("- Command: `voltage wallets get --profile --json`"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- [x] An AI agent wrote this report"),
+        "{body}"
+    );
+    let stdout = stdout(&result);
+    assert!(
+        !stdout.contains(wallet) && !stdout.contains("secret-profile"),
+        "{stdout}"
+    );
+    assert!(result.get_output().stderr.is_empty());
+}
+
+#[test]
 fn human_runtime_errors_have_a_prefix_and_safe_hint() {
     let dir = private_tempdir();
     let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))

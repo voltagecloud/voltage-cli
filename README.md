@@ -85,7 +85,7 @@ Every command also has `--help`. [The docs index](docs/README.md) lists everythi
 
 ## Contributing
 
-Report security issues as described in [SECURITY.md](SECURITY.md). Build, test, and release instructions are in [the development guide](docs/development.md). Code conventions are in [the style guide](docs/quality.md).
+Report security issues as described in [SECURITY.md](SECURITY.md). Report other problems with `voltage feedback`, which drafts a GitHub issue; see [report a problem](docs/guides/troubleshooting.md#report-a-problem). Build, test, and release instructions are in [the development guide](docs/development.md). Code conventions are in [the style guide](docs/quality.md).
 
 ## License
 
