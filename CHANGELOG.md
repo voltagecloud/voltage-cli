@@ -4,7 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
-- A command that ignores a set `VOLTAGE_*` variable, because `--profile` or a flag such as `--wallet` takes precedence, says so on stderr with one `warning:` line per variable, even with `--quiet`. Before, only `voltage context` reported it, so the CLI and a tool that lets the variable win could act on different wallets in one shell. Stdout is unchanged.
+- A command that ignores a set `VOLTAGE_*` variable, because `--profile` or a flag such as `--wallet` takes precedence, says so on stderr with one `warning:` line per variable, even with `--quiet`. Before, only `voltage context` reported it, so the CLI and a tool that lets the variable win could act on different wallets in one shell. Stdout is unchanged. `auth import-key` and `profiles create`, which save what their flags name, do not warn about the flags they were given.
 - Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type adjustment`, from the refreshed API contract. Omit `--event-type` for payment ledger entries. Filters carry across pagination.
 - `webhooks test WEBHOOK_ID` without `--data` sends a test event, with a new `delivery_id` and a payload of type `test` and event `created`. Before, it failed with "This operation requires --data". `--data` still sends your own payload.
 - A list that returns every item in one response, such as `wallets list`, accepts `--all` and ignores it, because there are no more pages. Before, it rejected `--all`. `--all` still pages through lists that take `--limit`.

@@ -8,7 +8,7 @@ use crate::{
         self, AuthCommand, Command, ConvertFlags, GlobalFlags, Invocation, LocalCommand,
         ParseFailure, PriceFlags, ProfileCommand,
     },
-    config::{self, Profile, Scope, Settings},
+    config::{self, Precedence, Profile, Scope, Settings},
     context,
     error::{CredentialSources, ErrorKind},
     greeting,
@@ -158,6 +158,22 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
     }
 }
 
+/// Commands that save the organization, environment, and account their flags name. A flag
+/// over a set variable is what such a command is for, so only the configuration directory,
+/// which decides where it saves, still warns.
+fn saves_selection(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Local(
+            LocalCommand::Auth {
+                command: AuthCommand::ImportKey(_),
+            } | LocalCommand::Profiles {
+                command: ProfileCommand::Create { .. },
+            }
+        )
+    )
+}
+
 /// One command once its configuration is read and its scope is complete: what the flags
 /// asked for, the saved settings, the scope, and what the command may have changed.
 /// Commands run from here; what they call receives only the parts it uses.
@@ -180,11 +196,17 @@ impl<'a> Session<'a> {
         let (dir, dir_source) = config::sourced_directory(global.config_dir.clone())?;
         let settings = Settings::open(dir)?;
         let (mut scope, sources) = settings.sourced_scope(global.scope_selection())?;
+        let mut ignored = context::ignored_variables(global, &sources, dir_source);
+        if saves_selection(command) {
+            ignored.retain(|variable| {
+                matches!(
+                    variable.precedence,
+                    Precedence::Profile | Precedence::Flag("--config-dir")
+                )
+            });
+        }
         // Before any prompt or request, so the warning precedes what the command does.
-        context::warn_ignored(
-            global,
-            &context::ignored_variables(global, &sources, dir_source),
-        );
+        context::warn_ignored(global, &ignored);
         let credential_sources = auth::environment_key_sources(global, &sources);
         let resolver = Resolver {
             settings: &settings,

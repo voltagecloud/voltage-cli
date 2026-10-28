@@ -1000,6 +1000,8 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
     ];
     let created = cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_ENVIRONMENT_ID", RESOURCE)
         .args(create)
         .assert()
         .success();
@@ -1007,6 +1009,8 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
         json_stdout(&created)["data"],
         json!({"profile":"stage","created":true})
     );
+    // The flags name what the profile saves, so the variables they override are no surprise.
+    assert_eq!(stderr(&created), "");
     cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
         .args(create)
@@ -1338,7 +1342,8 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
         ENV,
     ];
     let imported = cli(dir.path(), &server)
-        .env_remove("VOLTAGE_API_KEY")
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_ENVIRONMENT_ID", RESOURCE)
         .args(import)
         .args(["--credential-store", "file"])
         .write_stdin("  imported-secret \n")
@@ -1348,6 +1353,8 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
         json_stdout(&imported)["data"],
         json!({"account":"staging-key","imported":true})
     );
+    // The flags name what the key is bound to, so the variables they override are no surprise.
+    assert_eq!(stderr(&imported), "");
     let settings = Settings::open(dir.path().to_path_buf()).unwrap();
     let account = &settings.config.accounts["staging-key"];
     assert_eq!(account.kind, AccountKind::ApiKey);
