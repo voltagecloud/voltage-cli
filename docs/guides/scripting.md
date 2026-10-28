@@ -7,6 +7,8 @@ voltage payments list --profile prod --json | jq '.data.items[].status'
 voltage context --json | jq -r '.data.organization_id.value'
 ```
 
+To hand a profile's organization, environment, and wallet to a tool that reads `VOLTAGE_*` variables, use [`voltage context --format env`](login-and-profiles.md#hand-the-scope-to-another-tool).
+
 ## Send changes from a script
 
 Commands that change something only describe their request unless you pass `--execute`, then exit with code 6 so a script that forgot it fails loudly. To send every change in a script or chain of commands, set `VOLTAGE_EXECUTE=1` (or `true`) instead:

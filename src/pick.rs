@@ -71,7 +71,7 @@ fn needs(command: &Command) -> Needs {
                 command:
                     ProfileCommand::List | ProfileCommand::Get { .. } | ProfileCommand::Delete { .. },
             }
-            | LocalCommand::Context
+            | LocalCommand::Context(_)
             | LocalCommand::Price(_)
             | LocalCommand::Convert(_)
             | LocalCommand::Completions { .. },

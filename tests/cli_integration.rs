@@ -1007,6 +1007,51 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
 }
 
 #[tokio::test]
+async fn context_env_format_prints_only_set_scope_and_never_a_credential() {
+    let (server, dir) = fixture().await;
+    let mut settings = seeded_api_key(dir.path(), "stage", "stage-key");
+    settings.config.profiles.insert(
+        "stage".into(),
+        Profile {
+            organization_id: uuid(ORG),
+            environment_id: uuid(ENV),
+            account: "stage".into(),
+        },
+    );
+    settings.save().unwrap();
+    let env_format = |args: &[&str]| {
+        Command::from_std(human_process_at(dir.path(), &server.uri()))
+            .args(["context", "--format", "env"])
+            .args(args)
+            .assert()
+    };
+
+    let profiled = env_format(&["--profile", "stage", "--wallet", WALLET]).success();
+    assert_eq!(
+        stdout(&profiled),
+        format!(
+            "VOLTAGE_ORGANIZATION_ID={ORG}\nVOLTAGE_ENVIRONMENT_ID={ENV}\nVOLTAGE_WALLET_ID={WALLET}\n"
+        )
+    );
+    // Neither the profile's saved key nor the ambient key is printed.
+    assert!(!stdout(&profiled).contains("stage-key"));
+    assert!(!stdout(&profiled).contains(ACCOUNT_KEY));
+
+    // An unset value is left out rather than printed empty.
+    let partial = env_format(&["--org", ORG]).success();
+    assert_eq!(stdout(&partial), format!("VOLTAGE_ORGANIZATION_ID={ORG}\n"));
+    assert_eq!(stdout(&env_format(&[]).success()), "");
+
+    let two = env_format(&["--org", ORG, "--env", ENV, "--env", RESOURCE]).code(2);
+    assert_eq!(stdout(&two), "");
+    assert!(
+        stderr(&two).contains("--format env takes one environment, but 2 are selected"),
+        "{}",
+        stderr(&two)
+    );
+}
+
+#[tokio::test]
 async fn context_reports_effective_scope_and_sources_without_reading_secrets() {
     let (server, dir) = fixture().await;
     let mut settings = seeded_api_key(dir.path(), "stage", "stage-key");

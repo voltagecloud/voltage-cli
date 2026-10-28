@@ -80,6 +80,22 @@ voltage context --profile staging
 voltage context --json | jq -r '.data.organization_id.value'
 ```
 
+### Hand the scope to another tool
+
+`voltage context --format env` prints the effective organization, environment, and wallet as dotenv lines, named as the `voltage-api` agent skill's helper and the [environment variables](../reference/environment.md) read them. Redirect it into the helper's dotenv file, or pass it to `env`:
+
+```console
+$ voltage context --profile staging --format env
+VOLTAGE_ORGANIZATION_ID=ORG_ID
+VOLTAGE_ENVIRONMENT_ID=ENV_ID
+VOLTAGE_WALLET_ID=WALLET_ID
+$ voltage context --profile staging --format env > scope.env
+```
+
+A value that is not set is left out rather than printed empty, because a tool can treat an empty variable as a value. More than one environment, as from repeated `--env`, fails with exit code 2 instead of choosing one. It cannot be combined with `--json`, `--output`, or `--output-file`; redirect stdout instead.
+
+It never prints a credential: like the rest of `voltage context`, it reads no saved secret. Give the other tool an API key some other way, and use a key for the printed organization and environment, or its requests go elsewhere or fail.
+
 ## Configuration directory
 
 Configuration lives in `$XDG_CONFIG_HOME/voltage` or `~/.config/voltage`; override the directory with `VOLTAGE_CONFIG_DIR` or `--config-dir`. The directory and everything in it are owner-only.

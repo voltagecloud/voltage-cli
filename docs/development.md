@@ -133,7 +133,7 @@ build when they disagree. `docs/commands.md` is generated; regenerate it with
   API-key runs, the optional `VOLTAGE_API_KEY`, `VOLTAGE_ORGANIZATION_ID`,
   `VOLTAGE_ENVIRONMENT_ID`, and `VOLTAGE_WALLET_ID` from the repository's private `.env`
   (copy `.env.example`, fill it in, `chmod 600 .env`) without evaluating it as shell code,
-  keeps CLI state under `.work/staging/cli`, and refuses `--config-dir`, `--api-url`, and
+  keeps CLI state under `.work/staging/cli` through `VOLTAGE_CONFIG_DIR`, and refuses `--config-dir`, `--api-url`, and
   `--auth-url` so a staging command cannot target another deployment. A leading `--build`
   works as it does for `voltage-local`, but checks `.env` before it builds when a command
   follows; `--build` alone needs no `.env`. Browser login and
