@@ -162,18 +162,47 @@ impl CredentialProblem {
     }
 }
 
-/// `VOLTAGE_*` variables that are set but supply nothing, because a flag or the selected
-/// profile takes precedence. Kept beside the precedence rules that decide it.
-pub(crate) fn ignored_variables(sources: &ScopeSources, config_dir: Source) -> Vec<&'static str> {
+/// What takes precedence over a `VOLTAGE_*` variable that is set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Precedence {
+    /// The named flag supplies the value.
+    Flag(&'static str),
+    /// The selected profile is a complete configuration, so ambient variables supply nothing,
+    /// even a value the profile lacks.
+    Profile,
+}
+
+/// A `VOLTAGE_*` variable that is set but supplies nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IgnoredVariable {
+    pub(crate) name: &'static str,
+    pub(crate) precedence: Precedence,
+}
+
+/// `VOLTAGE_*` scope and directory variables that are set but supply nothing, because a flag
+/// or the selected profile takes precedence. Kept beside the precedence rules that decide it.
+pub(crate) fn ignored_variables(
+    sources: &ScopeSources,
+    config_dir: Source,
+) -> Vec<IgnoredVariable> {
     [
-        ("VOLTAGE_ORGANIZATION_ID", sources.org),
-        ("VOLTAGE_ENVIRONMENT_ID", sources.envs),
-        ("VOLTAGE_WALLET_ID", sources.wallet),
-        ("VOLTAGE_CONFIG_DIR", config_dir),
+        ("VOLTAGE_ORGANIZATION_ID", "--org", sources.org),
+        ("VOLTAGE_ENVIRONMENT_ID", "--env", sources.envs),
+        ("VOLTAGE_WALLET_ID", "--wallet", sources.wallet),
+        ("VOLTAGE_CONFIG_DIR", "--config-dir", config_dir),
     ]
     .into_iter()
-    .filter(|(name, source)| std::env::var_os(name).is_some() && *source != Source::Environment)
-    .map(|(name, _)| name)
+    .filter(|(name, _, source)| std::env::var_os(name).is_some() && *source != Source::Environment)
+    .map(|(name, flag, source)| IgnoredVariable {
+        name,
+        // A set variable loses only to its flag or to a profile, which leaves it `Profile`
+        // or, for a value the profile lacks, `Unset`.
+        precedence: if source == Source::Flag {
+            Precedence::Flag(flag)
+        } else {
+            Precedence::Profile
+        },
+    })
     .collect()
 }
 

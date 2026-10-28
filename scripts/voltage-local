@@ -24,8 +24,9 @@ if build:
     if status or not args:
         sys.exit(status)
 binary = root / 'target/debug/voltage'
+# A variable rather than --config-dir, so hints the CLI prints do not name a refused flag.
+env['VOLTAGE_CONFIG_DIR'] = str(root / '.work/local-demo/cli')
 if not binary.is_file():
     sys.exit('Build the development CLI first: ./scripts/voltage-local --build')
-os.execve(binary, [str(binary), '--config-dir', str(root / '.work/local-demo/cli'),
-                  '--auth-url', 'http://127.0.0.1:8081/api/v1',
+os.execve(binary, [str(binary), '--auth-url', 'http://127.0.0.1:8081/api/v1',
                   '--api-url', 'http://127.0.0.1:1/disabled-api', *args], env)
