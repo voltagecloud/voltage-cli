@@ -5,6 +5,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 ## Unreleased
 
 - `organizations list`, `environments list`, and `profiles list` accept `--all` and ignore it, like the other lists that return every item at once. Before, they rejected it.
+- `ctutils` 0.4.5, whose constant-time comparisons no longer branch on secret values (RUSTSEC-2026-0385). It reaches the CLI through `sha2` and `digest`.
 - Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type adjustment`, from the refreshed API contract. Omit `--event-type` for payment ledger entries. Filters carry across pagination.
 - `webhooks test WEBHOOK_ID` without `--data` sends a test event, with a new `delivery_id` and a payload of type `test` and event `created`. Before, it failed with "This operation requires --data". `--data` still sends your own payload.
 - A list that returns every item in one response, such as `wallets list`, accepts `--all` and ignores it, because there are no more pages. Before, it rejected `--all`. `--all` still pages through lists that take `--limit`.
@@ -25,6 +26,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - A payment that settles on a terminal closes with `⚡ Payment ID completed` instead of a check mark, printed after the payment's record so it stays on screen.
 - `voltage payments list --watch` follows payments until Ctrl-C: a live table that marks new and changed payments on a terminal, or one `snapshot`, `new`, or `updated` event per payment when piped or with `--json`. `--interval` sets the refresh (default 5 seconds).
 - `voltage` with no command, on a terminal, greets you with the wordmark, who you are signed in as, your saved scope, and commands to try; off a terminal it is still a usage error. An empty wallet, payment, or webhook list, and a new profile, end with a `›` line naming the next command.
+- A command reads a saved login's or API key's secret from the OS credential store once, instead of once for each lookup, so macOS asks for keychain access at most once per command. A login refresh still reads it again under the credential lock, to see a refresh that another command saved.
 
 ## 0.2.0 - 2026-10-22
 

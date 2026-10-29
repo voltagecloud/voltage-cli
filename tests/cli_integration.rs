@@ -21,9 +21,7 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::sync::Notify;
 use voltage_cli::{
-    config::{
-        self, Account, AccountKind, Config, Credential, CredentialStore, Login, Profile, Settings,
-    },
+    config::{self, Account, AccountKind, Credential, CredentialStore, Login, Profile, Settings},
     registry::{AuthScheme, Method, OPERATIONS, OperationId, ResourceTarget},
     secret::Secret,
 };
@@ -494,10 +492,7 @@ async fn result_output_treats_an_early_closing_pipe_as_success_without_resubmitt
 }
 
 fn settings_at(dir: &Path) -> Settings {
-    Settings {
-        dir: dir.into(),
-        config: Config::default(),
-    }
+    Settings::open(dir.into()).unwrap()
 }
 
 /// A saved browser login stored in a private file, expired or good for ten minutes.
@@ -557,8 +552,14 @@ fn seeded_api_key(dir: &Path, name: &str, key: &str) -> Settings {
 }
 
 /// The saved login's access and refresh tokens.
+/// The credential saved on disk now. A `Settings` reads each secret once, so a read through
+/// one that read it before a command ran would not see what the command saved.
+fn saved_credential(settings: &Settings, name: &str) -> Option<Credential> {
+    settings_at(&settings.dir).read_credential(name).ok()
+}
+
 fn login_tokens(settings: &Settings, name: &str) -> (String, String) {
-    match settings.read_credential(name).unwrap() {
+    match saved_credential(settings, name).unwrap() {
         Credential::Login(login) => (
             login.access_token.expose().to_owned(),
             login.refresh_token.expose().to_owned(),
@@ -1317,7 +1318,7 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
     assert_eq!(account.kind, AccountKind::ApiKey);
     assert_eq!(account.store, CredentialStore::File);
     assert_eq!(account.organization_id, Some(uuid(ORG)));
-    let Credential::ApiKey(key) = settings.read_credential("staging-key").unwrap() else {
+    let Credential::ApiKey(key) = saved_credential(&settings, "staging-key").unwrap() else {
         panic!("expected an API key");
     };
     assert_eq!(key.expose(), "imported-secret");
@@ -1348,7 +1349,7 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
         .code(2);
     assert_eq!(json_error(&login)["error"]["message"], in_use);
     let settings = Settings::open(dir.path().to_path_buf()).unwrap();
-    let Credential::ApiKey(key) = settings.read_credential("staging-key").unwrap() else {
+    let Credential::ApiKey(key) = saved_credential(&settings, "staging-key").unwrap() else {
         panic!("expected an API key");
     };
     assert_eq!(key.expose(), "imported-secret");
@@ -1720,12 +1721,12 @@ async fn logout_retains_credentials_on_revocation_failure_and_local_is_explicit(
         .args(["logout", "--account", LOGIN_NAME])
         .assert()
         .code(3);
-    assert!(settings.read_credential(LOGIN_NAME).is_ok());
+    assert!(saved_credential(&settings, LOGIN_NAME).is_some());
     cli(dir.path(), &server)
         .args(["logout", "--account", LOGIN_NAME, "--local"])
         .assert()
         .success();
-    assert!(settings.read_credential(LOGIN_NAME).is_err());
+    assert!(saved_credential(&settings, LOGIN_NAME).is_none());
 }
 
 /// A device login that is approved at once and signs in as `user_id`.
@@ -2367,7 +2368,7 @@ async fn interrupt_during_a_logout_revoke_points_to_a_local_logout() {
             .contains("--local")
     );
     // The saved login is still there for the local logout the hint suggests.
-    assert!(settings.read_credential(LOGIN_NAME).is_ok());
+    assert!(saved_credential(&settings, LOGIN_NAME).is_some());
     server.verify().await;
 }
 
