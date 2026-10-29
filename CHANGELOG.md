@@ -25,6 +25,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 - A payment that settles on a terminal closes with `⚡ Payment ID completed` instead of a check mark, printed after the payment's record so it stays on screen.
 - `voltage payments list --watch` follows payments until Ctrl-C: a live table that marks new and changed payments on a terminal, or one `snapshot`, `new`, or `updated` event per payment when piped or with `--json`. `--interval` sets the refresh (default 5 seconds).
 - `voltage` with no command, on a terminal, greets you with the wordmark, who you are signed in as, your saved scope, and commands to try; off a terminal it is still a usage error. An empty wallet, payment, or webhook list, and a new profile, end with a `›` line naming the next command.
+- A command reads a saved login's or API key's secret from the OS credential store once, instead of once for each lookup, so macOS asks for keychain access at most once per command. A login refresh still reads it again under the credential lock, to see a refresh that another command saved.
 
 ## 0.2.0 - 2026-10-22
 
