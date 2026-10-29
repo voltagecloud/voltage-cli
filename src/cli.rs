@@ -292,12 +292,14 @@ pub struct ImportKeyFlags {
 
 #[derive(Debug, Subcommand)]
 pub enum ListCommand {
+    #[command(arg = all_at_once_arg())]
     List,
 }
 
 #[derive(Debug, Subcommand, Eq, PartialEq)]
 pub enum ProfileCommand {
     /// Show every saved profile
+    #[command(arg = all_at_once_arg())]
     List,
     /// Show one profile
     Get { name: String },
@@ -1027,16 +1029,19 @@ fn list_args(cmd: ClapCommand, operation: &Operation) -> ClapCommand {
     if operation.has_parameter("limit") {
         PaginationFlags::augment_args(cmd)
     } else if operation.lists_everything_at_once() {
-        cmd.arg(
-            Arg::new("all_at_once")
-                .long("all")
-                .action(ArgAction::SetTrue)
-                .help("No effect: this list returns every item in one response")
-                .help_heading("Query"),
-        )
+        cmd.arg(all_at_once_arg())
     } else {
         cmd
     }
+}
+
+/// `--all` on a list without paging, such as `environments list`: accepted and ignored.
+fn all_at_once_arg() -> Arg {
+    Arg::new("all_at_once")
+        .long("all")
+        .action(ArgAction::SetTrue)
+        .help("No effect: this list shows every item at once")
+        .help_heading("Query")
 }
 
 /// The resource ID argument and `--id`, one of which is required. A wallet command can
@@ -1554,6 +1559,67 @@ mod tests {
             "{}",
             get.message
         );
+    }
+
+    #[test]
+    fn all_is_accepted_by_every_list_command() {
+        fn lists(cmd: &ClapCommand, path: &mut Vec<String>, found: &mut Vec<(String, bool)>) {
+            path.push(cmd.get_name().into());
+            if cmd.get_name() == "list" {
+                let all = cmd.get_arguments().any(|arg| arg.get_long() == Some("all"));
+                found.push((path.join(" "), all));
+            }
+            for sub in cmd.get_subcommands() {
+                lists(sub, path, found);
+            }
+            path.pop();
+        }
+        let mut found = Vec::new();
+        lists(&command(), &mut Vec::new(), &mut found);
+        assert!(
+            found
+                .iter()
+                .any(|(path, _)| path == "voltage environments list"),
+            "{found:?}"
+        );
+        let missing: Vec<_> = found.iter().filter(|(_, all)| !all).collect();
+        assert!(missing.is_empty(), "lists without --all: {missing:?}");
+    }
+
+    #[test]
+    fn all_is_ignored_by_local_lists_and_rejected_by_other_local_commands() {
+        let parse = |args: &[&str]| {
+            Invocation::try_parse_from(["voltage"].iter().chain(args)).map(|i| i.command)
+        };
+        assert!(matches!(
+            parse(&["environments", "list", "--all"]),
+            Ok(Command::Local(LocalCommand::Environments {
+                command: ListCommand::List
+            }))
+        ));
+        assert!(matches!(
+            parse(&["organizations", "list", "--all"]),
+            Ok(Command::Local(LocalCommand::Organizations {
+                command: ListCommand::List
+            }))
+        ));
+        assert!(matches!(
+            parse(&["profiles", "list", "--all"]),
+            Ok(Command::Local(LocalCommand::Profiles {
+                command: ProfileCommand::List
+            }))
+        ));
+        for args in [
+            &["profiles", "get", "stage", "--all"][..],
+            &["context", "--all"],
+        ] {
+            let error = parse(args).unwrap_err();
+            assert!(
+                error.message.contains("unexpected argument '--all'"),
+                "{args:?}: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
