@@ -9,3 +9,7 @@ __pycache__/
 /dist/
 .env
 /docs/issues/
+
+# kai update writes the root lock; the rest of every .kai is generated.
+/.kai/*
+!/.kai/lock.json
