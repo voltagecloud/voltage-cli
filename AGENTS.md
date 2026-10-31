@@ -33,6 +33,31 @@ so a pull request is not ready until each one is done and reported.
 5. In the pull request description, give the checks you ran and the CRAP result: the
    highest score and each function at or above 20. Name any check you could not run, and
    why.
+6. In the pull request description, add a **Try it on staging** section that a reviewer can
+   paste after the [staging setup](docs/development.md#try-a-pull-request-on-staging).
+   See [Try it on staging](#try-it-on-staging).
+
+## Try it on staging
+
+The section tells a reviewer exactly what to run and what to look for. Write it for a
+reviewer who is on the branch and has run the setup, and nothing else:
+
+- Start with one line: `Setup: [Try a pull request on staging](docs/development.md#try-a-pull-request-on-staging)`.
+- Give the commands in `sh` blocks, ready to paste. Use `voltage` (the staging alias) and
+  `--account me`, never a profile the reviewer may not have. Use a placeholder only for a
+  value each reviewer has to supply, such as `WALLET_ID`, and say how to find it, such as
+  `voltage wallets list --account me`.
+- After each command or group, say what to expect in one line: the text, symbol, color, or
+  exit code that shows the change works.
+- List every `--help` and docs example that the pull request adds or changes, adapted to the
+  setup. To find them, run
+  `git diff origin/master...HEAD -- README.md docs src | grep '^+.*voltage '`.
+- Cover the variants the change affects, such as piped output (`2>&1 | cat`), `--json`,
+  `--quiet`, `--color never`, or `--no-input`.
+- Mark each command that sends a change. It needs `--execute` and a test-network wallet;
+  say so.
+- For a change with nothing to see, such as a refactor or a test-only change, write
+  `Nothing to try on staging` and the reason.
 
 A reviewer runs the CRAP report on the pull request's head and reports each violation as a
 finding, together with the review from step 1.
