@@ -37,6 +37,9 @@ so a pull request is not ready until each one is done and reported.
    paste after the [staging setup](docs/development.md#try-a-pull-request-on-staging).
    See [Try it on staging](#try-it-on-staging).
 
+A reviewer runs the CRAP report on the pull request's head and reports each violation as a
+finding, together with the review from step 1.
+
 ## Try it on staging
 
 The section tells a reviewer exactly what to run and what to look for. Write it for a
@@ -58,9 +61,6 @@ reviewer who is on the branch and has run the setup, and nothing else:
   say so.
 - For a change with nothing to see, such as a refactor or a test-only change, write
   `Nothing to try on staging` and the reason.
-
-A reviewer runs the CRAP report on the pull request's head and reports each violation as a
-finding, together with the review from step 1.
 
 ## Work plans
 
