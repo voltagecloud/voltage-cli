@@ -36,4 +36,6 @@ voltage payments list --profile prod --statuses completed --statuses failed \
 
 `--all` follows pagination by cursor, which the API recommends and the CLI requests by default; endpoints that only page by offset are followed by offset and count. The API has deprecated explicit offset paging (`--offset`, `--pagination offset`) where cursors exist, and the CLI warns when you use it. `--timeout SECONDS` (default 60) bounds the whole request, including paging and waits.
 
+Every `list` command accepts `--all`. A list without `--limit`, such as `wallets list`, `organizations list`, `environments list`, or `profiles list`, returns every item at once, so it ignores `--all`.
+
 Related: [safety model](../concepts/safety-model.md), [output reference](../reference/output.md).
