@@ -203,6 +203,20 @@ command line. A profile ignores `VOLTAGE_WALLET_ID` and the other ambient variab
 `--wallet` explicitly. Confirm a wallet's reported network is a test network before creating
 a payment. Browser login needs the device-login release deployed on the staging auth service.
 
+### Try a pull request on staging
+
+To check a pull request's change by hand, check out its branch, with `.env` filled in as in
+step 1 above, and paste this from the repository root:
+
+```sh
+alias voltage="$PWD/scripts/voltage-staging"
+voltage --build
+voltage login --account me --credential-store file
+```
+
+Then run the commands in the pull request's **Try it on staging** section; they assume this
+setup. After pulling new commits, run `voltage --build` again.
+
 ## Staging acceptance
 
 Complete these steps against the deployed staging services before publishing a release, and
