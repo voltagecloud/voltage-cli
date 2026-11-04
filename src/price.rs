@@ -9,6 +9,7 @@ use crate::{
     Error, Result,
     api::{BodyFailure, bounded_body},
     auth,
+    error::ResponseLimit,
     payment::{Amount, AmountUnit, Currency},
 };
 use serde::{Deserialize, Serialize};
@@ -206,7 +207,16 @@ impl PriceService {
             .get(format!("{}/currency/BTCUSD/{time}", self.base))
             .send()
             .await
-            .map_err(|_| Error::transport("Price request failed; check the price URL"))?;
+            .map_err(|error| {
+                Error::no_response(
+                    &error,
+                    "Price request",
+                    "",
+                    "price",
+                    ResponseLimit::Timeout,
+                    false,
+                )
+            })?;
         let status = response.status().as_u16();
         let body = bounded_body(response, MAX_PRICE_RESPONSE_BYTES)
             .await

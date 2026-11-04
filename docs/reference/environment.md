@@ -14,5 +14,11 @@ A flag beats a variable. A selected profile is a complete configuration, so `VOL
 | `VOLTAGE_CONFIG_DIR` | The configuration directory, as an absolute path | `--config-dir` |
 | `XDG_CONFIG_HOME` | Parent of the default configuration directory, `$XDG_CONFIG_HOME/voltage` (else `~/.config/voltage`) | `--config-dir`, `VOLTAGE_CONFIG_DIR` |
 | `COLUMNS` | Terminal width for human tables; otherwise the terminal's own width | — |
+| `VOLTAGE_SPINNER` | `0` or `false` draws progress as a still line instead of an animated spinner, for screen readers, which read every redraw | — |
+| `NO_COLOR` | Any non-empty value turns off color in human output and help | `--color` |
+| `FORCE_COLOR` | `0` or `false` turns off color; any other non-empty value colors human output and help even when redirected. `2` and `3` also select 256 and 24-bit color for the brand color | `--color`, `NO_COLOR` |
+| `COLORTERM` | `truecolor` or `24bit` draws the brand color in 24-bit color; otherwise a `TERM` naming `256color` draws it in 256 colors, and other terminals show it as bold | — |
+| `CLICOLOR_FORCE` | Any non-zero value colors human output and help even when redirected | `--color`, `NO_COLOR`, `FORCE_COLOR` |
+| `CLICOLOR` | `0` turns off color on a terminal | `--color`, `NO_COLOR`, `CLICOLOR_FORCE` |
 
 Related: [configuration](configuration.md), [global flags](global-flags.md), [scripting](../guides/scripting.md).

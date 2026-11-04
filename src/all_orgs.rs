@@ -20,7 +20,6 @@ use crate::{
     config::{Credential, Scope},
     error::{ErrorDetail, ErrorKind},
     output::{Envelope, Outcome, Output},
-    terminal::Terminal,
 };
 use futures_util::{StreamExt, stream};
 use serde::Serialize;
@@ -89,7 +88,7 @@ pub async fn wallets(
     let organizations = organizations(&listed);
     let token = &login.access_token;
     // The exchanges run side by side, so only the one line below shows progress.
-    let quiet = Terminal::new(true, global.no_input);
+    let quiet = global.terminal().quieted();
     let reads = stream::iter(&organizations)
         .map(|organization| async move {
             let scope = Scope {

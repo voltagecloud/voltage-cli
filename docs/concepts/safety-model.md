@@ -12,6 +12,8 @@ Commands that change something (any method but GET) only describe their request 
 | A change without `--execute` | Describes the request and sends nothing | 6 |
 | A change with `--execute` | Sends the request | 0 on success |
 
+On a terminal with table output, the description starts with what the change would do and the values it would use, such as `! Not sent: this would send a payment` followed by its wallet and amount, and ends with `› Send it: add --execute, or set VOLTAGE_EXECUTE=1` instead of an `error:` line. The summary shows only the values the description shows. Redirected stderr keeps the `error: Described this change without sending it` line.
+
 Exit code 6 means "described, not sent", so a script that forgot `--execute` fails instead of looking as if it sent money. To check a change on purpose, run it without `--execute` and treat exit code 6 as the expected result. Scripts can set `VOLTAGE_EXECUTE=1` instead of passing `--execute`, and `VOLTAGE_EXECUTE=0` describes one command again; see [scripting](../guides/scripting.md#send-changes-from-a-script).
 
 ```sh

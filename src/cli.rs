@@ -12,7 +12,8 @@ use crate::{
     output::OutputFormat,
     payment::{AmountUnit, Currency, Network, PaymentDirection, ReceiveKind, WaitTarget},
     price::ConversionRequest,
-    registry::{Method, OPERATIONS, Operation, OperationId, Parameter, operation},
+    registry::{Method, OPERATIONS, Operation, OperationId, Parameter, ResourceTarget, operation},
+    style::{self, ColorChoice},
     terminal::Terminal,
 };
 use clap::{
@@ -21,7 +22,12 @@ use clap::{
     error::ErrorKind,
 };
 use clap_complete::Shell;
-use std::{collections::BTreeSet, ffi::OsStr, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet,
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    time::Duration,
+};
 use uuid::Uuid;
 
 /// Friendly payment commands beside `create_payment`'s generated command.
@@ -55,7 +61,7 @@ pub struct GlobalFlags {
     #[arg(long, global = true, help_heading = "Output")]
     pub json: bool,
     /// Output format
-    #[arg(long, global = true, value_enum, help_heading = "Output")]
+    #[arg(short = 'o', long, global = true, value_enum, help_heading = "Output")]
     pub output: Option<OutputFormat>,
     /// Save the complete response to a new owner-only file
     #[arg(long, global = true, value_name = "PATH", help_heading = "Output")]
@@ -66,6 +72,25 @@ pub struct GlobalFlags {
     /// Never prompt for a secret; supply it with --stdin or the environment instead
     #[arg(long, global = true, help_heading = "Safety")]
     pub no_input: bool,
+    /// When to color human output and help
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "WHEN",
+        default_value_t,
+        help_heading = "Output"
+    )]
+    pub color: ColorChoice,
+    /// Same as --color never
+    #[arg(
+        long,
+        global = true,
+        hide = true,
+        conflicts_with = "color",
+        help_heading = "Output"
+    )]
+    pub no_color: bool,
     /// Hide optional progress and notices, not errors, results, or recovery IDs
     #[arg(short = 'q', long, global = true, help_heading = "Output")]
     pub quiet: bool,
@@ -111,8 +136,39 @@ impl GlobalFlags {
         OutputFormat::select(self.json, self.output)
     }
 
+    /// The global flags of a command line that names no command, such as bare `voltage` or
+    /// `voltage --profile prod`; `None` when it names one or does not parse.
+    pub fn without_command(args: &[OsString]) -> Option<Self> {
+        let missing = command()
+            .try_get_matches_from(args)
+            .err()
+            .is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                        | ErrorKind::MissingSubcommand
+                )
+            });
+        if !missing {
+            return None;
+        }
+        // The same flags in front of `context`, the local command that reads only them.
+        let with_context = args.iter().cloned().chain([OsString::from("context")]);
+        let matches = command().try_get_matches_from(with_context).ok()?;
+        parse(leaf(&matches).1).ok()
+    }
+
+    /// `--color` or `--no-color`, else `FORCE_COLOR`, else automatic.
+    pub fn color(&self) -> ColorChoice {
+        if self.no_color {
+            ColorChoice::Never
+        } else {
+            self.color.with_environment(|name| std::env::var(name).ok())
+        }
+    }
+
     pub fn terminal(&self) -> Terminal {
-        Terminal::new(self.quiet, self.no_input)
+        Terminal::new(self.quiet, self.no_input).with_color(self.color())
     }
 
     pub fn scope_selection(&self) -> ScopeSelection {
@@ -371,8 +427,30 @@ struct WaitFlags {
 }
 
 #[derive(Debug, Args)]
+struct WatchFlags {
+    /// Keep listing until Ctrl-C: a live table on a terminal, else one event per new or
+    /// changed payment
+    #[arg(
+        long,
+        conflicts_with_all = ["all", "cursor", "sort-key", "sort-order"],
+        help_heading = "Waiting and presentation"
+    )]
+    watch: bool,
+    /// Seconds between refreshes while watching
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value = "5",
+        value_parser = parse_timeout,
+        requires = "watch",
+        help_heading = "Waiting and presentation"
+    )]
+    interval: Duration,
+}
+
+#[derive(Debug, Args)]
 struct InvoiceFlags {
-    /// Render a ready BOLT11 invoice as a compact terminal QR code; implies --wait ready
+    /// Render a ready BOLT11 invoice as a QR code to scan; implies --wait ready
     #[arg(long, help_heading = "Waiting and presentation")]
     qr: bool,
     /// Copy a ready BOLT11 invoice to the clipboard; implies --wait ready
@@ -546,6 +624,8 @@ pub enum FriendlyFlags {
     Quote(QuoteFlags),
     CreateWebhook(WebhookFlags),
     UpdateWebhook(UpdateWebhookFlags),
+    /// `webhooks test` without `--data` sends the contract's test event.
+    TestWebhook,
 }
 
 impl FriendlyFlags {
@@ -556,7 +636,7 @@ impl FriendlyFlags {
             Self::Payment(flags) => flags.id.is_none(),
             Self::Quote(flags) => flags.id.is_none(),
             Self::CreateWebhook(flags) => flags.id.is_none(),
-            Self::UpdateWallet(_) | Self::UpdateWebhook(_) => false,
+            Self::UpdateWallet(_) | Self::UpdateWebhook(_) | Self::TestWebhook => false,
         }
     }
 }
@@ -591,6 +671,8 @@ pub struct ApiInvocation {
     pub token_file: Option<InputSource>,
     pub origin: Option<Origin>,
     pub wait: Option<WaitTarget>,
+    /// `payments list --watch`: refresh at this interval until interrupted.
+    pub watch: Option<Duration>,
     pub qr: bool,
     pub copy: bool,
     pub body: Option<BodySource>,
@@ -634,9 +716,15 @@ pub struct Invocation {
 
 impl Invocation {
     /// Parse process arguments without letting clap terminate the process. Startup decides
-    /// whether parse failures need clap's human rendering or the JSON error envelope.
-    pub fn from_env() -> std::result::Result<Self, ParseFailure> {
-        let matches = command().try_get_matches().map_err(ParseFailure::Clap)?;
+    /// whether parse failures need clap's human rendering or the JSON error envelope; `color`
+    /// colors clap's help and errors, since `--color` itself is not parsed yet.
+    pub fn from_env(color: ColorChoice) -> std::result::Result<Self, ParseFailure> {
+        let depth = style::Depth::detect(|name| std::env::var(name).ok());
+        let matches = command()
+            .color(color.as_clap())
+            .styles(style::help(depth))
+            .try_get_matches()
+            .map_err(ParseFailure::Clap)?;
         Self::from_matches(&matches).map_err(ParseFailure::Validation)
     }
 
@@ -724,6 +812,35 @@ fn payment_alias_parent(create_payment: &Operation) -> &[String] {
         .unwrap_or_default()
 }
 
+/// The operation's resource ID: its argument or `--id`. A wallet operation also takes an
+/// explicit `--wallet`, which names the wallet everywhere else; a profile's or
+/// `VOLTAGE_WALLET_ID`'s wallet never selects it, so a delete always names its wallet.
+fn target_id(
+    operation: &Operation,
+    target: Option<TargetFlags>,
+    m: &ArgMatches,
+) -> Result<Option<Uuid>> {
+    let id = target.and_then(|target| target.id());
+    if !operation.targets_wallet() {
+        return Ok(id);
+    }
+    match (id, m.get_one::<Uuid>("wallet").copied()) {
+        (Some(id), Some(wallet)) if id != wallet => Err(Error::usage(format!(
+            "WALLET_ID {id} and --wallet {wallet} name different wallets"
+        ))
+        .with_hint("Pass the wallet once, as WALLET_ID or --wallet.")),
+        (Some(id), _) | (None, Some(id)) => Ok(Some(id)),
+        (None, None) => {
+            let command = operation.command.join(" ");
+            Err(
+                Error::usage(format!("{command} needs a wallet ID")).with_hint(format!(
+                    "Pass it as an argument or with --wallet, as in `voltage {command} WALLET_ID`. `voltage wallets list` shows the IDs."
+                )),
+            )
+        }
+    }
+}
+
 fn api_invocation(
     operation: &'static Operation,
     alias: Option<PaymentDirection>,
@@ -746,6 +863,7 @@ fn api_invocation(
     let checkout = parse_if::<CheckoutFlags>(operation.auth.is_checkout(), m)?;
     let origin = parse_if::<OriginFlags>(takes_origin(operation), m)?;
     let wait = parse_if::<WaitFlags>(operation.id.supports_wait(), m)?;
+    let watch = parse_if::<WatchFlags>(operation.id == OperationId::GetPayments, m)?;
     let invoice = parse_if::<InvoiceFlags>(operation.id.presents_invoice(), m)?;
     let data = parse_if::<DataFlags>(operation.body, m)?;
     let body = match data {
@@ -758,7 +876,7 @@ fn api_invocation(
     Ok(ApiInvocation {
         operation,
         alias,
-        resource_id: target.and_then(|target| target.id()),
+        resource_id: target_id(operation, target, m)?,
         filters,
         query: query.query,
         all: pagination.is_some_and(|flags| flags.all),
@@ -766,6 +884,9 @@ fn api_invocation(
         token_file: checkout.and_then(|flags| flags.token_file),
         origin: origin.and_then(|flags| flags.origin),
         wait: wait.and_then(|flags| flags.wait),
+        watch: watch
+            .filter(|flags| flags.watch)
+            .map(|flags| flags.interval),
         qr: invoice.as_ref().is_some_and(|flags| flags.qr),
         copy: invoice.as_ref().is_some_and(|flags| flags.copy),
         body,
@@ -803,6 +924,7 @@ fn friendly_flags(id: OperationId, m: &ArgMatches) -> Result<Option<FriendlyFlag
         OperationId::RequestAQuote => FriendlyFlags::Quote(parse(m)?),
         OperationId::CreateWebhook => FriendlyFlags::CreateWebhook(parse(m)?),
         OperationId::UpdateWebhook => FriendlyFlags::UpdateWebhook(parse(m)?),
+        OperationId::TestWebhook => FriendlyFlags::TestWebhook,
         _ => return Ok(None),
     }))
 }
@@ -836,7 +958,8 @@ pub fn command() -> ClapCommand {
     let root = ClapCommand::new("voltage")
         .version(env!("VOLTAGE_VERSION"))
         .subcommand_required(true)
-        .arg_required_else_help(true);
+        .arg_required_else_help(true)
+        .styles(style::help(style::Depth::Basic));
     let root = GlobalFlags::augment_args(root);
     let mut root = LocalCommand::augment_subcommands(root);
     for name in root
@@ -898,6 +1021,36 @@ fn add_children(mut parent: ClapCommand, prefix: &[String]) -> ClapCommand {
 }
 
 /// The command for one operation: its positional target, documented filters, and options.
+/// `--all` pages through a list that takes `--limit`. A list without paging accepts `--all`
+/// too and ignores it, because its one response already holds every item.
+fn list_args(cmd: ClapCommand, operation: &Operation) -> ClapCommand {
+    if operation.has_parameter("limit") {
+        PaginationFlags::augment_args(cmd)
+    } else if operation.lists_everything_at_once() {
+        cmd.arg(
+            Arg::new("all_at_once")
+                .long("all")
+                .action(ArgAction::SetTrue)
+                .help("No effect: this list returns every item in one response")
+                .help_heading("Query"),
+        )
+    } else {
+        cmd
+    }
+}
+
+/// The resource ID argument and `--id`, one of which is required. A wallet command can
+/// name its wallet with `--wallet` instead, so `target_id` checks that one was given.
+fn target_args(cmd: ClapCommand, target: ResourceTarget, wallet: bool) -> ClapCommand {
+    let cmd = TargetFlags::augment_args(cmd)
+        .mut_arg("resource_id", |arg| arg.value_name(target.value_name()));
+    if wallet {
+        cmd.mut_group("TargetFlags", |group| group.required(false))
+    } else {
+        cmd
+    }
+}
+
 fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapCommand {
     let command_name = cmd.get_name().to_owned();
     let mut notes = Vec::new();
@@ -915,7 +1068,7 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     }
     if !operation.is_environment_scoped() {
         notes.push(if operation.targets_wallet() {
-            "Scope:\n  Wallets have organization scope. --env validates the wallet on reads and mutations; it does not change this endpoint's scope.".to_owned()
+            "Scope:\n  Wallets have organization scope. --env validates the wallet on reads and mutations; it does not change this endpoint's scope. --wallet ID names the wallet in place of WALLET_ID.".to_owned()
         } else {
             "Scope:\n  This endpoint has no environment filter. An environment in a profile does not narrow this operation.".to_owned()
         });
@@ -936,8 +1089,7 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     // `-h` stays short; `--help` adds the notes.
     cmd = cmd.after_long_help(notes.join("\n\n"));
     if let Some(target) = operation.target {
-        cmd = TargetFlags::augment_args(cmd)
-            .mut_arg("resource_id", |arg| arg.value_name(target.value_name()));
+        cmd = target_args(cmd, target, operation.targets_wallet());
     }
     for parameter in operation
         .query_filters()
@@ -949,9 +1101,7 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     if operation.method != Method::Get {
         cmd = ExecuteFlags::augment_args(cmd);
     }
-    if operation.has_parameter("limit") {
-        cmd = PaginationFlags::augment_args(cmd);
-    }
+    cmd = list_args(cmd, operation);
     if operation.id.lists_all_organizations() {
         cmd = AllOrgsFlags::augment_args(cmd);
     }
@@ -960,6 +1110,9 @@ fn endpoint(mut cmd: ClapCommand, operation: &Operation, about: String) -> ClapC
     }
     if takes_origin(operation) {
         cmd = OriginFlags::augment_args(cmd);
+    }
+    if operation.id == OperationId::GetPayments {
+        cmd = WatchFlags::augment_args(cmd);
     }
     if operation.id.supports_wait() {
         cmd = WaitFlags::augment_args(cmd);
@@ -1022,6 +1175,9 @@ fn friendly_requirements(id: OperationId, command_name: &str) -> Option<&'static
         ),
         (OperationId::CreateWallet, "create") => Some(
             "Select one environment with --env or --profile, then pass --name, --credit-line, --network, and --limit.",
+        ),
+        (OperationId::TestWebhook, _) => Some(
+            "Without --data, sends a test event: a new delivery_id and a payload of type test with event created.",
         ),
         _ => None,
     }
@@ -1099,7 +1255,10 @@ fn endpoint_examples(id: OperationId, command_name: &str) -> Option<&'static str
   voltage webhooks keys rotate WEBHOOK_ID --profile prod --output-file webhook-key.json --execute"
         }
         (OperationId::TestWebhook, _) => {
-            "  # Send a test delivery with a delivery_id and a sample payload
+            "  # Send the test event
+  voltage webhooks test WEBHOOK_ID --profile prod --execute
+
+  # Send your own delivery_id and payload
   voltage webhooks test WEBHOOK_ID --profile prod --data @test-delivery.json --execute"
         }
         (OperationId::StartWebhookAsUser, _) => {
@@ -1382,6 +1541,84 @@ mod tests {
     }
 
     #[test]
+    fn all_is_accepted_by_every_list_and_pages_only_a_paginated_one() {
+        // `wallets list` returns every wallet at once, so `--all` changes nothing.
+        assert!(!api(&["wallets", "list", "--all"]).all);
+        assert!(!api(&["webhooks", "list", "--all"]).all);
+        assert!(api(&["payments", "list", "--all"]).all);
+        // A command that is not a list still rejects it.
+        let get =
+            Invocation::try_parse_from(["voltage", "wallets", "get", WALLET, "--all"]).unwrap_err();
+        assert!(
+            get.message.contains("unexpected argument '--all'"),
+            "{}",
+            get.message
+        );
+    }
+
+    #[test]
+    fn wallet_flag_names_the_wallet_a_wallet_command_acts_on() {
+        const OTHER: &str = "44444444-4444-4444-8444-444444444444";
+        let wallet = Some(WALLET.parse().unwrap());
+        assert_eq!(
+            api(&["wallets", "get", "--wallet", WALLET]).resource_id,
+            wallet
+        );
+        assert_eq!(
+            api(&["wallets", "get", WALLET, "--wallet", WALLET]).resource_id,
+            wallet
+        );
+        assert_eq!(
+            api(&["wallets", "delete", "--wallet", WALLET]).resource_id,
+            wallet
+        );
+
+        let differ =
+            Invocation::try_parse_from(["voltage", "wallets", "get", WALLET, "--wallet", OTHER])
+                .unwrap_err();
+        assert_eq!(differ.kind, Kind::Usage);
+        assert_eq!(
+            differ.message,
+            format!("WALLET_ID {WALLET} and --wallet {OTHER} name different wallets")
+        );
+        assert_eq!(
+            differ.hint.as_deref(),
+            Some("Pass the wallet once, as WALLET_ID or --wallet.")
+        );
+
+        let missing = Invocation::try_parse_from(["voltage", "wallets", "get"]).unwrap_err();
+        assert_eq!(missing.kind, Kind::Usage);
+        assert_eq!(missing.message, "wallets get needs a wallet ID");
+        assert!(
+            missing
+                .hint
+                .unwrap()
+                .contains("voltage wallets get WALLET_ID")
+        );
+
+        // Commands that act on something else still require their own ID.
+        let payment =
+            Invocation::try_parse_from(["voltage", "payments", "get", "--wallet", WALLET])
+                .unwrap_err();
+        assert!(
+            payment.message.contains("<PAYMENT_ID|--id <ID>>"),
+            "{}",
+            payment.message
+        );
+    }
+
+    #[test]
+    fn short_o_selects_the_output_format_before_or_after_the_subcommand() {
+        for args in [
+            ["voltage", "-o", "json", "wallets", "list"],
+            ["voltage", "wallets", "list", "-o", "json"],
+        ] {
+            let invocation = Invocation::try_parse_from(args).unwrap();
+            assert_eq!(invocation.global.output, Some(OutputFormat::Json));
+        }
+    }
+
+    #[test]
     fn global_flags_work_after_subcommand() {
         let invocation = Invocation::try_parse_from([
             "voltage",
@@ -1406,6 +1643,65 @@ mod tests {
             OperationId::GetAllOrganizationsWalletsAsUser
         );
         assert!(api.body.is_none());
+    }
+
+    #[test]
+    fn global_flags_without_a_command_are_read_for_the_greeting() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        let bare = GlobalFlags::without_command(&args(&["voltage"])).unwrap();
+        assert_eq!(bare.profile, None);
+        let profiled =
+            GlobalFlags::without_command(&args(&["voltage", "--profile", "prod"])).unwrap();
+        assert_eq!(profiled.profile.as_deref(), Some("prod"));
+        assert!(
+            GlobalFlags::without_command(&args(&["voltage", "--json"]))
+                .unwrap()
+                .json
+        );
+        for named in [
+            &["voltage", "context"][..],
+            &["voltage", "--help"],
+            &["voltage", "--bogus"],
+        ] {
+            assert!(
+                GlobalFlags::without_command(&args(named)).is_none(),
+                "{named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_payments_list_watches_and_its_interval_needs_the_watch() {
+        let watched = api(&["payments", "list", "--watch"]);
+        assert_eq!(watched.watch, Some(Duration::from_secs(5)));
+        let quick = api(&["payments", "list", "--watch", "--interval", "2"]);
+        assert_eq!(quick.watch, Some(Duration::from_secs(2)));
+        assert_eq!(api(&["payments", "list"]).watch, None);
+        for args in [
+            &["voltage", "payments", "list", "--interval", "2"][..],
+            &["voltage", "payments", "list", "--watch", "--all"],
+            &["voltage", "payments", "list", "--watch", "--cursor", "c1"],
+            &[
+                "voltage",
+                "payments",
+                "list",
+                "--watch",
+                "--sort-key",
+                "created_at",
+            ],
+            &[
+                "voltage",
+                "payments",
+                "list",
+                "--watch",
+                "--sort-order",
+                "ASC",
+            ],
+            &["voltage", "payments", "list", "--watch", "--interval", "0"],
+            &["voltage", "wallets", "list", "--watch"],
+        ] {
+            assert!(Invocation::try_parse_from(args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

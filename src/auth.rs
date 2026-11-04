@@ -13,9 +13,11 @@ use crate::{
         InputSource, LOCK_TIMEOUT, Login, Scope, ScopeSources, Settings, Source, name_in_use,
         read_secret, shell_word, unreadable_name,
     },
-    error::{CredentialRejection, CredentialSources, ErrorDetail},
+    error::{CredentialRejection, CredentialSources, ErrorDetail, ResponseLimit},
     secret::Secret,
-    terminal::{self, Terminal},
+    style::{Line, Role},
+    terminal::Terminal,
+    wordmark,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -37,7 +39,8 @@ const MAX_LOGIN_WAIT: u64 = 600;
 const MIN_POLL_INTERVAL: u64 = 5;
 const MAX_POLL_INTERVAL: u64 = 600;
 const SLOW_DOWN_STEP: u64 = 5;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `TransportFailure::ConnectTimeout` names this limit in its message.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Auth responses are small JSON documents; anything larger is not one.
 const MAX_AUTH_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -188,9 +191,14 @@ async fn auth_request(
     terminal: Terminal,
 ) -> Result<AuthResponse> {
     let _progress = terminal.progress("Waiting for auth service...");
-    let response = request.send().await.map_err(|_| {
-        Error::transport(
-            "Authentication request failed; no token request was automatically retried",
+    let response = request.send().await.map_err(|error| {
+        Error::no_response(
+            &error,
+            "Authentication request",
+            "; no token request was automatically retried",
+            "auth",
+            ResponseLimit::Fixed(AUTH_TIMEOUT),
+            false,
         )
     })?;
     let status = response.status().as_u16();
@@ -268,12 +276,15 @@ impl AuthService {
             if tokio::time::Instant::now() + Duration::from_secs(interval) >= deadline {
                 return Err(Error::timeout("Login expired; run voltage login again"));
             }
+            // Polling stops one interval before the deadline, so that is when the login ends.
+            let last_poll = deadline
+                .checked_sub(Duration::from_secs(interval))
+                .unwrap_or(deadline);
             self.terminal
-                .during(
-                    format!(
-                        "Waiting for device approval... {}",
-                        terminal::elapsed(started.elapsed())
-                    ),
+                .expiring(
+                    "Waiting for approval in your browser...",
+                    started,
+                    last_poll,
                     tokio::time::sleep(Duration::from_secs(interval)),
                 )
                 .await;
@@ -683,10 +694,7 @@ pub async fn login(
     }
     let device = auth.device_authorization().await?;
     let verification = device.verification_url()?;
-    terminal.important(format!(
-        "Open {verification}\nConfirm this code: {}",
-        device.user_code
-    ));
+    show_device_code(terminal, verification, &device.user_code);
     if !flags.no_browser && webbrowser::open(verification).is_err() {
         terminal.important("Could not open a browser; open the URL above manually.");
     }
@@ -694,6 +702,9 @@ pub async fn login(
     let login = token.into_login(None, None)?;
     let session = Secret::new(login.refresh_token.expose().to_owned());
     let saved = save_login(settings, &auth, login, flags, global, submission).await;
+    if let Ok(outcome) = &saved {
+        show_logged_in(terminal, outcome);
+    }
     if saved.is_err() {
         // A local storage/discovery failure must not silently orphan a remote session.
         if auth.revoke(&session).await.is_err() {
@@ -704,6 +715,45 @@ pub async fn login(
     }
     submission.session_settled();
     saved
+}
+
+/// Where to approve the login and the code to confirm there. A terminal gets a clickable link
+/// and a bold code; redirected stderr keeps the plain sentences.
+fn show_device_code(terminal: Terminal, verification: &str, code: &str) {
+    if !terminal.decorates() {
+        terminal.important(format!("Open {verification}\nConfirm this code: {code}"));
+        return;
+    }
+    let step = terminal.glyphs().step;
+    terminal.important_line(
+        Line::default()
+            .paint(Role::Hint, step)
+            .text(" Open ")
+            .link(verification),
+    );
+    terminal.important_line(
+        Line::default()
+            .paint(Role::Hint, step)
+            .text(" Confirm this code: ")
+            .styled(Role::Emphasis, code),
+    );
+}
+
+/// On a terminal, a closing line that names who signed in.
+fn show_logged_in(terminal: Terminal, outcome: &LoginOutcome) {
+    if !terminal.decorates() {
+        return;
+    }
+    wordmark::show(terminal);
+    let who = outcome.email.as_deref().unwrap_or(&outcome.account);
+    let mut line = Line::default()
+        .paint(Role::Success, terminal.glyphs().done)
+        .text(" Logged in as ")
+        .styled(Role::Emphasis, who);
+    if who != outcome.account {
+        line = line.text(&format!(" (account: {})", outcome.account));
+    }
+    terminal.notice_line(line);
 }
 
 /// Discover the identity behind a fresh login and save it; a local failure revokes the
@@ -1295,6 +1345,31 @@ mod tests {
         absorb_chunk(&mut body, bytes::Bytes::from(b"tok".to_vec()));
         absorb_chunk(&mut body, bytes::Bytes::from_static(b"en"));
         assert_eq!(&body[..], b"token");
+    }
+
+    #[tokio::test]
+    async fn an_auth_timeout_names_its_fixed_limit_not_timeout_flag() {
+        // The listener takes the connection but never answers. The client's short limit
+        // stands in for AUTH_TIMEOUT, which the message must still name.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let request = client(Duration::from_millis(100))
+            .unwrap()
+            .get(format!("http://{}/", silent.local_addr().unwrap()));
+        let Err(error) = auth_request(request, Terminal::new(true, true)).await else {
+            panic!("a silent auth service must fail");
+        };
+        assert_eq!(error.kind, crate::error::ErrorKind::Transport);
+        assert_eq!(
+            error.message,
+            "Authentication request failed: no response within 30 seconds; no token request was automatically retried"
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some(
+                "Retry. The auth service has a fixed 30-second limit, which --timeout does not change."
+            )
+        );
+        drop(silent);
     }
 
     #[tokio::test]

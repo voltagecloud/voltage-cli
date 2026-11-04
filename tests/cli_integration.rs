@@ -21,9 +21,7 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::sync::Notify;
 use voltage_cli::{
-    config::{
-        self, Account, AccountKind, Config, Credential, CredentialStore, Login, Profile, Settings,
-    },
+    config::{self, Account, AccountKind, Credential, CredentialStore, Login, Profile, Settings},
     registry::{AuthScheme, Method, OPERATIONS, OperationId, ResourceTarget},
     secret::Secret,
 };
@@ -128,6 +126,111 @@ fn human_runtime_errors_have_a_prefix_and_safe_hint() {
     assert!(!error.contains("api_key"));
 }
 
+#[test]
+fn color_follows_the_flag_then_the_environment_and_never_reaches_json() {
+    let dir = private_tempdir();
+    let missing_org = |args: &[&str], env: &[(&str, &str)]| {
+        let mut cmd = Command::from_std(human_process_at(dir.path(), "http://127.0.0.1:9"));
+        let result = cmd
+            .envs(env.iter().copied())
+            .args(args)
+            .args(["wallets", "list"])
+            .assert()
+            .code(2);
+        stderr(&result)
+    };
+    let plain = missing_org(&["--output", "table"], &[]);
+    assert!(plain.starts_with("error: --org is required") && !plain.contains('\u{1b}'));
+    for (args, env, colored) in [
+        (&["--color", "always"][..], &[][..], true),
+        (&[], &[("CLICOLOR_FORCE", "1")], true),
+        // A command-line choice beats the environment either way.
+        (&["--color", "always"], &[("NO_COLOR", "1")], true),
+        (&["--color=never"], &[("CLICOLOR_FORCE", "1")], false),
+        (&["--no-color"], &[("CLICOLOR_FORCE", "1")], false),
+        (&[], &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")], false),
+        (&[], &[("FORCE_COLOR", "1")], true),
+        // FORCE_COLOR=0 beats CLICOLOR_FORCE; NO_COLOR and a flag beat FORCE_COLOR.
+        (&[], &[("FORCE_COLOR", "0"), ("CLICOLOR_FORCE", "1")], false),
+        (&[], &[("FORCE_COLOR", "1"), ("NO_COLOR", "1")], false),
+        (&["--color", "never"], &[("FORCE_COLOR", "1")], false),
+        (&["--color", "auto"], &[], false),
+    ] {
+        let shown = missing_org(&[&["--output", "table"], args].concat(), env);
+        assert_eq!(shown.contains('\u{1b}'), colored, "{args:?} {env:?}");
+        // Color decorates labels; the words are unchanged.
+        assert_eq!(strip_styles(&shown), plain, "{args:?} {env:?}");
+    }
+    // JSON errors are byte-identical whatever color asks for.
+    let json = missing_org(&["--json"], &[]);
+    assert_eq!(
+        missing_org(
+            &["--json", "--color", "always"],
+            &[("CLICOLOR_FORCE", "1"), ("FORCE_COLOR", "3")]
+        ),
+        json
+    );
+    assert!(!json.contains('\u{1b}'));
+}
+
+#[test]
+fn help_and_parse_errors_follow_the_color_choice() {
+    let voltage = || {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("voltage"));
+        cmd.env_remove("NO_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("FORCE_COLOR")
+            .env_remove("COLORTERM")
+            .env("TERM", "xterm");
+        cmd
+    };
+    let help = |args: &[&str]| stdout(&voltage().args(args).arg("--help").assert().success());
+    assert!(!help(&[]).contains('\u{1b}'));
+    let colored = help(&["--color", "always"]);
+    assert!(colored.contains('\u{1b}'));
+    assert_eq!(strip_styles(&colored), help(&[]));
+    // Headers and usage are Voltage orange at the depth the terminal draws, else bold.
+    let help_with = |name: &str, value: &str, args: &[&str]| {
+        stdout(
+            &voltage()
+                .env(name, value)
+                .args(args)
+                .arg("--help")
+                .assert()
+                .success(),
+        )
+    };
+    let truecolor = help_with("COLORTERM", "truecolor", &["--color", "always"]);
+    assert!(
+        truecolor.contains("\u{1b}[1m\u{1b}[38;2;255;80;0mUsage:"),
+        "{truecolor:?}"
+    );
+    let ansi256 = help_with("TERM", "xterm-256color", &["--color", "always"]);
+    assert!(
+        ansi256.contains("\u{1b}[1m\u{1b}[38;5;202mUsage:"),
+        "{ansi256:?}"
+    );
+    assert!(colored.contains("\u{1b}[1mUsage:"), "{colored:?}");
+    // FORCE_COLOR=3 colors redirected help, in 24-bit color.
+    let forced = help_with("FORCE_COLOR", "3", &[]);
+    assert!(forced.contains("\u{1b}[38;2;255;80;0m"), "{forced:?}");
+    let typo = stderr(
+        &voltage()
+            .args(["--color=always", "paymnts"])
+            .assert()
+            .code(2),
+    );
+    assert!(typo.contains('\u{1b}') && strip_styles(&typo).starts_with("error:"));
+    let typo = stderr(
+        &voltage()
+            .args(["paymnts", "--no-color"])
+            .env("CLICOLOR_FORCE", "1")
+            .assert()
+            .code(2),
+    );
+    assert!(!typo.contains('\u{1b}'));
+}
+
 #[cfg(unix)]
 #[test]
 fn completion_output_treats_an_early_closing_pipe_as_success() {
@@ -201,6 +304,12 @@ fn human_process_at(dir: &Path, api_url: &str) -> std::process::Command {
         "VOLTAGE_STREAM_TOKEN",
         "VOLTAGE_CONFIG_DIR",
         "VOLTAGE_EXECUTE",
+        // A developer's color settings must not change the bytes tests compare.
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "FORCE_COLOR",
+        "COLORTERM",
     ] {
         cmd.env_remove(name);
     }
@@ -225,6 +334,23 @@ fn stdout(assertion: &Assert) -> String {
 
 fn stderr(assertion: &Assert) -> String {
     String::from_utf8_lossy(&assertion.get_output().stderr).into_owned()
+}
+
+/// Text without CSI sequences (`ESC [`, parameters, one final byte): the styles color adds
+/// and the line clearing a status line does.
+fn strip_styles(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1b}[") {
+        plain.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let parameters = after
+            .find(|c: char| !(c.is_ascii_digit() || c == ';' || c == '?'))
+            .unwrap_or(after.len());
+        rest = after.get(parameters + 1..).unwrap_or("");
+    }
+    plain.push_str(rest);
+    plain
 }
 
 fn unix_now() -> u64 {
@@ -366,10 +492,7 @@ async fn result_output_treats_an_early_closing_pipe_as_success_without_resubmitt
 }
 
 fn settings_at(dir: &Path) -> Settings {
-    Settings {
-        dir: dir.into(),
-        config: Config::default(),
-    }
+    Settings::open(dir.into()).unwrap()
 }
 
 /// A saved browser login stored in a private file, expired or good for ten minutes.
@@ -429,8 +552,14 @@ fn seeded_api_key(dir: &Path, name: &str, key: &str) -> Settings {
 }
 
 /// The saved login's access and refresh tokens.
+/// The credential saved on disk now. A `Settings` reads each secret once, so a read through
+/// one that read it before a command ran would not see what the command saved.
+fn saved_credential(settings: &Settings, name: &str) -> Option<Credential> {
+    settings_at(&settings.dir).read_credential(name).ok()
+}
+
 fn login_tokens(settings: &Settings, name: &str) -> (String, String) {
-    match settings.read_credential(name).unwrap() {
+    match saved_credential(settings, name).unwrap() {
         Credential::Login(login) => (
             login.access_token.expose().to_owned(),
             login.refresh_token.expose().to_owned(),
@@ -1189,7 +1318,7 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
     assert_eq!(account.kind, AccountKind::ApiKey);
     assert_eq!(account.store, CredentialStore::File);
     assert_eq!(account.organization_id, Some(uuid(ORG)));
-    let Credential::ApiKey(key) = settings.read_credential("staging-key").unwrap() else {
+    let Credential::ApiKey(key) = saved_credential(&settings, "staging-key").unwrap() else {
         panic!("expected an API key");
     };
     assert_eq!(key.expose(), "imported-secret");
@@ -1220,7 +1349,7 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
         .code(2);
     assert_eq!(json_error(&login)["error"]["message"], in_use);
     let settings = Settings::open(dir.path().to_path_buf()).unwrap();
-    let Credential::ApiKey(key) = settings.read_credential("staging-key").unwrap() else {
+    let Credential::ApiKey(key) = saved_credential(&settings, "staging-key").unwrap() else {
         panic!("expected an API key");
     };
     assert_eq!(key.expose(), "imported-secret");
@@ -1345,6 +1474,18 @@ async fn browser_device_login_handles_pending_and_slowdown_without_exposing_toke
     // Pending, then slow-down: the device grant interval is honored, never shortened.
     assert!(begin.elapsed() >= Duration::from_secs(20));
     assert_eq!(json_stdout(&login)["data"]["authenticated"], true);
+    // Redirected stderr keeps the plain lines, with no styles and no closing line.
+    let shown = stderr(&login);
+    assert!(
+        shown.contains(
+            "Open https://app.voltage.cloud/cli/authorize\nConfirm this code: ABCD-EFGH\n"
+        ),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("Logged in") && !shown.contains('\u{1b}'),
+        "{shown}"
+    );
     let combined = format!("{}{}", stdout(&login), stderr(&login));
     for secret in [
         "device-secret",
@@ -1580,12 +1721,12 @@ async fn logout_retains_credentials_on_revocation_failure_and_local_is_explicit(
         .args(["logout", "--account", LOGIN_NAME])
         .assert()
         .code(3);
-    assert!(settings.read_credential(LOGIN_NAME).is_ok());
+    assert!(saved_credential(&settings, LOGIN_NAME).is_some());
     cli(dir.path(), &server)
         .args(["logout", "--account", LOGIN_NAME, "--local"])
         .assert()
         .success();
-    assert!(settings.read_credential(LOGIN_NAME).is_err());
+    assert!(saved_credential(&settings, LOGIN_NAME).is_none());
 }
 
 /// A device login that is approved at once and signs in as `user_id`.
@@ -2227,7 +2368,7 @@ async fn interrupt_during_a_logout_revoke_points_to_a_local_logout() {
             .contains("--local")
     );
     // The saved login is still there for the local logout the hint suggests.
-    assert!(settings.read_credential(LOGIN_NAME).is_ok());
+    assert!(saved_credential(&settings, LOGIN_NAME).is_some());
     server.verify().await;
 }
 
@@ -2554,6 +2695,212 @@ async fn a_described_change_sends_nothing_records_nothing_and_omits_private_valu
     let data = json_stdout(&delete)["data"].clone();
     assert_eq!(data["method"], "DELETE");
     assert_eq!(data["run"]["verify_wallet_environment"], true);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn webhook_test_without_data_sends_the_test_event() {
+    let (server, dir) = fixture().await;
+    let test_path = format!("/organizations/{ORG}/environments/{ENV}/webhooks/{RESOURCE}/test");
+    respond_once(&server, route("POST", test_path), accepted()).await;
+    let sent = cli(dir.path(), &server)
+        .args([
+            "webhooks",
+            "test",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--execute",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&sent)["http_status"], 202);
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["payload"]["type"], "test");
+    assert_eq!(body["payload"]["detail"]["event"], "created");
+    assert!(
+        body["delivery_id"]
+            .as_str()
+            .unwrap()
+            .parse::<uuid::Uuid>()
+            .is_ok()
+    );
+}
+
+#[test]
+fn requests_without_a_response_say_why_and_name_the_next_step() {
+    let dir = private_tempdir();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let closed = format!("http://{closed}");
+    let api_hint =
+        "Check the API URL, your network or proxy, and whether the API service is running.";
+    let cases: [(Vec<&str>, &str, &str); 5] = [
+        (
+            vec!["wallets", "list", "--org", ORG],
+            "HTTP read request failed: could not connect",
+            api_hint,
+        ),
+        (
+            vec!["wallets", "delete", WALLET, "--org", ORG],
+            "HTTP request failed: could not connect; a write may have been submitted. No mutation was retried.",
+            api_hint,
+        ),
+        (
+            vec![
+                "checkout",
+                "events",
+                "watch",
+                "--origin",
+                "https://shop.example.test",
+            ],
+            "Opening the checkout event stream failed: could not connect",
+            api_hint,
+        ),
+        (
+            vec![
+                "convert",
+                "10",
+                "usd",
+                "--to",
+                "btc",
+                "--price-url",
+                &closed,
+            ],
+            "Price request failed: could not connect",
+            "Check the price URL, your network or proxy, and whether the price service is running.",
+        ),
+        (
+            vec!["login", "--no-browser", "--auth-url", &closed],
+            "Authentication request failed: could not connect; no token request was automatically retried",
+            "Check the auth URL, your network or proxy, and whether the auth service is running.",
+        ),
+    ];
+    for (args, message, hint) in cases {
+        let failed = cli_at(dir.path(), &closed)
+            .env("VOLTAGE_STREAM_TOKEN", "private-stream-token")
+            .args(&args)
+            .assert()
+            .code(4);
+        let report = json_error(&failed);
+        assert_eq!(report["error"]["message"], message, "{args:?}");
+        assert_eq!(report["error"]["hint"], hint, "{args:?}");
+        if args[1] == "delete" {
+            // A write keeps its unknown-outcome detail.
+            assert_eq!(report["error"]["detail"]["outcome"], "unknown");
+        }
+    }
+
+    // A server that takes the request and never answers: a write may have been applied, so
+    // its hint says to look the resource up first, never to retry.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_url = format!("http://{}", silent.local_addr().unwrap());
+    let writes: [Vec<&str>; 2] = [
+        vec!["wallets", "delete", WALLET, "--org", ORG],
+        vec![
+            "payments",
+            "send",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wallet",
+            WALLET,
+            "--currency",
+            "btc",
+            "--address",
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+            "--amount",
+            "1000",
+            "--unit",
+            "sats",
+        ],
+    ];
+    for args in writes {
+        let failed = cli_at(dir.path(), &silent_url)
+            .args(["--timeout", "1"])
+            .args(&args)
+            .assert()
+            .code(4);
+        let report = json_error(&failed);
+        let hint = report["error"]["hint"].as_str().unwrap();
+        assert!(
+            hint.starts_with("The change may have been applied. Look up the resource ID before you run the command again"),
+            "{args:?}: {hint}"
+        );
+        assert!(!hint.contains("Retry"), "{args:?}: {hint}");
+        assert!(
+            report["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no response within --timeout"),
+            "{args:?}"
+        );
+        assert_eq!(report["error"]["detail"]["outcome"], "unknown", "{args:?}");
+    }
+    // A read that times out may simply be retried.
+    let read = cli_at(dir.path(), &silent_url)
+        .args(["--timeout", "1", "wallets", "list", "--org", ORG])
+        .assert()
+        .code(4);
+    assert_eq!(
+        json_error(&read)["error"]["hint"],
+        "Retry, or pass a larger --timeout."
+    );
+    drop(silent);
+}
+
+#[tokio::test]
+async fn output_file_refusals_name_the_path_problem_and_send_nothing() {
+    let (server, dir) = fixture().await;
+    let existing = dir.path().join("result.json");
+    std::fs::write(&existing, "kept").unwrap();
+    let delete = ["wallets", "delete", WALLET, "--org", ORG, "--execute"];
+    let refused = cli(dir.path(), &server)
+        .args(delete)
+        .arg("--output-file")
+        .arg(&existing)
+        .assert()
+        .code(2);
+    let error = &json_error(&refused)["error"];
+    assert_eq!(
+        error["message"],
+        format!(
+            "{} already exists; --output-file writes only to a new file",
+            existing.display()
+        )
+    );
+    assert_eq!(
+        error["hint"],
+        "Pass a path that does not exist yet, or move the existing file. No change was sent."
+    );
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "kept");
+
+    // Any other failure keeps its cause and gets the same next step.
+    let missing_dir = dir.path().join("missing").join("result.json");
+    let refused = cli(dir.path(), &server)
+        .args(delete)
+        .arg("--output-file")
+        .arg(&missing_dir)
+        .assert()
+        .code(2);
+    let error = &json_error(&refused)["error"];
+    assert!(
+        error["message"].as_str().unwrap().starts_with(&format!(
+            "Cannot reserve output {}: ",
+            missing_dir.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(
+        error["hint"],
+        "Pass a path in a directory you can write to. No change was sent."
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -3642,6 +3989,54 @@ async fn api_rejections_lead_with_the_reason_and_keep_the_response_for_json() {
     assert_eq!(report["error"]["detail"]["data"], rejection);
 }
 
+#[test]
+fn a_redirected_context_table_is_plain_fields_without_a_card() {
+    let dir = private_tempdir();
+    let result = Command::from_std(human_process_at(dir.path(), "http://127.0.0.1:9"))
+        .args(["context", "--output", "table", "--color", "always"])
+        .assert()
+        .success();
+    let shown = stdout(&result);
+    assert!(strip_styles(&shown).starts_with("account "), "{shown}");
+    assert!(
+        !shown.contains("voltage context") && !shown.contains('╭'),
+        "{shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tables_follow_the_color_choice_on_stdout_and_strip_to_the_plain_table() {
+    let (server, dir) = fixture().await;
+    route("GET", payments_path())
+        .respond_with(ok(json!({"items": [
+            {"id": RESOURCE, "status": "completed", "amount": {"amount": 150000, "currency": "btc"}},
+            {"id": WALLET, "status": "failed", "amount": {"amount": 1500, "currency": "btc"}}
+        ], "has_more": false})))
+        .mount(&server)
+        .await;
+    let list = |color: &str| {
+        let result = Command::from_std(human_process_at(dir.path(), &server.uri()))
+            .args([
+                "payments", "list", "--org", ORG, "--env", ENV, "--output", "table", "--color",
+                color,
+            ])
+            .assert()
+            .success();
+        stdout(&result)
+    };
+    let plain = list("auto");
+    assert!(!plain.contains('\u{1b}'), "{plain}");
+    assert!(
+        plain.contains("150 sats") && plain.contains("1.5 sats"),
+        "{plain}"
+    );
+    let colored = list("always");
+    assert!(colored.contains("\u{1b}[32mcompleted"), "{colored:?}");
+    assert!(colored.contains("\u{1b}[1m\u{1b}[31mfailed"), "{colored:?}");
+    assert_eq!(strip_styles(&colored), plain);
+    assert_eq!(list("never"), plain);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn human_output_fits_the_terminal_and_scrubs_api_text() {
     let (server, dir) = fixture().await;
@@ -3666,7 +4061,7 @@ async fn human_output_fits_the_terminal_and_scrubs_api_text() {
     assert_eq!(
         stdout(&listed),
         format!(
-            "{:<36}  {:<9}  AMOUNT\n{RESOURCE}  completed  150000 msats\n\
+            "{:<36}  {:<9}  AMOUNT\n{RESOURCE}  completed  150 sats\n\
              Hidden columns: created_at. Use a wider terminal or --json for every field.\n\
              1 result.\n",
             "ID", "STATUS"
@@ -3755,6 +4150,166 @@ async fn cursor_pagination_is_the_default_and_carries_filters_across_pages() {
     assert_eq!(pages[1]["data"]["items"][0]["id"], WALLET);
     assert!(!stderr(&result).contains("deprecated"));
     server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payment_check_filter_is_optional_and_survives_cursor_pages() {
+    for value in [None, Some("true"), Some("false")] {
+        let (server, dir) = fixture().await;
+        for cursor in [None, Some("next")] {
+            let mut matcher = route("GET", payments_path())
+                .and(query_param("pagination", "cursor"))
+                .and(query_param("statuses[]", "approved"));
+            matcher = match value {
+                Some(value) => matcher.and(query_param("check_only", value)),
+                None => matcher.and(query_param_is_missing("check_only")),
+            };
+            matcher = match cursor {
+                Some(cursor) => matcher.and(query_param("cursor", cursor)),
+                None => matcher.and(query_param_is_missing("cursor")),
+            };
+            respond_once(
+                &server,
+                matcher,
+                ok(json!({
+                    "items": [], "has_more": cursor.is_none(),
+                    "next_cursor": if cursor.is_none() { Some("next") } else { None }
+                })),
+            )
+            .await;
+        }
+        let mut command = cli(dir.path(), &server);
+        command.args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--statuses",
+            "approved",
+            "--all",
+        ]);
+        if let Some(value) = value {
+            command.args(["--check-only", value]);
+        }
+        command.assert().success();
+        server.verify().await;
+        let before = server.received_requests().await.unwrap().len();
+        cli(dir.path(), &server)
+            .args([
+                "payments",
+                "list",
+                "--org",
+                ORG,
+                "--env",
+                ENV,
+                "--check-only",
+                "invalid",
+            ])
+            .assert()
+            .code(2);
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payment_ledger_omits_event_type_and_rejects_explicit_payment() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route(
+            "GET",
+            format!("/organizations/{ORG}/wallets/{WALLET}/ledger"),
+        )
+        .and(query_param_is_missing("event_type")),
+        ok(json!({"items": [{"id": RESOURCE}], "total": 1})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "ledger", "list", WALLET, "--org", ORG])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["data"]["items"][0]["id"], RESOURCE);
+    server.verify().await;
+    cli(dir.path(), &server)
+        .args([
+            "wallets",
+            "ledger",
+            "list",
+            WALLET,
+            "--org",
+            ORG,
+            "--event-type",
+            "payment",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adjustment_ledger_keeps_filters_when_paging_and_rejects_unknown_event_types() {
+    let (server, dir) = fixture().await;
+    for offset in [None, Some("1")] {
+        let mut matcher = route(
+            "GET",
+            format!("/organizations/{ORG}/wallets/{WALLET}/ledger"),
+        )
+        .and(query_param("event_type", "adjustment"))
+        .and(query_param("start_date", "2026-10-01T00:00:00Z"))
+        .and(query_param("end_date", "2026-10-22T00:00:00Z"))
+        .and(query_param("limit", "1"));
+        matcher = match offset {
+            Some(offset) => matcher.and(query_param("offset", offset)),
+            None => matcher.and(query_param_is_missing("offset")),
+        };
+        respond_once(
+            &server,
+            matcher,
+            ok(json!({
+                "items": [{"id": RESOURCE}], "limit": 1,
+                "offset": if offset.is_none() { 0 } else { 1 }, "total": 2
+            })),
+        )
+        .await;
+    }
+    cli(dir.path(), &server)
+        .args([
+            "wallets",
+            "ledger",
+            "list",
+            WALLET,
+            "--org",
+            ORG,
+            "--event-type",
+            "adjustment",
+            "--start-date",
+            "2026-10-01T00:00:00Z",
+            "--end-date",
+            "2026-10-22T00:00:00Z",
+            "--limit",
+            "1",
+            "--all",
+        ])
+        .assert()
+        .success();
+    server.verify().await;
+    let before = server.received_requests().await.unwrap().len();
+    cli(dir.path(), &server)
+        .args([
+            "wallets",
+            "ledger",
+            "list",
+            WALLET,
+            "--org",
+            ORG,
+            "--event-type",
+            "invented",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4613,7 +5168,13 @@ async fn on_a_terminal_with(
     let observer = controller.try_clone().unwrap();
     let before = local_modes(&observer);
     let mut command = human_process_at(dir, &server.uri());
+    // A UTF-8 color terminal, whatever the test runner's own, so symbols are predictable.
     command
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env_remove("VOLTAGE_SPINNER")
         .env_remove("VOLTAGE_EXECUTE")
         .args(args)
         .stdin(Stdio::from(terminal.try_clone().unwrap()))
@@ -5209,10 +5770,21 @@ async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
     )
     .await;
     assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
     assert!(
-        run.shown
-            .contains("Waiting for the payment to be completed... 0s"),
-        "{}",
+        shown.contains("⠋ Waiting for the payment to be completed... 0s"),
+        "{shown}"
+    );
+    // Each status gets one line, and the wait ends with a symbol; color marks only words.
+    assert!(shown.contains("› sending · 0s"), "{shown}");
+    assert!(
+        shown.contains(&format!("⚡ Payment {RESOURCE} completed · ")),
+        "{shown}"
+    );
+    assert!(!shown.contains("status: sending"), "{shown}");
+    assert!(
+        run.shown.contains("\u{1b}[1m\u{1b}[33m⚡"),
+        "{:?}",
         run.shown
     );
     server.verify().await;
@@ -5220,7 +5792,1057 @@ async fn a_payment_wait_on_a_terminal_shows_how_long_it_has_waited() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn device_approval_on_a_terminal_shows_how_long_it_has_waited() {
+async fn a_submitted_payment_on_a_terminal_reads_as_a_timeline() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": "receiving"})),
+            ok(json!({"id": RESOURCE, "status": "receiving"})),
+            ok(json!({"id": RESOURCE, "status": "completed"})),
+        ]))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let args = receive_args(&["--wallet", WALLET, "--wait", "completed", "--execute"]);
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    let accepted = shown
+        .find(&format!(
+            "› Payment {RESOURCE} accepted; waiting for completed\r\n"
+        ))
+        .expect(&shown);
+    let receiving = shown.find("› receiving · ").expect(&shown);
+    let done = shown
+        .find(&format!("⚡ Payment {RESOURCE} completed · "))
+        .expect(&shown);
+    assert!(accepted < receiving && receiving < done, "{shown}");
+    // An unchanged status is not repeated on a terminal.
+    assert_eq!(shown.matches("› receiving").count(), 1, "{shown}");
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_described_change_on_a_terminal_says_what_it_would_do() {
+    let (server, dir) = fixture().await;
+    let args = [
+        "wallets", "delete", WALLET, "--org", ORG, "--output", "table",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(6), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    let summary = shown
+        .find("! Not sent: this would delete a wallet\r\n")
+        .expect(&shown);
+    assert!(
+        shown[summary..].starts_with(&format!(
+            "! Not sent: this would delete a wallet\r\n  wallet_id  {WALLET}\r\n\r\n"
+        )),
+        "{shown}"
+    );
+    // The details still follow on stdout, and the error line becomes how to send it.
+    assert!(run.stdout.contains("method"), "{}", run.stdout);
+    assert!(
+        shown.ends_with("› Send it: add --execute, or set VOLTAGE_EXECUTE=1\r\n"),
+        "{shown:?}"
+    );
+    assert!(!shown.contains("error:"), "{shown}");
+    assert!(
+        run.shown.contains("\u{1b}[1m\u{1b}[33m!"),
+        "{:?}",
+        run.shown
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // Redirected stderr keeps the error line, and nothing else changes.
+    let piped = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .env_remove("VOLTAGE_EXECUTE")
+        .args(args)
+        .assert()
+        .code(6);
+    let error = stderr(&piped);
+    assert!(error.starts_with("error: Described this change"), "{error}");
+    assert!(!error.contains("Not sent"), "{error}");
+
+    // On a terminal, JSON output gets neither the summary nor the line, only the JSON error.
+    let json = on_a_terminal(
+        dir.path(),
+        &server,
+        &["wallets", "delete", WALLET, "--org", ORG, "--json"],
+        &[],
+    )
+    .await;
+    assert_eq!(json.code, Some(6), "{}", json.shown);
+    assert!(json.shown.contains("\"exit_code\":6"), "{}", json.shown);
+    assert!(
+        !json.shown.contains("Not sent") && !json.shown.contains("Send it"),
+        "{}",
+        json.shown
+    );
+    // `--quiet` hides the summary but keeps how to send it.
+    let quiet = on_a_terminal(
+        dir.path(),
+        &server,
+        &[&args[..], &["--quiet"]].concat(),
+        &[],
+    )
+    .await;
+    assert_eq!(quiet.code, Some(6), "{}", quiet.shown);
+    let shown = strip_styles(&quiet.shown);
+    assert!(!shown.contains("Not sent"), "{shown}");
+    assert!(shown.contains("› Send it: add --execute"), "{shown}");
+}
+
+/// Run a command with stdin, stdout, and stderr all on one pseudo-terminal, as a person
+/// would, and return everything it showed.
+#[cfg(unix)]
+async fn fully_on_a_terminal(dir: &Path, server: &MockServer, args: &[&str]) -> String {
+    let (code, shown) = fully_on_a_terminal_ending(dir, server, args).await;
+    assert_eq!(code, Some(0), "{shown}");
+    shown
+}
+
+/// `fully_on_a_terminal`, for a command that may fail: its exit code and what it showed.
+#[cfg(unix)]
+async fn fully_on_a_terminal_ending(
+    dir: &Path,
+    server: &MockServer,
+    args: &[&str],
+) -> (Option<i32>, String) {
+    use std::io::Read;
+    use std::process::Stdio;
+    let (mut controller, terminal) = open_pty();
+    // A UTF-8 color terminal, whatever the test runner's own, as `on_a_terminal` pins it.
+    let child = human_process_at(dir, &server.uri())
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env_remove("VOLTAGE_SPINNER")
+        .env("COLUMNS", "200")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .spawn()
+        .unwrap();
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut shown = Vec::new();
+        // Linux PTYs return EIO rather than EOF when the terminal end closes.
+        let _ = controller.read_to_end(&mut shown);
+        shown
+    });
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    let shown = strip_styles(&String::from_utf8_lossy(&reader.await.unwrap()));
+    (output.status.code(), shown)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_or_unreadable_price_leaves_the_estimate_out() {
+    let (server, dir) = fixture().await;
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(ok(json!({"id": WALLET, "name": "Treasury", "network": "mainnet",
+            "organization_id": ORG, "environment_id": ENV,
+            "balances": [{"available": {"amount": 150_000_000, "currency": "btc", "unit": "msats"}}]})))
+        .mount(&server)
+        .await;
+    route("GET", "/currency/BTCUSD/now")
+        .respond_with(in_order(vec![
+            ResponseTemplate::new(500),
+            ok(json!({"pair": "BTCUSD", "time": "2026-09-18T17:30:00Z", "price": "not a price"})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    route("GET", payments_path())
+        .respond_with(ok(json!({"items": []})))
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let args = ["wallets", "get", WALLET, "--org", ORG, "--price-url", &uri];
+    for _ in 0..2 {
+        let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+        assert!(
+            shown.contains("Treasury\r\nAvailable 150,000 sats\r\n"),
+            "{shown}"
+        );
+        assert!(!shown.contains('≈'), "{shown}");
+    }
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redirected_wallet_read_makes_no_extra_request() {
+    let (server, dir) = fixture().await;
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(ok(
+            json!({"id": WALLET, "name": "Treasury", "network": "mainnet",
+            "organization_id": ORG, "environment_id": ENV, "balances": []}),
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    route("GET", "/currency/BTCUSD/now")
+        .respond_with(ok(json!({})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    route("GET", payments_path())
+        .respond_with(ok(json!({"items": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let get = ["wallets", "get", WALLET, "--org", ORG, "--price-url", &uri];
+    cli(dir.path(), &server).args(get).assert().success();
+    Command::from_std(human_process_at(dir.path(), &uri))
+        .args(get)
+        .args(["--output", "table"])
+        .assert()
+        .success();
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wallet_on_a_terminal_leads_with_its_balance_and_activity() {
+    let (server, dir) = fixture().await;
+    let wallet = |network: &str| {
+        json!({"id": WALLET, "name": "Treasury", "network": network,
+            "organization_id": ORG, "environment_id": ENV,
+            "balances": [{"available": {"amount": 150_000_000, "currency": "btc", "unit": "msats"}}]})
+    };
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(in_order(vec![ok(wallet("mainnet")), ok(wallet("signet"))]))
+        .mount(&server)
+        .await;
+    respond_once(
+        &server,
+        route("GET", "/currency/BTCUSD/now"),
+        ok(json!({"pair":"BTCUSD","time":"2026-09-18T17:30:00Z","price":"60000"})),
+    )
+    .await;
+    // The activity read asks as `payments list` does: the wallet's completed payments,
+    // newest first, by cursor. The first answers; the second fails, leaving its line out.
+    route("GET", payments_path())
+        .and(query_param("wallet_id", WALLET))
+        .and(query_param("statuses[]", "completed"))
+        .and(query_param("check_only", "false"))
+        .and(query_param("sort_order", "DESC"))
+        .and(query_param("pagination", "cursor"))
+        .and(query_param("limit", "100"))
+        .respond_with(in_order(vec![
+            ok(
+                json!({"items": [{"status": "completed", "created_at": "2020-01-01T00:00:00Z",
+                "data": {"amount": {"amount": 1000, "currency": "btc", "unit": "msats"}}}]}),
+            ),
+            ResponseTemplate::new(500),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let args = ["wallets", "get", WALLET, "--org", ORG, "--price-url", &uri];
+    let mainnet = fully_on_a_terminal(dir.path(), &server, &args).await;
+    assert!(
+        mainnet.contains(
+            "Treasury\r\nAvailable 150,000 sats  ≈ $90.00\r\n\
+             Activity  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁  no completed payments in 14 days\r\n\r\n"
+        ),
+        "{mainnet}"
+    );
+    assert!(mainnet.contains("balances "), "{mainnet}");
+    // A test network gets no USD estimate, and a failed activity read no activity line.
+    let signet = fully_on_a_terminal(dir.path(), &server, &args).await;
+    assert!(
+        signet.contains("Treasury\r\nAvailable 150,000 sats\r\n\r\n"),
+        "{signet}"
+    );
+    assert!(!signet.contains("Activity"), "{signet}");
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_or_networkless_wallet_read_falls_back_to_the_invoice_prefix() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(ok(
+            json!({"id": RESOURCE, "status": "receiving", "wallet_id": WALLET,
+            "data": {"payment_request": EXAMPLE_INVOICE}}),
+        ))
+        .mount(&server)
+        .await;
+    // First the wallet read fails; then it answers without a network.
+    route("GET", format!("{}/{WALLET}", wallets_path(ORG)))
+        .respond_with(in_order(vec![
+            ResponseTemplate::new(404),
+            ok(json!({"id": WALLET})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let args = [
+        "payments", "get", RESOURCE, "--org", ORG, "--env", ENV, "--qr",
+    ];
+    for _ in 0..2 {
+        let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+        assert!(shown.contains("● signet · Scan to pay"), "{shown}");
+    }
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_qr_code_on_a_terminal_is_framed_for_scanning_under_a_caption() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            // `expiration` is the invoice's lifetime in seconds from `created_at`, as in the
+            // contract; this one is far enough off to count down during the test.
+            ok(
+                json!({"id": RESOURCE, "status": "receiving", "created_at": "2026-01-01T00:00:00Z",
+                "data": {
+                    "payment_request": EXAMPLE_INVOICE, "memo": "order 42",
+                    "amount": {"amount": 1_000_000, "currency": "btc", "unit": "msats"},
+                    "expiration": 4_000_000_000_u64
+                }}),
+            ),
+            ok(json!({"id": RESOURCE, "status": "completed"})),
+        ]))
+        .mount(&server)
+        .await;
+    let args = receive_args(&[
+        "--wallet",
+        WALLET,
+        "--amount",
+        "1000",
+        "--unit",
+        "sats",
+        "--qr",
+        "--wait",
+        "completed",
+        "--execute",
+    ]);
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    assert!(
+        // The payment names no wallet, so no wallet is read and the invoice's signet prefix
+        // names the network.
+        shown.contains("● signet · Scan to pay · 1,000 sats · order 42 · expires in "),
+        "{shown}"
+    );
+    // Every code line is black on bright white, and the code has a blank quiet zone row.
+    let code: Vec<&str> = run
+        .shown
+        .lines()
+        .filter(|line| line.contains("\u{1b}[107m"))
+        .collect();
+    assert!(code.len() > 10, "{:?}", run.shown);
+    assert!(
+        code.iter().all(|line| line.contains("\u{1b}[30m")),
+        "{code:?}"
+    );
+    assert!(strip_styles(code[0]).trim().is_empty(), "{:?}", code[0]);
+    // Only the caption's dot takes signet's purple (256 colors on this terminal); the code has
+    // no frame.
+    assert!(run.shown.contains("\u{1b}[38;5;129m●"), "{:?}", run.shown);
+    assert!(!shown.contains('┏'), "{shown}");
+    // The wait counts down to the invoice's expiry.
+    assert!(shown.contains("· expires in "), "{shown}");
+    assert!(!shown.contains("Scan to pay:"), "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settled_payment_ends_with_its_closing_line_below_the_record() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(in_order(vec![
+            ok(json!({"id": RESOURCE, "status": "sending"})),
+            ok(json!({"id": RESOURCE, "status": "completed", "type": "bolt11"})),
+        ]))
+        .mount(&server)
+        .await;
+    let args = [
+        "payments",
+        "get",
+        RESOURCE,
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--wait",
+        "completed",
+    ];
+    let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+    let record = shown.find("type ").expect(&shown);
+    let closing = shown
+        .find(&format!("⚡ Payment {RESOURCE} completed · "))
+        .expect(&shown);
+    assert!(record < closing, "{shown}");
+    // Nothing follows the closing line.
+    assert_eq!(shown[closing..].trim_end().lines().count(), 1, "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_qr_code_for_a_ready_invoice_comes_last_so_it_stays_on_screen() {
+    let (server, dir) = fixture().await;
+    respond_once(&server, route("POST", payments_path()), accepted()).await;
+    route("GET", payment_path())
+        .respond_with(ok(
+            json!({"id": RESOURCE, "status": "receiving", "wallet_id": WALLET,
+            "data": {"payment_request": EXAMPLE_INVOICE}}),
+        ))
+        .mount(&server)
+        .await;
+    // The wallet names the network, which the signet prefix alone cannot.
+    respond_once(
+        &server,
+        route("GET", format!("{}/{WALLET}", wallets_path(ORG))),
+        ok(json!({"id": WALLET, "network": "mutinynet"})),
+    )
+    .await;
+    let args = receive_args(&[
+        "--wallet",
+        WALLET,
+        "--amount",
+        "1000",
+        "--unit",
+        "sats",
+        "--qr",
+        "--execute",
+    ]);
+    let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+    // The result's fields, then how the wait ended, then the caption and code.
+    let fields = shown.find("payment_request").expect(&shown);
+    let ready = shown
+        .find(&format!("✓ Payment {RESOURCE} ready"))
+        .expect(&shown);
+    let caption = shown.find("Scan to pay").expect(&shown);
+    assert!(fields < ready && ready < caption, "{shown}");
+    assert!(!shown[caption..].contains("payment_request"), "{shown}");
+    assert!(shown.contains("● mutinynet · Scan to pay"), "{shown}");
+    server.verify().await;
+}
+
+/// Two reads of a payments list: payment A receiving; then B new and A completed.
+#[cfg(unix)]
+async fn watched_payments(server: &MockServer) {
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    route("GET", payments_path())
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving", "updated_at": "2026-10-20T00:00:00Z"}]})),
+            ok(json!({"items": [
+                {"id": b, "status": "receiving", "updated_at": "2026-10-20T00:00:01Z"},
+                {"id": a, "status": "completed", "updated_at": "2026-10-20T00:00:02Z"}
+            ]})),
+        ]))
+        .mount(server)
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redirected_watch_writes_one_event_per_new_or_changed_payment() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    watched_payments(&server).await;
+    let mut child = process_at(dir.path(), &server.uri())
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let events = tokio::task::spawn_blocking(move || {
+        BufReader::new(stdout)
+            .lines()
+            .take(3)
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .collect::<Vec<_>>()
+    });
+    let events = tokio::time::timeout(Duration::from_secs(10), events)
+        .await
+        .unwrap()
+        .unwrap();
+    let summary: Vec<(String, String, String)> = events
+        .iter()
+        .map(|event| {
+            (
+                event["event"].as_str().unwrap().to_owned(),
+                event["id"].as_str().unwrap().to_owned(),
+                event["data"]["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "snapshot".into(),
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                "receiving".into()
+            ),
+            (
+                "new".into(),
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                "receiving".into()
+            ),
+            (
+                "updated".into(),
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                "completed".into()
+            ),
+        ]
+    );
+    assert!(events.iter().all(|event| event["outcome"] == "event"));
+    interrupt(&child);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Stopped watching payments.\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_retries_a_server_error_and_ends_on_a_client_error() {
+    let (server, dir) = fixture().await;
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    // Every refresh asks for the most recently updated first. A gateway's HTML 502 and a
+    // 429 with `Retry-After` are retried; the change after them still arrives; a 403 ends it.
+    route("GET", payments_path())
+        .and(query_param("sort_key", "updated_at"))
+        .and(query_param("sort_order", "DESC"))
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving"}]})),
+            ResponseTemplate::new(502).set_body_string("<html>Bad Gateway</html>"),
+            ResponseTemplate::new(429).insert_header("Retry-After", "1"),
+            ok(json!({"items": [{"id": a, "status": "completed"}]})),
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"detail": "Forbidden"}})),
+        ]))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .code(3);
+    let statuses: Vec<String> = stdout(&result)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|event| {
+            format!(
+                "{} {}",
+                event["event"].as_str().unwrap(),
+                event["data"]["status"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(statuses, ["snapshot receiving", "updated completed"]);
+    server.verify().await;
+}
+
+/// What a pseudo-terminal has shown so far, and whether it has closed.
+#[cfg(unix)]
+#[derive(Default)]
+struct Shown {
+    bytes: Vec<u8>,
+    closed: bool,
+}
+
+/// A pseudo-terminal's output, read on its own thread as it arrives.
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct Drained {
+    shown: Arc<std::sync::Mutex<Shown>>,
+    changed: Arc<std::sync::Condvar>,
+}
+
+#[cfg(unix)]
+impl Drained {
+    /// Block until `ready` holds for the output so far, the terminal closes, or `limit` passes.
+    fn until(&self, limit: Duration, ready: impl Fn(&str) -> bool) {
+        let guard = self.shown.lock().unwrap();
+        let _ = self
+            .changed
+            .wait_timeout_while(guard, limit, |shown| {
+                !shown.closed && !ready(&String::from_utf8_lossy(&shown.bytes))
+            })
+            .unwrap();
+    }
+
+    /// Everything the terminal showed, once the process has closed it.
+    fn finish(&self) -> String {
+        self.until(Duration::from_secs(10), |_| false);
+        String::from_utf8_lossy(&self.shown.lock().unwrap().bytes).into_owned()
+    }
+}
+
+#[cfg(unix)]
+fn drain(mut controller: std::fs::File) -> Drained {
+    use std::io::Read;
+    let drained = Drained::default();
+    let writer = drained.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        // Linux PTYs return EIO rather than EOF when the terminal end closes.
+        while let Ok(read @ 1..) = controller.read(&mut chunk) {
+            writer
+                .shown
+                .lock()
+                .unwrap()
+                .bytes
+                .extend_from_slice(&chunk[..read]);
+            writer.changed.notify_all();
+        }
+        writer.shown.lock().unwrap().closed = true;
+        writer.changed.notify_all();
+    });
+    drained
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_on_a_saved_login_exchanges_again_when_its_token_expires() {
+    let (server, dir) = fixture().await;
+    let _settings = seeded_login(dir.path(), &server, false);
+    // The first organization token is rejected on the second read; a new exchange follows.
+    organization_exchange(&server, LOGIN_ACCESS, ORG, "org-token-1", 1).await;
+    organization_exchange(&server, LOGIN_ACCESS, ORG, "org-token-2", 1).await;
+    let a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    route("GET", payments_path())
+        .and(header("authorization", "Bearer org-token-1"))
+        .respond_with(in_order(vec![
+            ok(json!({"items": [{"id": a, "status": "receiving"}]})),
+            ResponseTemplate::new(401).set_body_json(json!({"error": {"detail": "expired"}})),
+        ]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    route("GET", payments_path())
+        .and(header("authorization", "Bearer org-token-2"))
+        .respond_with(ok(json!({"items": [{"id": a, "status": "completed"}]})))
+        .mount(&server)
+        .await;
+    let mut child = process_at(dir.path(), &server.uri())
+        .env_remove("VOLTAGE_API_KEY")
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--account",
+            LOGIN_NAME,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let events = tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, BufReader};
+        BufReader::new(stdout)
+            .lines()
+            .take(2)
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .map(|event| {
+                format!(
+                    "{} {}",
+                    event["event"].as_str().unwrap(),
+                    event["data"]["status"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let events = tokio::time::timeout(Duration::from_secs(15), events)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(events, ["snapshot receiving", "updated completed"]);
+    interrupt(&child);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_watch_that_ends_in_an_error_puts_the_screen_back_first() {
+    let (server, dir) = fixture().await;
+    route("GET", payments_path())
+        .respond_with(in_order(vec![
+            ok(json!({"items": []})),
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"detail": "Forbidden"}})),
+        ]))
+        .mount(&server)
+        .await;
+    let args = [
+        "payments",
+        "list",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--watch",
+        "--interval",
+        "1",
+    ];
+    let (controller, terminal) = open_pty();
+    let child = human_process_at(dir.path(), &server.uri())
+        .env("TERM", "xterm-256color")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(terminal))
+        .spawn()
+        .unwrap();
+    let shown = drain(controller);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let raw = shown.finish();
+    let left = raw.find("\u{1b}[?25h\u{1b}[?1049l").expect(&raw);
+    let error = raw.find("error:").expect(&raw);
+    assert!(left < error, "{raw:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_on_a_terminal_is_a_live_table_that_marks_changes() {
+    use std::process::Stdio;
+    let (server, dir) = fixture().await;
+    watched_payments(&server).await;
+    let (controller, terminal) = open_pty();
+    let child = human_process_at(dir.path(), &server.uri())
+        .env("TERM", "xterm-256color")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env("COLUMNS", "200")
+        .args([
+            "payments",
+            "list",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--watch",
+            "--interval",
+            "1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(terminal.try_clone().unwrap()))
+        .stderr(Stdio::from(terminal))
+        .spawn()
+        .unwrap();
+    // Stop once three frames are drawn: the snapshot, B new and A changed, then a quiet one.
+    let shown = drain(controller);
+    let wait = shown.clone();
+    tokio::task::spawn_blocking(move || {
+        wait.until(Duration::from_secs(10), |text| {
+            text.matches("Watching payments").count() >= 3
+        })
+    })
+    .await
+    .unwrap();
+    interrupt(&child);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    let raw = shown.finish();
+    // The alternate screen is entered, then left with the cursor shown again.
+    let entered = raw.find("\u{1b}[?1049h\u{1b}[?25l").expect(&raw);
+    let left = raw.find("\u{1b}[?25h\u{1b}[?1049l").expect(&raw);
+    assert!(entered < left, "{raw:?}");
+    assert!(
+        raw[left..].contains("Stopped watching payments."),
+        "{raw:?}"
+    );
+    let shown = strip_styles(&raw);
+    assert!(
+        shown.contains("Watching payments · every 1s · Ctrl-C to stop"),
+        "{shown}"
+    );
+    // Each refresh is a frame. The snapshot marks nothing; the frame where B first appears
+    // marks B as new and A as changed; later frames, with nothing new, mark nothing.
+    let frames: Vec<&str> = shown.split("Watching payments").skip(1).collect();
+    assert!(!frames[0].contains('●'), "{}", frames[0]);
+    let changed = frames
+        .iter()
+        .position(|frame| frame.contains("bbbbbbbb"))
+        .expect(&shown);
+    assert!(changed > 0, "{shown}");
+    let frame = frames[changed];
+    assert!(
+        frame.contains("● bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        "{frame}"
+    );
+    assert!(
+        frame.contains("● aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "{frame}"
+    );
+    for later in &frames[changed + 1..] {
+        assert!(!later.contains('●'), "{later}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn voltage_without_a_command_greets_on_a_terminal_and_fails_when_piped() {
+    let (server, dir) = fixture().await;
+    // The harness passes only global flags (`--config-dir`, `--api-url`), so no command.
+    let shown = fully_on_a_terminal(dir.path(), &server, &[]).await;
+    assert!(shown.contains("/_  /  |___/"), "{shown}");
+    assert!(
+        shown.contains("✓ Using the API key in VOLTAGE_API_KEY\r\n\r\nTry\r\n"),
+        "{shown}"
+    );
+    assert!(shown.contains("› voltage wallets list\r\n"), "{shown}");
+    assert!(shown.contains("› voltage --help"), "{shown}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+    // Off a terminal it stays a usage error.
+    let piped = Command::from_std(human_process_at(dir.path(), &server.uri()))
+        .assert()
+        .code(2);
+    assert!(stderr(&piped).contains("requires a subcommand"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_list_and_a_new_profile_name_the_next_command_on_a_terminal() {
+    let (server, dir) = fixture().await;
+    route("GET", wallets_path(ORG))
+        .respond_with(in_order(vec![
+            ok(json!({"items": []})),
+            ok(json!({"items": [{"id": WALLET, "name": "Treasury"}]})),
+        ]))
+        .mount(&server)
+        .await;
+    let list = ["wallets", "list", "--org", ORG];
+    let empty = fully_on_a_terminal(dir.path(), &server, &list).await;
+    let hint = empty
+        .find("› Create a wallet: voltage wallets create --help")
+        .expect(&empty);
+    // The hint follows the result.
+    assert!(empty.find("No results.").expect(&empty) < hint, "{empty}");
+    let listed = fully_on_a_terminal(dir.path(), &server, &list).await;
+    assert!(!listed.contains("Create a wallet"), "{listed}");
+    // Redirected stdout never gets a hint, even with stderr on a terminal.
+    let piped = on_a_terminal(
+        dir.path(),
+        &server,
+        &[&list[..], &["--output", "table"]].concat(),
+        &[],
+    )
+    .await;
+    assert!(
+        !strip_styles(&piped.shown).contains("Create a wallet"),
+        "{}",
+        piped.shown
+    );
+
+    let _settings = seeded_login(dir.path(), &server, false);
+    let create = |name: &'static str| {
+        [
+            "profiles",
+            "create",
+            name,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--account",
+            LOGIN_NAME,
+        ]
+    };
+    let created = fully_on_a_terminal(dir.path(), &server, &create("stage")).await;
+    // After the result, and with the configuration directory the command used.
+    let use_it = format!(
+        "› Use it: voltage wallets list --profile stage --config-dir {}",
+        dir.path().display()
+    );
+    let hint = created.find(&use_it).expect(&created);
+    assert!(created.find("created").expect(&created) < hint, "{created}");
+    // `--json` and `--quiet` get no hint.
+    for flag in ["--json", "--quiet"] {
+        let args = [
+            &create(if flag == "--json" { "json" } else { "quiet" })[..],
+            &[flag],
+        ]
+        .concat();
+        let shown = fully_on_a_terminal(dir.path(), &server, &args).await;
+        assert!(!shown.contains("Use it"), "{flag}: {shown}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_greeting_that_cannot_read_its_scope_reports_the_error() {
+    let (server, dir) = fixture().await;
+    let (code, shown) =
+        fully_on_a_terminal_ending(dir.path(), &server, &["--profile", "missing"]).await;
+    assert_eq!(code, Some(2), "{shown}");
+    assert!(
+        shown.contains("error:") && shown.contains("missing"),
+        "{shown}"
+    );
+    assert!(!shown.contains("Try"), "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_payment_on_a_terminal_ends_with_a_cross_before_the_error() {
+    let (server, dir) = fixture().await;
+    route("GET", payment_path())
+        .respond_with(ok(json!({"id": RESOURCE, "status": "failed"})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let args = [
+        "payments",
+        "get",
+        RESOURCE,
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--wait",
+        "completed",
+        "--color",
+        "never",
+        "--output",
+        "table",
+    ];
+    // `--quiet` hides the closing line; the error, which names the payment, remains.
+    let quiet = on_a_terminal(
+        dir.path(),
+        &server,
+        &[&args[..], &["--quiet"]].concat(),
+        &[],
+    )
+    .await;
+    assert_eq!(quiet.code, Some(1), "{}", quiet.shown);
+    assert!(!quiet.shown.contains("✗ Payment"), "{}", quiet.shown);
+    assert!(
+        quiet.shown.contains("error: Payment reached"),
+        "{}",
+        quiet.shown
+    );
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(1), "{}", run.shown);
+    // Without color, only the status line's own clearing codes remain.
+    let shown = run.shown.replace("\r\u{1b}[2K", "");
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
+    // The closing line reports a final status, so it gets no step line of its own.
+    assert!(!shown.contains("› failed"), "{shown}");
+    let failed = shown
+        .find(&format!("✗ Payment {RESOURCE} failed · 0s"))
+        .expect(&shown);
+    assert!(
+        shown[failed..].contains("error: Payment reached"),
+        "{shown}"
+    );
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quiet_login_on_a_terminal_still_shows_the_code_but_no_closing_line() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/device_authorization"),
+        ok(json!({
+            "device_code":"device-secret","user_code":"ABCD-EFGH",
+            "verification_uri":"https://app.voltage.cloud/cli/authorize","expires_in":60,"interval":5
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("POST", "/oauth/token"),
+        ok(json!({
+            "access_token":"login-access-secret","refresh_token":"login-refresh-secret",
+            "token_type":"Bearer","expires_in":600
+        })),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", "/users/current"),
+        ok(json!({"id":RESOURCE,"email":LOGIN_EMAIL})),
+    )
+    .await;
+    let uri = server.uri();
+    let args = [
+        "login",
+        "--auth-url",
+        &uri,
+        "--no-browser",
+        "--account",
+        LOGIN_NAME,
+        "--credential-store",
+        "file",
+        "--quiet",
+    ];
+    let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    // The URL and code are needed to finish, so `--quiet` keeps them; the closing line goes.
+    assert!(shown.contains("› Confirm this code: ABCD-EFGH"), "{shown}");
+    assert!(!shown.contains("Logged in"), "{shown}");
+    assert!(!shown.contains("Waiting for approval"), "{shown}");
+    server.verify().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn device_approval_on_a_terminal_links_the_url_and_counts_down() {
     let (server, dir) = fixture().await;
     respond_once(
         &server,
@@ -5259,9 +6881,34 @@ async fn device_approval_on_a_terminal_shows_how_long_it_has_waited() {
     ];
     let run = on_a_terminal(dir.path(), &server, &args, &[]).await;
     assert_eq!(run.code, Some(0), "{}", run.shown);
+    let shown = strip_styles(&run.shown);
+    // The link's text is the whole URL it opens.
+    let url = "https://app.voltage.cloud/cli/authorize";
+    let link = format!("\u{1b}]8;;{url}\u{1b}\\{url}\u{1b}]8;;\u{1b}\\");
+    assert!(shown.contains(&format!("› Open {link}\r\n")), "{shown:?}");
     assert!(
-        run.shown.contains("Waiting for device approval... 0s"),
-        "{}",
+        shown.contains("› Confirm this code: ABCD-EFGH\r\n"),
+        "{shown:?}"
+    );
+    assert!(run.shown.contains("\u{1b}[1mABCD-EFGH"), "{:?}", run.shown);
+    assert!(
+        shown.contains("Waiting for approval in your browser... 0s · expires in "),
+        "{shown}"
+    );
+    // The bolt and wordmark, in yellow and the brand color, lead the closing line.
+    let wordmark =
+        " /_  /  |___/\\___/_/\\__/\\_,_/\\_, /\\__/\r\n   //                       /___/\r\n\r\n";
+    assert!(
+        shown.contains(&format!(
+            "{wordmark}✓ Logged in as {LOGIN_EMAIL} (account: {LOGIN_NAME})"
+        )),
+        "{shown}"
+    );
+    assert!(
+        run.shown.contains(
+            "\u{1b}[1m\u{1b}[33m    __  \u{1b}[0m\u{1b}[1m\u{1b}[38;5;202m            ____\u{1b}[0m"
+        ),
+        "{:?}",
         run.shown
     );
     server.verify().await;

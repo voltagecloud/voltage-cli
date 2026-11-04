@@ -10,11 +10,12 @@ use crate::{
     },
     config::{self, Profile, Scope, Settings},
     context,
-    error::CredentialSources,
-    output::{Envelope, Output, OutputFormat, report_error, write_stdout},
+    error::{CredentialSources, ErrorKind},
+    greeting,
+    output::{Envelope, NextStep, Output, OutputFormat, report_error, write_stdout},
     pick,
     price::{PRICE_URL, PriceService},
-    terminal::Terminal,
+    style::ColorChoice,
     wallet_currency, wallet_shortlist,
 };
 use serde::Serialize;
@@ -24,11 +25,21 @@ const BINARY_NAME: &str = "voltage";
 
 pub async fn run() -> ExitCode {
     let json_errors = cli::json_errors_requested(std::env::args_os());
-    let invocation = match Invocation::from_env() {
+    let color = ColorChoice::requested(std::env::args_os())
+        .with_environment(|name| std::env::var(name).ok());
+    if let Some(global) = greeting::wanted(&std::env::args_os().collect::<Vec<_>>()) {
+        return match greeting::show(&global) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error, OutputFormat::Table, color),
+        };
+    }
+    let invocation = match Invocation::from_env(color) {
         Ok(invocation) => invocation,
-        Err(failure) => return fail_parse(failure, json_errors),
+        Err(failure) => return fail_parse(failure, json_errors, color),
     };
     let format = invocation.global.output_format();
+    let color = invocation.global.color();
+    let quiet = invocation.global.quiet;
     let submission = SubmissionState::default();
     // Biased, with the interrupt first: tokio installs the SIGINT handler when `ctrl_c` is
     // first polled. Polled second, a command that reaches a prompt without awaiting would leave
@@ -52,15 +63,24 @@ pub async fn run() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.is_stdout_closed() => ExitCode::SUCCESS,
-        Err(error) => fail(error, format),
+        // Ctrl-C is how a watch ends; it keeps the interrupt's exit code without an error.
+        Err(error) if error.kind == ErrorKind::Interrupted && submission.is_watching() => {
+            if !quiet {
+                eprintln!("Stopped watching payments.");
+            }
+            process_exit(error.kind.exit_code())
+        }
+        Err(error) => fail(error, format, color),
     }
 }
 
-fn fail_parse(failure: ParseFailure, json_errors: bool) -> ExitCode {
+fn fail_parse(failure: ParseFailure, json_errors: bool, color: ColorChoice) -> ExitCode {
     match failure {
-        ParseFailure::Validation(error) => fail(error, OutputFormat::select(json_errors, None)),
+        ParseFailure::Validation(error) => {
+            fail(error, OutputFormat::select(json_errors, None), color)
+        }
         ParseFailure::Clap(error) if error.use_stderr() && json_errors => {
-            fail(Error::usage(error.to_string()), OutputFormat::Json)
+            fail(Error::usage(error.to_string()), OutputFormat::Json, color)
         }
         ParseFailure::Clap(error) => {
             let writes_stdout = !error.use_stderr();
@@ -70,14 +90,14 @@ fn fail_parse(failure: ParseFailure, json_errors: bool) -> ExitCode {
                 Err(io) if writes_stdout && io.kind() == std::io::ErrorKind::BrokenPipe => {
                     ExitCode::SUCCESS
                 }
-                Err(io) => fail(io.into(), OutputFormat::select(false, None)),
+                Err(io) => fail(io.into(), OutputFormat::select(false, None), color),
             }
         }
     }
 }
 
-fn fail(error: Error, format: OutputFormat) -> ExitCode {
-    report_error(&error, format);
+fn fail(error: Error, format: OutputFormat, color: ColorChoice) -> ExitCode {
+    report_error(&error, format, color);
     process_exit(error.kind.exit_code())
 }
 
@@ -102,6 +122,8 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
             global.output_format(),
             global.show_secrets,
             global.output_file.as_deref().filter(|_| reserve),
+            global.color(),
+            global.quiet,
         )
     };
     // Price commands need neither configuration nor credentials.
@@ -206,7 +228,8 @@ impl<'a> Session<'a> {
             ),
             LocalCommand::Auth {
                 command: AuthCommand::Status,
-            } => Envelope::local(auth::status(&self.settings, scope, global)?),
+            } => Envelope::local(auth::status(&self.settings, scope, global)?)
+                .map(|status| status.titled("voltage auth status")),
             LocalCommand::Auth {
                 command: AuthCommand::ImportKey(flags),
             } => {
@@ -222,9 +245,10 @@ impl<'a> Session<'a> {
                     .discover(scope, Discovery::Environments)
                     .await?,
             ),
-            LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?),
+            LocalCommand::Context => Envelope::settings(context::inspect(&self.settings, global)?)
+                .map(|context| context.titled("voltage context")),
             LocalCommand::Profiles { command } => {
-                profiles(command, &mut self.settings, scope, global.terminal()).await
+                profiles(command, &mut self.settings, scope, global).await
             }
             LocalCommand::Completions { .. }
             | LocalCommand::Price(_)
@@ -298,8 +322,9 @@ async fn profiles(
     command: ProfileCommand,
     settings: &mut Settings,
     scope: &Scope,
-    terminal: Terminal,
+    global: &GlobalFlags,
 ) -> Result<Envelope> {
+    let terminal = global.terminal();
     if let ProfileCommand::Create { name } = command {
         settings
             .create_profile(&name, terminal, |settings| {
@@ -310,9 +335,31 @@ async fn profiles(
                 })
             })
             .await?;
-        return Envelope::local(ProfileCreated {
+        // A command that uses the new profile, with the same configuration directory.
+        let config_dir = global
+            .config_dir
+            .as_ref()
+            .map(|dir| {
+                format!(
+                    " --config-dir {}",
+                    config::shell_word(&dir.to_string_lossy())
+                )
+            })
+            .unwrap_or_default();
+        let next = NextStep {
+            what: "Use it",
+            command: format!(
+                "voltage wallets list --profile {}{config_dir}",
+                config::shell_word(&name)
+            ),
+        };
+        let created = Envelope::local(ProfileCreated {
             profile: name,
             created: true,
+        })?;
+        return Ok(Envelope {
+            next: Some(next),
+            ..created
         });
     }
     let _lock = settings.lock(terminal).await?;

@@ -18,7 +18,7 @@ Authentication or authorization failed. See [HTTP 401](#http-401) and [HTTP 403]
 
 ### Exit code 4
 
-The connection failed. For a payment or treasury movement, the request may have been sent: the error reports the ID, and the CLI never resubmits it. Read it with `voltage payments get PAYMENT_ID` before you decide to retry. See [payment IDs](../concepts/safety-model.md#payment-ids-and-the-request-journal).
+The request got no response. The message says why: no response within `--timeout` (for the auth service, within its fixed 30 seconds, which `--timeout` does not change), no connection within 10 seconds (an unreachable host or a firewall; `--timeout` does not change this limit), a failed TLS connection (often a certificate this system does not trust, or a proxy that inspects TLS), a connection that could not be made (DNS, a refused port, or a proxy), or a connection that closed early. The hint names the next step. A read can simply be retried, but a change that timed out or whose connection closed early may have been applied, so the hint says to look up its resource ID first: a rerun can repeat the change. For a payment or treasury movement, the request may have been sent: the error reports the ID, and the CLI never resubmits it. Read it with `voltage payments get PAYMENT_ID` before you decide to retry. See [payment IDs](../concepts/safety-model.md#payment-ids-and-the-request-journal).
 
 ### Exit code 5
 

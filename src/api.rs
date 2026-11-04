@@ -9,21 +9,25 @@ use crate::{
     Error, Result,
     auth::{self, ApiCredential, Resolver},
     backoff::{Backoff, POLL_CEILING},
+    balance,
     cli::{ApiInvocation, GlobalFlags, Origin, Requested},
     config::{
         API_URL, EXECUTE_VARIABLE, Scope, Settings, Source, new_private, private_dir, read_private,
         read_secret, shell_word,
     },
     dry_run,
-    error::{CredentialSources, ErrorDetail, ErrorKind},
+    error::{CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     input::{PaginationMode, Request},
-    output::{Envelope, Outcome, Output},
-    payment::{
-        Currency, PaymentDirection, PaymentView, ReceiveKind, StatusText, WaitProgress, WaitTarget,
-    },
+    output::{Envelope, LiveScreen, NextStep, Outcome, Output},
+    payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
+    price::{PRICE_URL, PriceService, UsdPerBtc},
+    qr,
     registry::{AuthScheme, Method, Operation, OperationId, operation},
     secret::Secret,
+    style::{Depth, Line, Role},
     terminal::{self, Terminal},
+    timeline::Timeline,
+    watch,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -32,8 +36,11 @@ use std::{
     borrow::Cow,
     collections::BTreeSet,
     io::Write,
-    sync::{Mutex, OnceLock, PoisonError},
-    time::Duration,
+    sync::{
+        Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -49,8 +56,6 @@ const READY_POLL_START: Duration = Duration::from_millis(100);
 const COMPLETION_POLL_START: Duration = Duration::from_millis(250);
 /// A checkout session projection usually appears within this long.
 const SESSION_POLL_START: Duration = Duration::from_millis(100);
-/// Waits repeat their status notice at least this often.
-const STATUS_NOTICE_INTERVAL: Duration = Duration::from_secs(15);
 /// The one read that reconciles an interrupted payment submission.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 const JOURNAL_DIR: &str = "requests";
@@ -245,12 +250,26 @@ impl Api {
             .request(method.into(), path, query, body)
             .send()
             .await
-            .map_err(|_| {
-                Error::transport(if read_only {
-                    "HTTP read request failed. Check the API URL and whether the API service is running."
+            .map_err(|error| {
+                if read_only {
+                    Error::no_response(
+                        &error,
+                        "HTTP read request",
+                        "",
+                        "API",
+                        ResponseLimit::Timeout,
+                        false,
+                    )
                 } else {
-                    "HTTP request failed; a write may have been submitted. No mutation was retried."
-                })
+                    Error::no_response(
+                        &error,
+                        "HTTP request",
+                        "; a write may have been submitted. No mutation was retried.",
+                        "API",
+                        ResponseLimit::Timeout,
+                        true,
+                    )
+                }
             })?;
         let status = response.status().as_u16();
         let retry_after = retry_after(response.headers());
@@ -275,6 +294,8 @@ impl Api {
                     ErrorKind::for_http_status(status)
                 };
                 Error {
+                    response_status: Some(status),
+                    retry_after,
                     hint: self.authorization.rejection_hint(status),
                     // Only the sources are attached: an HTTP detail would make an HTML 404
                     // read as a missing resource.
@@ -307,6 +328,7 @@ impl Api {
             if let Some(hint) = hint.or_else(|| rejection.hint().map(Cow::Borrowed)) {
                 error = error.with_hint(hint);
             }
+            error.retry_after = retry_after;
             return Err(error
                 .with_detail(ErrorDetail::Http {
                     http_status: status,
@@ -336,7 +358,16 @@ impl Api {
                     .send(),
             )
             .await
-            .map_err(|_| Error::transport("Could not open checkout event stream"))?;
+            .map_err(|error| {
+                Error::no_response(
+                    &error,
+                    "Opening the checkout event stream",
+                    "",
+                    "API",
+                    ResponseLimit::Timeout,
+                    false,
+                )
+            })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             return Err(Error::new(
@@ -580,7 +611,12 @@ pub async fn execute(
     let run = Run::plan(invocation, &request, scope);
     match execution {
         Execution::DescribeChange => {
-            out.write(dry_run::describe(invocation, global, &request, run)?, &[])?;
+            let described = dry_run::describe(invocation, global, &request, run)?;
+            let terminal = global.terminal();
+            if out.is_human() && terminal.decorates() {
+                dry_run::announce(terminal, invocation, &described);
+            }
+            out.write(described, &[])?;
             return Err(Error::new(
                 ErrorKind::NotExecuted,
                 format!(
@@ -605,6 +641,8 @@ pub async fn execute(
     }
     let call = Call {
         api,
+        global,
+        resolver,
         invocation,
         scope,
         deadline: Instant::now() + global.timeout,
@@ -613,7 +651,12 @@ pub async fn execute(
     };
     match run {
         Run::EventStream => call.api.stream(&call.request, call.out).await,
-        Run::Read(read) => call.read(read).await,
+        Run::Read(read) => {
+            if matches!(read.then, ReadThen::Watch { .. }) {
+                resolver.submission.watching();
+            }
+            call.read(read).await
+        }
         Run::Mutation(mutation) => {
             call.mutate(mutation, resolver.settings, resolver.submission)
                 .await
@@ -655,7 +698,7 @@ pub async fn organization_wallets(
     let request = Request::build(invocation, &scope, None)?;
     let credential = ApiCredential::OrganizationToken(token);
     let mut api = Api::new(global, None, Authorization::Account(credential, None))?;
-    api.terminal = Terminal::new(true, global.no_input);
+    api.terminal = global.terminal().quieted();
     Ok(api
         .send(Method::Get, &request.path, &request.query, None)
         .await?
@@ -774,6 +817,8 @@ pub struct Read {
 pub enum ReadThen {
     /// Write the response, then follow further pages when `follow` (`--all`) is set.
     Pages { follow: bool },
+    /// `payments list --watch`: read again every `interval_seconds` until interrupted.
+    Watch { interval_seconds: u64 },
     /// A checkout session read answers 202 until its projection exists.
     SessionProjection,
     /// Poll the payment until `until`. A submitted payment can be missing from the read
@@ -795,6 +840,9 @@ impl Read {
                     && invocation.wait.is_some(),
             },
             None if operation.id == OperationId::GetSession => ReadThen::SessionProjection,
+            None if let Some(interval) = invocation.watch => ReadThen::Watch {
+                interval_seconds: interval.as_secs(),
+            },
             None => ReadThen::Pages {
                 follow: invocation.all,
             },
@@ -837,6 +885,9 @@ impl Mutation {
 /// method, so the request and output are not handed from step to step.
 struct Call<'a> {
     api: Api,
+    global: &'a GlobalFlags,
+    /// How the credential was chosen, to choose it again when a watch outlives it.
+    resolver: Resolver<'a>,
     invocation: &'a ApiInvocation,
     scope: &'a Scope,
     deadline: Instant,
@@ -847,6 +898,9 @@ struct Call<'a> {
 impl Call<'_> {
     async fn read(mut self, read: Read) -> Result<()> {
         let operation = self.invocation.operation;
+        if matches!(read.then, ReadThen::Watch { .. }) {
+            watch::follow_updates(&mut self.request.query);
+        }
         let sent = self
             .api
             .send(
@@ -880,10 +934,155 @@ impl Call<'_> {
                 let response = self.await_session_projection(response).await?;
                 self.write_pages(response, Outcome::Retrieved, false).await
             }
+            ReadThen::Watch { interval_seconds } => {
+                self.watch(response, Duration::from_secs(interval_seconds))
+                    .await
+            }
             ReadThen::Pages { follow } => {
-                self.write_pages(response, Outcome::Retrieved, follow).await
+                if operation.id == OperationId::GetWallet && self.out.on_terminal() {
+                    self.lead_with_balance(&response.body).await?;
+                }
+                let empty = watch::items(&response.body).is_empty();
+                self.write_pages(response, Outcome::Retrieved, follow)
+                    .await?;
+                // Only an unfiltered list is empty because nothing was made yet.
+                let unfiltered =
+                    self.invocation.filters.is_empty() && self.invocation.query.is_empty();
+                if let Some((what, command)) =
+                    empty_list_next_step(operation.id).filter(|_| empty && unfiltered)
+                {
+                    self.out.suggest(&NextStep {
+                        what,
+                        command: command.into(),
+                    });
+                }
+                Ok(())
             }
         }
+    }
+
+    /// `payments list --watch`: read the list again every `interval` until interrupted, most
+    /// recently updated first. An interactive stdout gets a live table on the alternate
+    /// screen that marks payments new or changed since the last read; other output gets one
+    /// event envelope per payment, `snapshot` for the first read, then `new` or `updated`.
+    /// A refresh the server could not serve (a 5xx, a 429, or a transport failure) is retried
+    /// after its `Retry-After`, or after a growing pause; a rejected credential (401) is
+    /// resolved again once, since a saved login's organization token is short-lived; any
+    /// other failure ends the watch.
+    async fn watch(&mut self, mut response: Response, interval: Duration) -> Result<()> {
+        // Each read would otherwise draw a status line over the table.
+        self.api.terminal = self.api.terminal.quieted();
+        let live = self.out.on_terminal();
+        let _screen = live.then(LiveScreen::enter);
+        let mut seen = watch::Seen::default();
+        let mut failure = None;
+        let mut backoff = Backoff::new(interval, watch::BACKOFF_CEILING);
+        let mut pause = response.retry_after.unwrap_or(interval);
+        let mut reauthorized = false;
+        loop {
+            let changes = seen.update(&response.body);
+            if live {
+                let marked: Vec<String> = changes
+                    .iter()
+                    .filter(|(_, _, change)| *change != watch::Change::Snapshot)
+                    .map(|(id, _, _)| id.clone())
+                    .collect();
+                let header = watch_header(interval, failure.as_ref(), self.api.terminal);
+                self.out.live_frame(&header, &response.body, &marked)?;
+            } else {
+                for (id, payment, change) in changes {
+                    let event = Envelope::event(payment, change.as_str().into(), Some(id));
+                    self.out.write(event, &self.api.secrets())?;
+                }
+            }
+            tokio::time::sleep(pause).await;
+            let operation = self.invocation.operation;
+            let sent = self
+                .api
+                .send(
+                    operation.method,
+                    &self.request.path,
+                    &self.request.query,
+                    None,
+                )
+                .await;
+            match sent {
+                Ok(next) => {
+                    pause = next.retry_after.unwrap_or(interval);
+                    response = next;
+                    failure = None;
+                    reauthorized = false;
+                    backoff = Backoff::new(interval, watch::BACKOFF_CEILING);
+                }
+                Err(error) if error.response_status() == Some(401) && !reauthorized => {
+                    self.api.authorization =
+                        Authorization::resolve(self.invocation, self.resolver, self.scope).await?;
+                    reauthorized = true;
+                    pause = Duration::ZERO;
+                }
+                Err(error) if watch::retries(&error) => {
+                    pause = error.retry_after.unwrap_or_else(|| backoff.pause());
+                    failure = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// On a terminal, put the wallet's balance and recent activity above its fields. The
+    /// price and payments reads are best effort: a failure leaves its line out.
+    async fn lead_with_balance(&self, wallet: &Value) -> Result<()> {
+        let mut headline = balance::Headline::from_wallet(wallet);
+        if headline.priceable.is_some() {
+            let base = self.global.price_url.as_deref().unwrap_or(PRICE_URL);
+            if let Ok(service) =
+                PriceService::new(base, balance::READ_LIMIT.min(self.global.timeout))
+                && let Ok(quote) = self
+                    .api
+                    .terminal
+                    .during("Reading the BTC price...", service.quote(None))
+                    .await
+                && let Ok(rate) = UsdPerBtc::parse(&quote.price)
+            {
+                headline.price(rate);
+            }
+        }
+        // The wallet's completed payments, newest first, as `payments list` would ask.
+        let uuid = |name: &str| wallet.get(name)?.as_str()?.parse::<Uuid>().ok();
+        let scope = Scope {
+            org: uuid("organization_id"),
+            envs: uuid("environment_id").into_iter().collect(),
+            wallet: uuid("id"),
+            ..Scope::default()
+        };
+        if scope.wallet.is_some()
+            && let Ok(mut request) = Request::scoped(operation(OperationId::GetPayments), &scope)
+        {
+            request.query.extend(
+                [
+                    ("statuses[]", "completed"),
+                    // Payment checks are not payments, so they add no volume.
+                    ("check_only", "false"),
+                    ("sort_order", "DESC"),
+                    ("limit", balance::ACTIVITY_LIMIT),
+                ]
+                .map(|(name, value)| (name.to_owned(), value.to_owned())),
+            );
+            let read = self
+                .api
+                .send(Method::Get, &request.path, &request.query, None);
+            if let Ok(Ok(page)) = tokio::time::timeout(balance::READ_LIMIT, read).await {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |since| {
+                        i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+                    });
+                headline.activity = Some(balance::activity(&page.body, now, &headline.currency));
+            }
+        }
+        let glyphs = self.api.terminal.glyphs();
+        let depth = Depth::detect(|name| std::env::var(name).ok());
+        self.out.preface(&headline.lines(glyphs, depth))
     }
 
     /// Verify and journal, then send the mutation exactly once. A transport
@@ -1143,6 +1342,8 @@ pub struct SubmissionState {
     /// The saved login whose profile offer is under way. Kept apart from `session`: the
     /// offer's own refresh or token exchange sets and settles a session change of its own.
     profile_offer: Mutex<Option<String>>,
+    /// `payments list --watch` is running, so Ctrl-C is how it ends rather than a cut-off.
+    watching: AtomicBool,
 }
 
 /// A login change that the server and the saved credentials can disagree about.
@@ -1181,6 +1382,16 @@ impl SubmissionState {
 
     pub(crate) fn session_settled(&self) {
         *self.session.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// Marks a watch, which only reads and ends with Ctrl-C.
+    fn watching(&self) {
+        self.watching.store(true, Ordering::Relaxed);
+    }
+
+    /// A watch was running, so Ctrl-C is how it ended rather than a failure to report.
+    pub fn is_watching(&self) -> bool {
+        self.watching.load(Ordering::Relaxed)
     }
 
     /// Marks the profile offer after a login, which is saved by then, as under way or done.
@@ -1290,10 +1501,8 @@ impl Call<'_> {
             scope.single_env()?
         );
         let target = until.as_str();
-        if invocation.operation.method != Method::Get {
-            api.terminal
-                .important(format!("Payment {id} accepted; waiting for {target}."));
-        }
+        let accepted = invocation.operation.method != Method::Get;
+        let mut timeline = Timeline::start(api.terminal, id, target, accepted);
         let mut backoff = Backoff::new(
             match until {
                 WaitTarget::Ready => READY_POLL_START,
@@ -1303,27 +1512,21 @@ impl Call<'_> {
         );
         let mut pause = backoff.pause();
         let mut invoice_presented = false;
-        let mut last_status: Option<StatusText> = None;
-        let mut last_notice = Instant::now() - STATUS_NOTICE_INTERVAL;
-        let started = Instant::now();
         loop {
             let view = PaymentView::from_body(&response.body);
-            if let Some(status) = &view.status
-                && (Some(status) != last_status.as_ref()
-                    || last_notice.elapsed() >= STATUS_NOTICE_INTERVAL)
-            {
-                api.terminal.notice(format!(
-                    "Payment {id} status: {}; waiting for {target}.",
-                    status.as_str()
-                ));
-                last_status = Some(status.clone());
-                last_notice = Instant::now();
+            if let Some(status) = &view.status {
+                timeline.status(status);
             }
+            // Waiting on to settlement needs the invoice now; a wait that ends at `ready` shows
+            // it after the result, so the code is what stays on screen.
             if invocation.presents_invoice()
+                && until == WaitTarget::Completed
                 && !invoice_presented
                 && let Some(invoice) = view.invoice()
             {
-                present_invoice(invoice, invocation, api.terminal)?;
+                let network = self.wallet_network(&view).await;
+                present_invoice(invoice, &view, network.as_deref(), invocation, api.terminal)?;
+                timeline.expires_at(view.expires_at());
                 invoice_presented = true;
                 if until == WaitTarget::Completed {
                     api.terminal
@@ -1332,23 +1535,42 @@ impl Call<'_> {
             }
             match view.progress(until) {
                 WaitProgress::Unsuccessful => {
+                    timeline.unsuccessful(view.status.as_ref());
                     return Err(Error::api("Payment reached an unsuccessful terminal state")
                         .with_detail(ErrorDetail::Payment(response.body))
                         .redacted(&api.secrets()));
                 }
                 WaitProgress::Reached(outcome) => {
-                    if invocation.presents_invoice() && !invoice_presented {
-                        present_invoice(
-                            view.invoice().ok_or_else(|| {
+                    let invoice = (invocation.presents_invoice() && !invoice_presented)
+                        .then(|| {
+                            view.invoice().map(str::to_owned).ok_or_else(|| {
                                 Error::usage("The ready payment does not contain a BOLT11 invoice")
-                            })?,
-                            invocation,
-                            api.terminal,
-                        )?;
+                            })
+                        })
+                        .transpose()?;
+                    // An invoice that cannot be drawn fails before the record is written.
+                    if let Some(invoice) = &invoice
+                        && invocation.qr
+                    {
+                        qr::check(invoice)?;
                     }
-                    return self.out.write(
+                    // The record first, then how the wait ended, so the outcome is what
+                    // stays on screen; a ready invoice's code follows it.
+                    self.out.write(
                         Envelope::new(Some(response.status), response.body, Some(id), outcome),
                         &api.secrets(),
+                    )?;
+                    timeline.reached(outcome);
+                    let Some(invoice) = invoice else {
+                        return Ok(());
+                    };
+                    let network = self.wallet_network(&view).await;
+                    return present_invoice(
+                        &invoice,
+                        &view,
+                        network.as_deref(),
+                        invocation,
+                        api.terminal,
                     );
                 }
                 WaitProgress::Pending => {}
@@ -1359,12 +1581,9 @@ impl Call<'_> {
                 ))
                 .with_detail(ErrorDetail::pending(id)));
             }
-            api.terminal
-                .during(
-                    format!(
-                        "Waiting for the payment to be {target}... {}",
-                        terminal::elapsed(started.elapsed())
-                    ),
+            timeline
+                .pause(
+                    format!("Waiting for the payment to be {target}..."),
                     tokio::time::sleep(pause),
                 )
                 .await;
@@ -1384,8 +1603,71 @@ impl Call<'_> {
     }
 }
 
+impl Call<'_> {
+    /// The payment's wallet network, which colors a QR code on a terminal. Mutinynet and
+    /// signet invoices share a prefix, so the wallet says which it is. Best effort: without
+    /// it, the invoice's prefix stands in.
+    async fn wallet_network(&self, view: &PaymentView) -> Option<String> {
+        if !self.invocation.qr || !self.api.terminal.decorates() {
+            return None;
+        }
+        let path = format!(
+            "/organizations/{}/wallets/{}",
+            self.scope.require_org().ok()?,
+            view.wallet_id?
+        );
+        // A slow wallets endpoint must not hold back the code or outlast the wait.
+        let limit =
+            balance::READ_LIMIT.min(self.deadline.saturating_duration_since(Instant::now()));
+        let wallet = tokio::time::timeout(limit, self.api.read(&path))
+            .await
+            .ok()?
+            .ok()?;
+        wallet.body.get("network")?.as_str().map(str::to_owned)
+    }
+}
+
+/// What to run when a list a person reads is empty: how to make its first item.
+fn empty_list_next_step(operation: OperationId) -> Option<(&'static str, &'static str)> {
+    match operation {
+        OperationId::GetAllOrganizationsWalletsAsUser => {
+            Some(("Create a wallet", "voltage wallets create --help"))
+        }
+        OperationId::GetPayments => Some(("Receive a payment", "voltage payments receive --help")),
+        OperationId::GetWebhooksAsUser => {
+            Some(("Create a webhook", "voltage webhooks create --help"))
+        }
+        _ => None,
+    }
+}
+
+/// The live watch's first line: what it is, how often it refreshes, how to stop, and why
+/// the last refresh failed, if it did.
+fn watch_header(interval: Duration, failure: Option<&Error>, terminal: Terminal) -> Line {
+    let separator = terminal.glyphs().separator;
+    let mut line = Line::default()
+        .styled(Role::Emphasis, "Watching payments")
+        .text(&format!(
+            " {separator} every {} {separator} Ctrl-C to stop",
+            terminal::elapsed(interval)
+        ));
+    if let Some(error) = failure {
+        line = line
+            .text(&format!(" {separator} "))
+            .paint(Role::Caution, "last refresh failed:")
+            .text(&format!(" {}", error.message));
+    }
+    line
+}
+
 /// Copy and render a ready BOLT11 invoice as requested; both go to stderr.
-fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal) -> Result<()> {
+fn present_invoice(
+    invoice: &str,
+    view: &PaymentView,
+    network: Option<&str>,
+    invocation: &ApiInvocation,
+    terminal: Terminal,
+) -> Result<()> {
     if invocation.copy {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(invoice)) {
             Ok(()) => terminal.notice("Invoice copied to the clipboard."),
@@ -1395,23 +1677,12 @@ fn present_invoice(invoice: &str, invocation: &ApiInvocation, terminal: Terminal
         }
     }
     if invocation.qr {
-        // BOLT11 is case-insensitive. Uppercase enables QR alphanumeric mode, while
-        // low error correction and a two-module margin keep terminal output compact.
-        let code = qrcode::QrCode::with_error_correction_level(
-            invoice.to_ascii_uppercase(),
-            qrcode::EcLevel::L,
-        )
-        .map_err(|_| Error::transport("Could not encode the invoice as a QR code"))?;
-        let image = code
-            .render::<qrcode::render::unicode::Dense1x2>()
-            .quiet_zone(false)
-            .build();
-        let image = image
-            .lines()
-            .map(|line| format!("  {line}  "))
-            .collect::<Vec<_>>()
-            .join("\n");
-        terminal.important(format!("\nScan to pay:\n\n{image}\n"));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        qr::show(invoice, view, network, terminal, now)?;
     }
     Ok(())
 }
@@ -1579,10 +1850,50 @@ fn next_page(body: &Value, request: &Request) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        cli::{Command, Invocation},
-        config::Config,
-    };
+
+    #[test]
+    fn empty_lists_suggest_a_command_that_exists() {
+        for operation in [
+            OperationId::GetAllOrganizationsWalletsAsUser,
+            OperationId::GetPayments,
+            OperationId::GetWebhooksAsUser,
+        ] {
+            let (_, command) = empty_list_next_step(operation).unwrap();
+            let error = crate::cli::command()
+                .try_get_matches_from(command.split(' '))
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "{command}"
+            );
+        }
+        assert_eq!(empty_list_next_step(OperationId::GetWallet), None);
+    }
+
+    #[test]
+    fn the_watch_header_says_how_to_stop_and_why_a_refresh_failed() {
+        let terminal = Terminal::new(false, true);
+        let separator = terminal.glyphs().separator;
+        let shown = |line: Line| anstream::adapter::strip_str(line.as_str()).to_string();
+        assert_eq!(
+            shown(watch_header(Duration::from_secs(5), None, terminal)),
+            format!("Watching payments {separator} every 5s {separator} Ctrl-C to stop")
+        );
+        let failure = Error::transport("Connection reset");
+        assert_eq!(
+            shown(watch_header(
+                Duration::from_secs(5),
+                Some(&failure),
+                terminal
+            )),
+            format!(
+                "Watching payments {separator} every 5s {separator} Ctrl-C to stop \
+                 {separator} last refresh failed: Connection reset"
+            )
+        );
+    }
+    use crate::cli::{Command, Invocation};
     use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::json;
 
@@ -2117,10 +2428,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let settings = Settings {
-            dir: dir.path().to_path_buf(),
-            config: Config::default(),
-        };
+        let settings = Settings::open(dir.path().to_path_buf()).unwrap();
         let create_payment = operation(OperationId::CreatePayment);
         let id = Uuid::nil();
         let body = json!({"id": id, "wallet_id": WALLET});

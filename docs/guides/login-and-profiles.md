@@ -2,7 +2,7 @@
 
 ## Log in
 
-`voltage login` prints a verification URL and a code, opens the URL in your browser, and waits for your approval after your usual login and MFA. Use `--no-browser` on a remote machine and open the URL yourself. The saved login refreshes its tokens automatically; the refresh token rotates.
+`voltage login` prints a verification URL and a code, opens the URL in your browser, and waits for your approval after your usual login and MFA. On a terminal the URL is a clickable link (in terminals that support links) whose text is the whole URL, the code is bold, the wait counts down to when the CLI stops waiting for approval (the code's expiry, or 10 minutes at most), and a closing `✓ Logged in as EMAIL` line names who signed in, under the `voltage` wordmark, a yellow lightning bolt beside the name in Voltage orange (left out on a terminal narrower than 40 columns, and with `--quiet`). Use `--no-browser` on a remote machine and open the URL yourself. The saved login refreshes its tokens automatically; the refresh token rotates.
 
 ```sh
 voltage login                                   # saved under your email address
@@ -35,7 +35,7 @@ With several saved credentials, select one with `--account` or through a profile
 
 ## Scope
 
-A resource ID is positional, or passed as `--id ID`, as in `voltage wallets get --id WALLET_ID`. The enclosing scope comes from `--org`, `--env`, `--wallet`, and `--webhook`:
+A resource ID is positional, or passed as `--id ID`, as in `voltage wallets get --id WALLET_ID`. A command that acts on one wallet also takes it as `--wallet WALLET_ID`; a profile's or `VOLTAGE_WALLET_ID`'s wallet never selects it. The enclosing scope comes from `--org`, `--env`, `--wallet`, and `--webhook`:
 
 ```sh
 voltage wallets list --org ORG_ID --env ENV_ID

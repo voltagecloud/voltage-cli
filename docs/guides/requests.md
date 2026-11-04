@@ -28,6 +28,10 @@ voltage payments list --profile prod --statuses completed --statuses failed \
   --metadata order_id=123 --query sort_order=desc --all
 ```
 
+`payments list --check-only true` returns payment checks; `false` returns ordinary payments. Omit the flag to include both.
+
+`wallets ledger list WALLET_ID --event-type adjustment` selects recorded balance adjustments, including deposits and withdrawals. These are accounting entries, not Bitcoin transfers. Use `--start-date` and `--end-date` for an explicit range; adjustment queries otherwise default to the past 30 days. Omit `--event-type` to select payment entries. Combining adjustment entries with `--payment-id` returns an empty ledger.
+
 ## Paging and timeouts
 
 `--all` follows pagination by cursor, which the API recommends and the CLI requests by default; endpoints that only page by offset are followed by offset and count. The API has deprecated explicit offset paging (`--offset`, `--pagination offset`) where cursors exist, and the CLI warns when you use it. `--timeout SECONDS` (default 60) bounds the whole request, including paging and waits.

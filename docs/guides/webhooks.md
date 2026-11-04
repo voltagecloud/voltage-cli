@@ -34,7 +34,13 @@ voltage webhooks update WEBHOOK_ID --profile prod \
 
 ## Test, pause, and resume
 
-A test delivery takes a body with a new `delivery_id` and a sample event `payload`. The smallest is a `test.created` event, for example in `test-delivery.json`:
+Without `--data`, `webhooks test` sends a `test.created` event with a new `delivery_id`:
+
+```sh
+voltage webhooks test WEBHOOK_ID --profile prod --execute
+```
+
+To send your own delivery, pass a body with a new `delivery_id` and a sample event `payload` with `--data`, for example in `test-delivery.json`:
 
 ```json
 {

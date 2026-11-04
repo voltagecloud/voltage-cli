@@ -104,15 +104,21 @@ lines += [
     '',
     'IDs are positional, or passed as `--id ID`; enclosing scope uses flags. Paths are relative to the API base URL (`https://voltageapi.com/v1`, overridable with `--api-url`).',
     '',
-    '| Command | Method | Path |',
-    '|---|---|---|',
+    '| Command | Method | Path | Query flags |',
+    '|---|---|---|---|',
 ]
 for oid, entry in registry.items():
     method, path = operations[oid]
     name = 'voltage ' + ' '.join(entry['command'])
     if entry.get('target'):
         name += ' ' + entry['target'].upper()
-    lines.append(f'| `{name}` | {method} | `{path}` |')
+    item = spec['paths'][path]
+    parameters = item.get('parameters', []) + item[method.lower()].get('parameters', [])
+    aliases = {'environment_id': 'env', 'environment_ids': 'env',
+               'wallet_id': 'wallet', 'line_of_credit_id': 'credit-line'}
+    flags = ', '.join('`--' + aliases.get(p['name'], p['name'].replace('_', '-')) + '`'
+                      for p in parameters if p['in'] == 'query' and p['name'] != 'stream_token')
+    lines.append(f'| `{name}` | {method} | `{path}` | {flags} |')
 expected = '\n'.join(lines) + '\n'
 if '--write' in sys.argv:
     (root / 'docs/commands.md').write_text(expected)

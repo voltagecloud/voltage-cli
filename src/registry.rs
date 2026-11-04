@@ -466,6 +466,14 @@ impl Operation {
         })
     }
 
+    /// A `list` command whose one response holds every item: it has no `--limit` to page.
+    pub fn lists_everything_at_once(&self) -> bool {
+        self.method == Method::Get
+            && self.target.is_none()
+            && self.command.last().is_some_and(|word| word == "list")
+            && !self.has_parameter("limit")
+    }
+
     pub fn has_parameter(&self, name: &str) -> bool {
         self.parameters
             .iter()
@@ -511,6 +519,24 @@ fn query_flag(name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn only_lists_without_paging_return_everything_at_once() {
+        for id in [
+            OperationId::GetAllOrganizationsWalletsAsUser,
+            OperationId::GetWebhooksAsUser,
+        ] {
+            assert!(operation(id).lists_everything_at_once(), "{id:?}");
+        }
+        // A paginated list, a single read, and a change are not.
+        for id in [
+            OperationId::GetPayments,
+            OperationId::GetWallet,
+            OperationId::CreateWallet,
+        ] {
+            assert!(!operation(id).lists_everything_at_once(), "{id:?}");
+        }
+    }
 
     #[test]
     fn registry_matches_the_contract() {

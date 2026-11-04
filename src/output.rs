@@ -5,10 +5,13 @@
 
 mod human;
 
+pub use human::{epoch_seconds, readable_amount, relative_time};
+
 use crate::{
     Error, Result,
-    config::new_private,
-    error::ErrorDetail,
+    config::{EXECUTE_VARIABLE, new_private},
+    error::{ErrorDetail, ErrorKind},
+    style::{self, ColorChoice, Depth, Glyphs, Line, Role},
     terminal::{self, scrub_line},
 };
 use clap::ValueEnum;
@@ -124,6 +127,28 @@ pub struct Envelope {
     /// How a person reads the data; never part of the JSON.
     #[serde(skip)]
     pub layout: Layout,
+    /// On a terminal, a single result is drawn as a card with this title.
+    #[serde(skip)]
+    pub card: Option<&'static str>,
+    /// The command to run next, shown after human output on a terminal.
+    #[serde(skip)]
+    pub next: Option<NextStep>,
+}
+
+/// A `›` line after a result: what to do, and the command that does it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NextStep {
+    pub what: &'static str,
+    pub command: String,
+}
+
+impl NextStep {
+    pub fn line(&self, glyphs: Glyphs) -> Line {
+        Line::default()
+            .paint(Role::Hint, glyphs.step)
+            .text(&format!(" {}: ", self.what))
+            .styled(Role::Emphasis, &self.command)
+    }
 }
 
 /// How table output lays out a single result. Decided by the command that built the data, not
@@ -151,6 +176,8 @@ impl Envelope {
             outcome,
             event: None,
             layout: Layout::Fields,
+            card: None,
+            next: None,
         }
     }
 
@@ -172,6 +199,14 @@ impl Envelope {
         })
     }
 
+    /// Draw the result as a card with `title` on a terminal.
+    pub fn titled(self, title: &'static str) -> Self {
+        Self {
+            card: Some(title),
+            ..self
+        }
+    }
+
     /// One checkout stream event.
     pub fn event(data: Value, event: String, id: Option<String>) -> Self {
         Self {
@@ -186,6 +221,25 @@ pub struct Output {
     format: OutputFormat,
     show_secrets: bool,
     file: Option<File>,
+    color: ColorChoice,
+    /// `--quiet`, which hides a result's next step.
+    quiet: bool,
+}
+
+/// Reserve `--output-file`. It is reserved before any request, so a refusal sent nothing; the
+/// error says why the path was refused and what to pass instead.
+fn reserve_output_file(path: &Path) -> Result<File> {
+    new_private(path).map_err(|error| {
+        if path.symlink_metadata().is_ok() {
+            Error::usage(format!(
+                "{} already exists; --output-file writes only to a new file",
+                path.display()
+            ))
+            .with_hint("Pass a path that does not exist yet, or move the existing file. No change was sent.")
+        } else {
+            error.and_hint("Pass a path in a directory you can write to. No change was sent.")
+        }
+    })
 }
 
 impl Output {
@@ -195,13 +249,31 @@ impl Output {
         format: OutputFormat,
         show_secrets: bool,
         output_file: Option<&Path>,
+        color: ColorChoice,
+        quiet: bool,
     ) -> Result<Self> {
-        let file = output_file.map(new_private).transpose()?;
+        let file = output_file.map(reserve_output_file).transpose()?;
         Ok(Self {
             format,
             show_secrets,
             file,
+            color,
+            quiet,
         })
+    }
+
+    /// Whether a next step belongs after the output: human output on interactive stdout and
+    /// stderr, without `--quiet`. Redirected or machine-readable output never gets one.
+    pub fn suggests(&self) -> bool {
+        !self.quiet && self.on_terminal() && std::io::stderr().is_terminal()
+    }
+
+    /// The `›` line after the output, when it belongs there.
+    pub fn suggest(&self, next: &NextStep) {
+        if self.suggests() {
+            let glyphs = Glyphs::detect(|name| std::env::var(name).ok());
+            style::write_stderr(self.color, &format!("{}\n", next.line(glyphs).as_str()));
+        }
     }
 
     /// One-time secrets may only go to a private file or an explicitly unredacted stream.
@@ -212,6 +284,71 @@ impl Output {
     /// Human output, where a next step on stderr is read rather than parsed.
     pub fn is_human(&self) -> bool {
         !self.format.is_machine_readable()
+    }
+
+    /// Human output to an interactive stdout, where a headline can lead the result.
+    pub fn on_terminal(&self) -> bool {
+        self.format == OutputFormat::Table && self.file.is_none() && std::io::stdout().is_terminal()
+    }
+
+    /// Lines that lead the result on an interactive stdout, such as a wallet's balance.
+    pub fn preface(&self, lines: &[Line]) -> Result<()> {
+        let text: String = lines
+            .iter()
+            .map(|line| format!("{}\n", line.as_str()))
+            .collect();
+        write_stdout_styled(text.as_bytes(), self.color)
+    }
+
+    /// One frame of a live watch on an interactive stdout: clear the screen, then `header`
+    /// and the payments table, with a marker beside each row whose ID is in `marked`.
+    pub fn live_frame(&self, header: &Line, page: &Value, marked: &[String]) -> Result<()> {
+        let view = human::View {
+            width: terminal::width().map(|width| width.saturating_sub(MARK_WIDTH)),
+            color: true,
+            glyphs: Glyphs::detect(|name| std::env::var(name).ok()),
+            ..human::View::plain()
+        };
+        // Rows past the terminal's height would scroll the header off; the newest updates
+        // come first, so the rows kept are the ones that matter.
+        let rows = terminal::height().map(|rows| rows.saturating_sub(FRAME_LINES));
+        let (page, more) = crate::watch::first(page, rows);
+        let mut table = Vec::new();
+        let envelope = Envelope::new(Some(200), page.clone(), None, Outcome::Retrieved);
+        human::render(&mut table, &envelope, view)?;
+        let ids: Vec<Option<&str>> = crate::watch::items(&page)
+            .iter()
+            .map(|payment| payment.get("id").and_then(Value::as_str))
+            .collect();
+        let mark = Line::default().paint(
+            Role::Pending,
+            if view.glyphs == Glyphs::UNICODE {
+                "●"
+            } else {
+                "*"
+            },
+        );
+        let mut frame = format!("{}\n\n", header.as_str());
+        // A next cursor is for paging by hand, which a live view does not do.
+        let table = String::from_utf8_lossy(&table);
+        let lines = table
+            .lines()
+            .filter(|line| !line.starts_with("Next cursor:"));
+        for (index, line) in lines.enumerate() {
+            // The table's first line is its header; row `n` is the `n`th payment.
+            let marked = index
+                .checked_sub(1)
+                .and_then(|row| ids.get(row).copied().flatten())
+                .is_some_and(|id| marked.iter().any(|marked| marked == id));
+            let prefix = if marked { mark.as_str() } else { " " };
+            frame.push_str(&format!("{prefix} {line}\n"));
+        }
+        if more > 0 {
+            frame.push_str(&format!("  … {more} more, below the terminal's height\n"));
+        }
+        // Home and clear are screen control, not color, so they skip the color stream.
+        finish_stdout(std::io::stdout().lock(), b"\x1b[H\x1b[2J")?;
+        write_stdout_styled(frame.as_bytes(), self.color)
     }
 
     /// JSON output collects `--all` pages into one envelope; NDJSON streams them.
@@ -230,24 +367,65 @@ impl Output {
         if !self.show_secrets {
             redact(&mut envelope.data, secrets);
         }
-        let mut bytes = match self.format {
-            OutputFormat::Table => {
-                let mut buf = Vec::new();
-                human::render(&mut buf, &envelope, terminal::width())?;
-                buf
+        if self.format == OutputFormat::Table {
+            // Styled as for a terminal; the stream strips styles when color is off there.
+            let view = human::View {
+                width: terminal::width(),
+                color: true,
+                cards: std::io::stdout().is_terminal(),
+                glyphs: Glyphs::detect(|name| std::env::var(name).ok()),
+                depth: Depth::detect(|name| std::env::var(name).ok()),
+                ..human::View::plain()
+            };
+            let mut buf = Vec::new();
+            human::render(&mut buf, &envelope, view)?;
+            write_stdout_styled(&buf, self.color)?;
+            if let Some(next) = &envelope.next {
+                self.suggest(next);
             }
-            OutputFormat::Json | OutputFormat::Ndjson => serde_json::to_vec(&envelope)?,
-        };
-        if self.format != OutputFormat::Table {
-            bytes.push(b'\n');
+            return Ok(());
         }
+        let mut bytes = serde_json::to_vec(&envelope)?;
+        bytes.push(b'\n');
         write_stdout(&bytes)
+    }
+}
+
+/// Columns the live watch's row marker takes: the mark and a space.
+const MARK_WIDTH: usize = 2;
+/// Lines a live frame needs besides its rows: header, blank, table header, hidden columns,
+/// result count, the `more` line, and the line the cursor rests on.
+const FRAME_LINES: usize = 7;
+
+/// The terminal's alternate screen with the cursor hidden, for a live watch. Dropping it
+/// puts back the person's screen and cursor, including when Ctrl-C ends the watch.
+#[must_use = "the alternate screen is left as soon as the guard is dropped"]
+pub struct LiveScreen;
+
+impl LiveScreen {
+    pub fn enter() -> Self {
+        let _ = finish_stdout(std::io::stdout().lock(), b"\x1b[?1049h\x1b[?25l");
+        Self
+    }
+}
+
+impl Drop for LiveScreen {
+    fn drop(&mut self) {
+        let _ = finish_stdout(std::io::stdout().lock(), b"\x1b[?25h\x1b[?1049l");
     }
 }
 
 /// Write rendered output; a closed stdout ends the pipeline successfully.
 pub fn write_stdout(bytes: &[u8]) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
+    finish_stdout(std::io::stdout().lock(), bytes)
+}
+
+/// `write_stdout` for human output, keeping its styles only when `color` allows them there.
+fn write_stdout_styled(bytes: &[u8], color: ColorChoice) -> Result<()> {
+    finish_stdout(style::stdout(color), bytes)
+}
+
+fn finish_stdout(mut stdout: impl Write, bytes: &[u8]) -> Result<()> {
     stdout
         .write_all(bytes)
         .and_then(|()| stdout.flush())
@@ -300,8 +478,9 @@ struct ErrorBody<'a> {
     detail: Option<&'a ErrorDetail>,
 }
 
-/// Print an error to stderr in the format the selected output uses.
-pub fn report_error(error: &Error, format: OutputFormat) {
+/// Print an error to stderr in the format the selected output uses; `color` styles only the
+/// human report's labels.
+pub fn report_error(error: &Error, format: OutputFormat, color: ColorChoice) {
     let report = ErrorReport {
         error: ErrorBody {
             message: &error.message,
@@ -315,25 +494,60 @@ pub fn report_error(error: &Error, format: OutputFormat) {
     redact(&mut body, &[]);
     if format.is_machine_readable() {
         eprintln!("{body}");
+    } else if error.kind == ErrorKind::NotExecuted && std::io::stderr().is_terminal() {
+        // The description above says it was not sent; what is left is how to send it.
+        let step = Glyphs::detect(|name| std::env::var(name).ok()).step;
+        style::write_stderr(color, &format!("{}\n", send_it(step).as_str()));
     } else {
-        // Messages can interpolate untrusted input; keep control characters off the terminal.
-        eprintln!("error: {}", scrub_line(&error.message));
-        if let Some(hint) = &error.hint {
-            // Hints can name saved credentials and profiles, so they are scrubbed like messages.
-            eprintln!("hint: {}", scrub_line(hint));
-        }
-        let repeated = error.detail.as_ref().is_some_and(ErrorDetail::repeats_hint);
-        if let Some(detail) =
-            human_detail(&body["error"]["detail"], &error.message).filter(|_| !repeated)
-        {
-            let mut lines = Vec::new();
-            if human::detail(&mut lines, &detail).is_ok() {
-                eprintln!("details:");
-                for line in String::from_utf8_lossy(&lines).lines() {
-                    eprintln!("  {line}");
-                }
+        style::write_stderr(color, &human_error(error, &body["error"]["detail"]));
+    }
+}
+
+/// On a terminal, the line after a described change.
+fn send_it(step: &'static str) -> Line {
+    Line::default()
+        .paint(Role::Hint, step)
+        .text(" Send it: add ")
+        .styled(Role::Emphasis, "--execute")
+        .text(", or set ")
+        .styled(Role::Emphasis, &format!("{EXECUTE_VARIABLE}=1"))
+}
+
+/// The human error report with painted labels, which the stream strips when color is off.
+fn human_error(error: &Error, detail: &Value) -> String {
+    // Messages can interpolate untrusted input; keep control characters off the terminal.
+    let mut report = format!(
+        "{} {}\n",
+        style::paint(Role::Failure, "error:"),
+        scrub_line(&error.message)
+    );
+    if let Some(hint) = &error.hint {
+        // Hints can name saved credentials and profiles, so they are scrubbed like messages.
+        let hint = scrub_line(hint);
+        report.push_str(&format!("{} {hint}\n", style::paint(Role::Hint, "hint:")));
+    }
+    let repeated = error.detail.as_ref().is_some_and(ErrorDetail::repeats_hint);
+    if let Some(detail) = human_detail(detail, &error.message).filter(|_| !repeated) {
+        let mut lines = Vec::new();
+        if human::detail(&mut lines, &detail).is_ok() {
+            report.push_str(&format!("{}\n", style::paint(Role::Muted, "details:")));
+            for line in String::from_utf8_lossy(&lines).lines() {
+                report.push_str(&format!("  {line}\n"));
             }
         }
+    }
+    report
+}
+
+/// A JSON object as the aligned, scrubbed `field  value` lines human output uses.
+pub fn field_lines(value: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    match human::detail(&mut lines, value) {
+        Ok(()) => String::from_utf8_lossy(&lines)
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -424,6 +638,28 @@ mod tests {
         let pending = json!({"resource_id": "id", "outcome": "pending"});
         assert_eq!(human_detail(&pending, ""), Some(pending.clone()));
         assert_eq!(human_detail(&Value::Null, ""), None);
+    }
+
+    #[test]
+    fn human_errors_paint_only_their_labels() {
+        let hostile = "bad\u{1b}[2J\u{1b}]8;;https://evil.test\u{7}key";
+        let mut error = Error::usage(format!("Rejected {hostile}"));
+        error.hint = Some(format!("Try {hostile}").into());
+        let report = human_error(&error, &json!({"request_id": hostile}));
+        let plain = "error: Rejected bad [2J ]8;;https://evil.test key\n\
+            hint: Try bad [2J ]8;;https://evil.test key\n\
+            details:\n  request_id  bad [2J ]8;;https://evil.test key\n";
+        assert_eq!(anstream::adapter::strip_str(&report).to_string(), plain);
+        // Every escape sequence left is one of the three labels' styles.
+        let mut rest = report.clone();
+        for (role, label) in [
+            (Role::Failure, "error:"),
+            (Role::Hint, "hint:"),
+            (Role::Muted, "details:"),
+        ] {
+            rest = rest.replacen(&style::paint(role, label), label, 1);
+        }
+        assert_eq!(rest, plain);
     }
 
     #[test]
