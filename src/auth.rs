@@ -10,8 +10,8 @@ use crate::{
     cli::{GlobalFlags, ImportKeyFlags, LoginFlags},
     config::{
         AUTH_URL, Account, AccountKind, Credential, CredentialProblem, CredentialStore,
-        InputSource, LOCK_TIMEOUT, Login, Scope, ScopeSources, Settings, Source, name_in_use,
-        read_secret, shell_word, unreadable_name,
+        IgnoredVariable, InputSource, LOCK_TIMEOUT, Login, Precedence, Scope, ScopeSources,
+        Settings, Source, name_in_use, read_secret, shell_word, unreadable_name,
     },
     error::{CredentialRejection, CredentialSources, ErrorDetail, ResponseLimit},
     secret::Secret,
@@ -576,9 +576,19 @@ pub(crate) fn environment_key_sources(
     })
 }
 
-/// `VOLTAGE_API_KEY` is set, but a profile or account selection takes precedence over it.
-pub(crate) fn ignores_ambient_api_key(flags: &GlobalFlags) -> bool {
-    std::env::var_os("VOLTAGE_API_KEY").is_some() && ambient_api_key(flags).is_none()
+/// `VOLTAGE_API_KEY` when it is set but a profile or account selection takes precedence.
+pub(crate) fn ignored_api_key(flags: &GlobalFlags) -> Option<IgnoredVariable> {
+    if std::env::var_os("VOLTAGE_API_KEY").is_none() || ambient_api_key(flags).is_some() {
+        return None;
+    }
+    Some(IgnoredVariable {
+        name: "VOLTAGE_API_KEY",
+        precedence: if flags.profile.is_some() {
+            Precedence::Profile
+        } else {
+            Precedence::Flag("--account")
+        },
+    })
 }
 
 /// The credential a command would use, chosen without reading a saved secret.

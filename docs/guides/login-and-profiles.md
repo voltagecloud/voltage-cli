@@ -62,7 +62,12 @@ An API key cannot list organizations or environments, so with a key the CLI offe
 
 ## Profiles
 
-A profile bundles an organization, an environment, and a credential, and ignores the scope variables above and `VOLTAGE_API_KEY`; flags still override its scope for one command.
+A profile bundles an organization, an environment, and a credential, and ignores the scope variables above and `VOLTAGE_API_KEY`; flags still override its scope for one command. Other tools, such as the `voltage-api` agent skill's helper, read the same variables and let them win, so each command names on stderr every variable it ignores, even with `--quiet`:
+
+```console
+$ VOLTAGE_WALLET_ID=WALLET_ID voltage wallets list --profile staging
+warning: VOLTAGE_WALLET_ID is set but ignored because --profile staging is selected
+```
 
 ```sh
 voltage profiles create staging --org ORG_ID --env ENV_ID --account work
