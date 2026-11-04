@@ -1012,11 +1012,23 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
     );
     // The flags name what the profile saves, so the variables they override are no surprise.
     assert_eq!(stderr(&created), "");
-    cli(dir.path(), &server)
+    // The directory decides where it saves, so a --config-dir over the variable still warns.
+    let duplicate = cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_CONFIG_DIR", dir.path().join("unused"))
         .args(create)
         .assert()
         .code(2);
+    let warnings: Vec<_> = stderr(&duplicate)
+        .lines()
+        .filter(|line| line.starts_with("warning:"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        warnings,
+        ["warning: VOLTAGE_CONFIG_DIR is set but ignored because --config-dir is given"]
+    );
     let listed = cli(dir.path(), &server)
         .args(["profiles", "list"])
         .assert()
