@@ -4,6 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- A command that ignores a set `VOLTAGE_*` variable, because `--profile` or a flag such as `--wallet` takes precedence, says so on stderr with one `warning:` line per variable, even with `--quiet`. Before, only `voltage context` reported it, so the CLI and a tool that lets the variable win could act on different wallets in one shell. Stdout is unchanged. `auth import-key` and `profiles create`, which save what their flags name, do not warn about the flags they were given.
 - `organizations list`, `environments list`, and `profiles list` accept `--all` and ignore it, like the other lists that return every item at once. Before, they rejected it.
 - `ctutils` 0.4.5, whose constant-time comparisons no longer branch on secret values (RUSTSEC-2026-0385). It reaches the CLI through `sha2` and `digest`.
 - Filter `payments list` with `--check-only true|false`, and `wallets ledger list` with `--event-type adjustment`, from the refreshed API contract. Omit `--event-type` for payment ledger entries. Filters carry across pagination.

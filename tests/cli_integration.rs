@@ -935,16 +935,52 @@ async fn profile_credentials_override_ambient_key_and_scope() {
         ok(json!([])),
     )
     .await;
-    cli(dir.path(), &server)
+    let profiled = cli(dir.path(), &server)
         .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
         .env("VOLTAGE_ENVIRONMENT_ID", RESOURCE)
-        .args(["wallets", "list", "--profile", "stage"])
+        .args(["wallets", "list", "--profile", "stage", "--quiet"])
         .assert()
         .success();
+    // Each ignored variable is named on stderr, even under --quiet; stdout stays the result.
+    assert_eq!(
+        stderr(&profiled),
+        "warning: VOLTAGE_ORGANIZATION_ID is set but ignored because --profile stage is selected\n\
+         warning: VOLTAGE_ENVIRONMENT_ID is set but ignored because --profile stage is selected\n\
+         warning: VOLTAGE_API_KEY is set but ignored because --profile stage is selected\n"
+    );
+    assert_eq!(json_stdout(&profiled)["data"], json!([]));
     cli(dir.path(), &server)
         .args(["wallets", "list", "--profile", "stage", "--env", RESOURCE])
         .assert()
         .code(2);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_flag_over_a_set_variable_warns_and_a_used_variable_does_not() {
+    let (server, dir) = fixture().await;
+    respond(
+        &server,
+        route("GET", wallets_path(ORG)).and(header("x-api-key", ACCOUNT_KEY)),
+        ok(json!([])),
+        2,
+    )
+    .await;
+    let flagged = cli(dir.path(), &server)
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .args(["wallets", "list", "--org", ORG])
+        .assert()
+        .success();
+    assert_eq!(
+        stderr(&flagged),
+        "warning: VOLTAGE_ORGANIZATION_ID is set but ignored because --org is given\n"
+    );
+    let ambient = cli(dir.path(), &server)
+        .env("VOLTAGE_ORGANIZATION_ID", ORG)
+        .args(["wallets", "list"])
+        .assert()
+        .success();
+    assert_eq!(stderr(&ambient), "");
     server.verify().await;
 }
 
@@ -965,6 +1001,8 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
     ];
     let created = cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_ENVIRONMENT_ID", RESOURCE)
         .args(create)
         .assert()
         .success();
@@ -972,11 +1010,25 @@ async fn profiles_are_created_from_scope_and_listed_without_ambient_state() {
         json_stdout(&created)["data"],
         json!({"profile":"stage","created":true})
     );
-    cli(dir.path(), &server)
+    // The flags name what the profile saves, so the variables they override are no surprise.
+    assert_eq!(stderr(&created), "");
+    // The directory decides where it saves, so a --config-dir over the variable still warns.
+    let duplicate = cli(dir.path(), &server)
         .env_remove("VOLTAGE_API_KEY")
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_CONFIG_DIR", dir.path().join("unused"))
         .args(create)
         .assert()
         .code(2);
+    let warnings: Vec<_> = stderr(&duplicate)
+        .lines()
+        .filter(|line| line.starts_with("warning:"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        warnings,
+        ["warning: VOLTAGE_CONFIG_DIR is set but ignored because --config-dir is given"]
+    );
     let listed = cli(dir.path(), &server)
         .args(["profiles", "list"])
         .assert()
@@ -1303,7 +1355,8 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
         ENV,
     ];
     let imported = cli(dir.path(), &server)
-        .env_remove("VOLTAGE_API_KEY")
+        .env("VOLTAGE_ORGANIZATION_ID", RESOURCE)
+        .env("VOLTAGE_ENVIRONMENT_ID", RESOURCE)
         .args(import)
         .args(["--credential-store", "file"])
         .write_stdin("  imported-secret \n")
@@ -1313,6 +1366,8 @@ async fn imported_keys_bind_their_scope_and_report_status_without_secrets() {
         json_stdout(&imported)["data"],
         json!({"account":"staging-key","imported":true})
     );
+    // The flags name what the key is bound to, so the variables they override are no surprise.
+    assert_eq!(stderr(&imported), "");
     let settings = Settings::open(dir.path().to_path_buf()).unwrap();
     let account = &settings.config.accounts["staging-key"];
     assert_eq!(account.kind, AccountKind::ApiKey);

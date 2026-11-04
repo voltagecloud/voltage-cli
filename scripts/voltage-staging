@@ -100,6 +100,9 @@ if build:
 
 env = {key: value for key, value in os.environ.items() if not key.startswith("VOLTAGE_")}
 env.update({key: value for key, value in loaded.items() if key in CLI_ENV})
+# The directory is a variable rather than --config-dir, so hints the CLI prints, such as
+# the one after `profiles create`, do not name a flag this wrapper refuses.
+env["VOLTAGE_CONFIG_DIR"] = str(root / ".work/staging/cli")
 binary = root / "target/debug/voltage"
 if not binary.is_file():
     sys.exit("Build the development CLI first: ./scripts/voltage-staging --build")
@@ -108,8 +111,6 @@ os.execve(
     binary,
     [
         str(binary),
-        "--config-dir",
-        str(root / ".work/staging/cli"),
         "--auth-url",
         loaded["VOLTAGE_STAGING_AUTH_URL"],
         "--api-url",

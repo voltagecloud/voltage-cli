@@ -9,8 +9,10 @@ use crate::{
     auth::{self, Rejected, Selected},
     cli::GlobalFlags,
     config::{
-        self, API_URL, AUTH_URL, AccountKind, CredentialProblem, CredentialStore, Settings, Source,
+        self, API_URL, AUTH_URL, AccountKind, CredentialProblem, CredentialStore, IgnoredVariable,
+        Precedence, ScopeSources, Settings, Source,
     },
+    style::{Line, Role},
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -98,14 +100,52 @@ pub struct Context {
     ignored_variables: Vec<&'static str>,
 }
 
+/// Every `VOLTAGE_*` variable that is set but supplies nothing, because a flag or the selected
+/// profile takes precedence. Commands warn with this list and `voltage context` reports it, so
+/// the two cannot disagree.
+pub(crate) fn ignored_variables(
+    global: &GlobalFlags,
+    sources: &ScopeSources,
+    config_dir: Source,
+) -> Vec<IgnoredVariable> {
+    let mut ignored = config::ignored_variables(sources, config_dir);
+    ignored.extend(auth::ignored_api_key(global));
+    ignored
+}
+
+/// Warn on stderr about each ignored variable. Another tool can read the same variables with
+/// the opposite precedence, so a silent override can send two tools in one shell to different
+/// wallets. `--quiet` keeps the warning for that reason; stdout is unchanged.
+pub(crate) fn warn_ignored(global: &GlobalFlags, ignored: &[IgnoredVariable]) {
+    let terminal = global.terminal();
+    for variable in ignored {
+        terminal.important_line(ignored_warning(variable, global.profile.as_deref()));
+    }
+}
+
+/// `warning: VOLTAGE_WALLET_ID is set but ignored because --profile staging is selected`.
+fn ignored_warning(variable: &IgnoredVariable, profile: Option<&str>) -> Line {
+    let line = Line::default()
+        .paint(Role::Caution, "warning:")
+        .text(&format!(" {} is set but ignored because ", variable.name));
+    match (variable.precedence, profile) {
+        (Precedence::Profile, Some(profile)) => {
+            line.text("--profile ").text(profile).text(" is selected")
+        }
+        // Only a selected profile yields `Profile`; this keeps the sentence whole regardless.
+        (Precedence::Profile, None) => line.text("a profile is selected"),
+        (Precedence::Flag(flag), _) => line.text(flag).text(" is given"),
+    }
+}
+
 /// Resolve the context with the same precedence every command uses.
 pub fn inspect(settings: &Settings, global: &GlobalFlags) -> Result<Context> {
     let (scope, sources) = settings.sourced_scope(global.scope_selection())?;
     let (_, config_dir_source) = config::sourced_directory(global.config_dir.clone())?;
-    let mut ignored_variables = config::ignored_variables(&sources, config_dir_source);
-    if auth::ignores_ambient_api_key(global) {
-        ignored_variables.push("VOLTAGE_API_KEY");
-    }
+    let ignored_variables = ignored_variables(global, &sources, config_dir_source)
+        .into_iter()
+        .map(|ignored| ignored.name)
+        .collect();
     let (selected, credential_problem) = match auth::select(settings, &scope, global) {
         Ok(selected) => (Some(selected), None),
         Err(Rejected { problem, selected }) => (selected, Some(problem)),
@@ -207,4 +247,54 @@ pub fn inspect(settings: &Settings, global: &GlobalFlags) -> Result<Context> {
         },
         ignored_variables,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(name: &'static str, precedence: Precedence, profile: Option<&str>) -> String {
+        let ignored = IgnoredVariable { name, precedence };
+        anstream::adapter::strip_str(ignored_warning(&ignored, profile).as_str()).to_string()
+    }
+
+    #[test]
+    fn a_warning_names_the_variable_and_what_took_its_place() {
+        assert_eq!(
+            shown("VOLTAGE_WALLET_ID", Precedence::Profile, Some("staging")),
+            "warning: VOLTAGE_WALLET_ID is set but ignored because --profile staging is selected"
+        );
+        assert_eq!(
+            shown("VOLTAGE_WALLET_ID", Precedence::Flag("--wallet"), None),
+            "warning: VOLTAGE_WALLET_ID is set but ignored because --wallet is given"
+        );
+        assert_eq!(
+            shown("VOLTAGE_API_KEY", Precedence::Flag("--account"), None),
+            "warning: VOLTAGE_API_KEY is set but ignored because --account is given"
+        );
+    }
+
+    #[test]
+    fn a_profile_warning_without_a_profile_name_stays_a_sentence() {
+        assert_eq!(
+            shown("VOLTAGE_API_KEY", Precedence::Profile, None),
+            "warning: VOLTAGE_API_KEY is set but ignored because a profile is selected"
+        );
+    }
+
+    #[test]
+    fn a_profile_name_cannot_write_control_characters_to_the_terminal() {
+        let ignored = IgnoredVariable {
+            name: "VOLTAGE_WALLET_ID",
+            precedence: Precedence::Profile,
+        };
+        // Unstripped, so an escape the name smuggled in would still be here.
+        let line = ignored_warning(&ignored, Some("evil\u{1b}]0;x\u{7}"));
+        assert!(
+            line.as_str()
+                .ends_with(" is set but ignored because --profile evil ]0;x  is selected"),
+            "{:?}",
+            line.as_str()
+        );
+    }
 }
