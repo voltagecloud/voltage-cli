@@ -1893,10 +1893,7 @@ mod tests {
             )
         );
     }
-    use crate::{
-        cli::{Command, Invocation},
-        config::Config,
-    };
+    use crate::cli::{Command, Invocation};
     use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::json;
 
@@ -2431,10 +2428,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let settings = Settings {
-            dir: dir.path().to_path_buf(),
-            config: Config::default(),
-        };
+        let settings = Settings::open(dir.path().to_path_buf()).unwrap();
         let create_payment = operation(OperationId::CreatePayment);
         let id = Uuid::nil();
         let body = json!({"id": id, "wallet_id": WALLET});

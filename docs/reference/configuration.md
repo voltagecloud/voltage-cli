@@ -16,6 +16,8 @@ A credential's secret is kept in one store, chosen when you log in or import a k
 - `keychain` (default): the macOS Keychain, the Linux Secret Service, or the Windows Credential Manager, under the service name `voltage-cli`.
 - `file`: an owner-only file under `credentials/`, for machines without an unlocked keychain, such as headless Linux.
 
+A command reads a secret from its store once and keeps it in memory until it exits, because the macOS Keychain can ask for approval on every read. A login refresh reads it again under the credential lock. To stop the prompts, select **Always Allow** when macOS asks, or log in with `--credential-store file`.
+
 ## Profiles
 
 A profile saves an organization, an environment, and a credential under one name. `--profile NAME` uses it as a complete configuration; see [log in and use profiles](../guides/login-and-profiles.md).

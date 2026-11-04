@@ -2,7 +2,8 @@
 //!
 //! Every file the CLI writes here is owner-only and written atomically. Credentials default
 //! to the operating system store; file storage is an explicit choice with the same
-//! ownership and permission checks on every read.
+//! ownership and permission checks on every read. A command reads each secret from its store
+//! once, because the macOS Keychain can ask for approval on every read.
 
 use crate::{
     Error, Result,
@@ -17,6 +18,7 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 use uuid::Uuid;
@@ -360,13 +362,27 @@ pub(crate) fn sourced_directory(explicit: Option<PathBuf>) -> Result<(PathBuf, S
 pub struct Settings {
     pub dir: PathBuf,
     pub config: Config,
+    /// Secrets this process has read or written. Taking the lock forgets them, because another
+    /// process may have changed them since.
+    secrets: Mutex<Secrets>,
 }
+
+/// Secrets by account name, with the store each is in.
+type Secrets = BTreeMap<String, (CredentialStore, Zeroizing<String>)>;
 
 impl Settings {
     /// Read `config.toml` from an absolute directory, or start empty when it does not exist.
     pub fn open(dir: PathBuf) -> Result<Self> {
         let config = read_config(&dir)?;
-        Ok(Self { dir, config })
+        Ok(Self {
+            dir,
+            config,
+            secrets: Mutex::default(),
+        })
+    }
+
+    fn secrets(&self) -> MutexGuard<'_, Secrets> {
+        self.secrets.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Where `config.toml` lives, whether or not it exists yet.
@@ -549,8 +565,22 @@ impl Settings {
         Credential::try_from(stored)
     }
 
-    /// The secret saved for `name` in `store`, as it was written.
+    /// The secret saved for `name` in `store`, as it was written. A secret this process has
+    /// already read or written is not read again.
     fn read_secret(&self, name: &str, store: CredentialStore) -> Result<Zeroizing<String>> {
+        if let Some((held, secret)) = self.secrets().get(name)
+            && *held == store
+        {
+            return Ok(secret.clone());
+        }
+        let secret = self.fetch_secret(name, store)?;
+        self.secrets()
+            .insert(name.to_owned(), (store, secret.clone()));
+        Ok(secret)
+    }
+
+    /// The secret saved for `name` in `store`, read from the store itself.
+    fn fetch_secret(&self, name: &str, store: CredentialStore) -> Result<Zeroizing<String>> {
         match store {
             CredentialStore::File => read_private(&self.credential_path(name)),
             CredentialStore::Keychain => {
@@ -570,6 +600,8 @@ impl Settings {
         credential: &Credential,
     ) -> Result<()> {
         let raw = serialized(credential)?;
+        // A failed write may still have replaced the secret, so the store is read again.
+        self.secrets().remove(name);
         match store {
             CredentialStore::File => {
                 private_dir(&self.dir)?;
@@ -584,7 +616,9 @@ impl Settings {
                         "Cannot write OS credential store; explicitly select --credential-store file if needed",
                     )
                 }),
-        }
+        }?;
+        self.secrets().insert(name.to_owned(), (store, raw));
+        Ok(())
     }
 
     pub fn delete_credential(&self, name: &str) -> Result<()> {
@@ -594,6 +628,7 @@ impl Settings {
     /// Remove the secret saved for `name` in `store`, whatever store its account names. A
     /// secret that is already gone is not an error, so `logout --local` can remove its account.
     fn delete_secret(&self, name: &str, store: CredentialStore) -> Result<()> {
+        self.secrets().remove(name);
         match store {
             CredentialStore::File => {
                 fs::remove_file(self.credential_path(name)).or_else(|error| match error.kind() {
@@ -745,7 +780,7 @@ impl Settings {
 
     /// Whether `store` holds `credential` for `name`, as when a failed write never replaced it.
     fn holds_secret(&self, name: &str, store: CredentialStore, credential: &Credential) -> bool {
-        let held = self.read_secret(name, store).and_then(|raw| {
+        let held = self.fetch_secret(name, store).and_then(|raw| {
             let stored: StoredCredential = serde_json::from_str(&raw)?;
             serialized(&Credential::try_from(stored)?)
         });
@@ -762,7 +797,9 @@ impl Settings {
         read_config(&self.dir).is_ok_and(|disk| store(&disk) == store(&self.config))
     }
 
-    /// Exclusive process lock for credential and configuration writes.
+    /// Exclusive process lock for credential and configuration writes. It forgets the secrets
+    /// read so far, so a secret read under the lock, such as a refresh token about to be
+    /// spent, is the one another process may have saved meanwhile.
     pub async fn lock(&self, terminal: Terminal) -> Result<File> {
         private_dir(&self.dir)?;
         let path = self.dir.join(LOCK_FILE);
@@ -783,7 +820,10 @@ impl Settings {
         let mut progress = None;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(file),
+                Ok(()) => {
+                    self.secrets().clear();
+                    return Ok(file);
+                }
                 Err(TryLockError::WouldBlock) => {
                     progress
                         .get_or_insert_with(|| terminal.progress("Waiting for credential lock..."));
@@ -1104,6 +1144,7 @@ mod tests {
         Settings {
             dir,
             config: Config::default(),
+            secrets: Mutex::default(),
         }
     }
 
@@ -1351,6 +1392,47 @@ mod tests {
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         }
         dir
+    }
+
+    /// A command reads a secret from its store once, because the macOS Keychain can ask for
+    /// approval on every read. Under the lock it reads the store again, so it sees a refresh
+    /// another process saved meanwhile.
+    #[tokio::test]
+    async fn a_secret_is_read_once_until_the_lock_is_taken() {
+        let dir = private_tempdir();
+        let mut settings = settings(dir.path().to_path_buf());
+        let terminal = Terminal::new(true, true);
+        settings
+            .add_account("me", user_account(), &login("old"), terminal)
+            .await
+            .unwrap();
+        let other = Settings::open(dir.path().to_path_buf()).unwrap();
+        other
+            .write_credential("me", CredentialStore::File, &login("new"))
+            .unwrap();
+        assert_eq!(refresh_token(&settings, "me"), "old");
+        let _lock = settings.lock(terminal).await.unwrap();
+        assert_eq!(refresh_token(&settings, "me"), "new");
+    }
+
+    /// A deleted secret, or one whose write failed, is read from its store again.
+    #[tokio::test]
+    async fn a_deleted_or_failed_write_reads_the_store_again() {
+        use write_faults::Fault::AfterRename;
+        let dir = private_tempdir();
+        let mut settings = settings(dir.path().to_path_buf());
+        let terminal = Terminal::new(true, true);
+        settings
+            .add_account("me", user_account(), &login("old"), terminal)
+            .await
+            .unwrap();
+        write_faults::set([Some(AfterRename)]);
+        let written = settings.write_credential("me", CredentialStore::File, &login("new"));
+        write_faults::set([]);
+        assert!(written.is_err());
+        assert_eq!(refresh_token(&settings, "me"), "new");
+        settings.delete_credential("me").unwrap();
+        assert!(settings.read_credential("me").is_err());
     }
 
     #[tokio::test]
