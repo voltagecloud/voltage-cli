@@ -15,6 +15,10 @@ use crate::{
     terminal::{self, scrub_line},
 };
 use clap::ValueEnum;
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -347,7 +351,12 @@ impl Output {
             frame.push_str(&format!("  … {more} more, below the terminal's height\n"));
         }
         // Home and clear are screen control, not color, so they skip the color stream.
-        finish_stdout(std::io::stdout().lock(), b"\x1b[H\x1b[2J")?;
+        let home = format!(
+            "{}{}",
+            terminal::ansi(MoveTo(0, 0)),
+            terminal::ansi(Clear(ClearType::All))
+        );
+        finish_stdout(std::io::stdout().lock(), home.as_bytes())?;
         write_stdout_styled(frame.as_bytes(), self.color)
     }
 
@@ -404,14 +413,24 @@ pub struct LiveScreen;
 
 impl LiveScreen {
     pub fn enter() -> Self {
-        let _ = finish_stdout(std::io::stdout().lock(), b"\x1b[?1049h\x1b[?25l");
+        let enter = format!(
+            "{}{}",
+            terminal::ansi(EnterAlternateScreen),
+            terminal::ansi(Hide)
+        );
+        let _ = finish_stdout(std::io::stdout().lock(), enter.as_bytes());
         Self
     }
 }
 
 impl Drop for LiveScreen {
     fn drop(&mut self) {
-        let _ = finish_stdout(std::io::stdout().lock(), b"\x1b[?25h\x1b[?1049l");
+        let leave = format!(
+            "{}{}",
+            terminal::ansi(Show),
+            terminal::ansi(LeaveAlternateScreen)
+        );
+        let _ = finish_stdout(std::io::stdout().lock(), leave.as_bytes());
     }
 }
 
