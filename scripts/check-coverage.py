@@ -23,6 +23,7 @@ AUTH_COMMANDS = [
     ('voltage organizations get', [('GET', '/api/v1/users/current')]),
     ('voltage environments list', [('POST', '/api/v1/oauth/token'), ('GET', '/api/v1/organizations/{organization_id}/environments')]),
     ('voltage environments get', [('POST', '/api/v1/oauth/token'), ('GET', '/api/v1/organizations/{organization_id}/environments')]),
+    ('voltage environments create --name NAME', [('POST', '/api/v1/oauth/token'), ('POST', '/api/v1/organizations/{organization_id}/environments')]),
     ('voltage context', []),
     ('voltage profiles create NAME', []),
     ('voltage profiles get NAME', []),

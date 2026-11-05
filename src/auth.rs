@@ -13,7 +13,7 @@ use crate::{
         IgnoredVariable, InputSource, LOCK_TIMEOUT, Login, Precedence, Scope, ScopeSources,
         Settings, Source, name_in_use, read_secret, shell_word, unreadable_name,
     },
-    error::{CredentialRejection, CredentialSources, ErrorDetail, ResponseLimit},
+    error::{CredentialRejection, CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     secret::Secret,
     style::{Line, Role},
     terminal::Terminal,
@@ -21,7 +21,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    fmt,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -102,6 +105,59 @@ pub enum ApiCredential {
 pub enum Discovery {
     Organizations,
     Environments,
+}
+
+/// A command that only a browser login can run. An API key's error names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoginCommand {
+    Discover(Discovery, DiscoveryCommand),
+    CreateEnvironment,
+}
+
+impl fmt::Display for LoginCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Discover(Discovery::Organizations, command) => {
+                write!(f, "organizations {}", command.as_str())
+            }
+            Self::Discover(Discovery::Environments, command) => {
+                write!(f, "environments {}", command.as_str())
+            }
+            Self::CreateEnvironment => f.write_str("environments create"),
+        }
+    }
+}
+
+/// The auth contract's `Environment`, the body of `environments create`. The CLI chooses
+/// `environment_id`, so the command can report it before and after the request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct NewEnvironment {
+    pub environment_id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+}
+
+impl NewEnvironment {
+    /// `error` came after the creation request was sent, so the environment may exist. The
+    /// error names it and carries an `uncertain_submission` detail; without a hint of its
+    /// own, it says how to check before a rerun.
+    fn possibly_created(&self, mut error: Error) -> Error {
+        error.message = format!(
+            "{}; environment {} may have been created",
+            error.message, self.environment_id
+        );
+        if error.hint.is_none() {
+            error = error.with_hint(format!(
+                "The change may have been applied. Look for environment {} with `voltage environments list --org {}` before you run the command again.",
+                self.environment_id, self.organization_id
+            ));
+        }
+        error.with_detail(ErrorDetail::uncertain_submission(
+            Some(self.environment_id),
+            Some(self.organization_id),
+            Vec::new(),
+        ))
+    }
 }
 
 /// A response from the auth service with its body in zeroized memory.
@@ -190,17 +246,28 @@ async fn auth_request(
     request: reqwest::RequestBuilder,
     terminal: Terminal,
 ) -> Result<AuthResponse> {
-    let _progress = terminal.progress("Waiting for auth service...");
-    let response = request.send().await.map_err(|error| {
+    send_to_auth(request, terminal, |error| {
         Error::no_response(
-            &error,
+            error,
             "Authentication request",
             "; no token request was automatically retried",
             "auth",
             ResponseLimit::Fixed(AUTH_TIMEOUT),
             false,
         )
-    })?;
+    })
+    .await
+}
+
+/// `auth_request` whose transport failure `unanswered` reports, so a change can say that it
+/// may have been applied.
+async fn send_to_auth(
+    request: reqwest::RequestBuilder,
+    terminal: Terminal,
+    unanswered: impl FnOnce(&reqwest::Error) -> Error,
+) -> Result<AuthResponse> {
+    let _progress = terminal.progress("Waiting for auth service...");
+    let response = request.send().await.map_err(|error| unanswered(&error))?;
     let status = response.status().as_u16();
     // Ingress rate limits can return plain text rather than an OAuth response.
     // Device polling still needs to back off; token mutations are never retried.
@@ -398,6 +465,57 @@ impl AuthService {
         let response = self.get(&path, organization_token).await?;
         response.require_success()?;
         response.json("Invalid environment response")
+    }
+
+    /// Create `environment` once, returning the HTTP status. A request without a usable
+    /// answer may have created it, so its error carries the environment's ID.
+    async fn create_environment(
+        &self,
+        organization_token: &Secret,
+        environment: &NewEnvironment,
+    ) -> Result<u16> {
+        let url = format!(
+            "{}/organizations/{}/environments",
+            self.url, environment.organization_id
+        );
+        let request = self
+            .client
+            .post(url)
+            .bearer_auth(organization_token.expose())
+            .json(environment);
+        let response = send_to_auth(request, self.terminal, |error| {
+            Error::no_response(
+                error,
+                "Environment creation request",
+                "",
+                "auth",
+                ResponseLimit::Fixed(AUTH_TIMEOUT),
+                true,
+            )
+        })
+        .await
+        // Every send failure leaves the outcome unknown: an answer that could not be read or
+        // was not JSON, such as an ingress's HTML 502, came after the request arrived too.
+        .map_err(|error| environment.possibly_created(error))?;
+        if response.is_success() {
+            return Ok(response.status);
+        }
+        let code = response
+            .error_code()
+            .unwrap_or_else(|| "request_rejected".into());
+        let error = Error::new(
+            ErrorKind::for_http_status(response.status),
+            format!(
+                "The auth service did not create the environment (HTTP {}, {code})",
+                response.status
+            ),
+        );
+        Err(match response.status {
+            403 => error.with_hint(
+                "Your login cannot create environments in this organization. Ask an organization admin to create it, or to give you that permission.",
+            ),
+            _ => error,
+        })
     }
 
     /// Revoke a session whose refresh token the CLI holds.
@@ -982,40 +1100,60 @@ impl Resolver<'_> {
         what: Discovery,
         command: DiscoveryCommand,
     ) -> Result<Value> {
-        // An API key cannot list organizations or environments; say which key was used.
-        let requires_login = || {
-            let noun = match what {
-                Discovery::Organizations => "organizations",
-                Discovery::Environments => "environments",
-            };
-            let command = format!("{noun} {}", command.as_str());
-            if ambient_api_key(self.flags).is_some() {
-                return Error::auth(format!(
-                    "{command} needs a browser login, but this command used VOLTAGE_API_KEY from the environment"
-                ))
-                .with_hint(
-                    "Pass --account NAME to use a saved browser login (`voltage login` creates one), or unset VOLTAGE_API_KEY.",
-                );
-            }
-            let used = self.settings.account_name(scope).unwrap_or_default();
-            Error::auth(format!(
-                "{command} needs a browser login, but the selected credential {used} is an API key"
-            ))
-            .with_hint(
-                "Select a browser login with --account NAME, or sign in with `voltage login`.",
-            )
-        };
         let token = match what {
             Discovery::Organizations => match self.resolve(scope).await? {
                 Credential::Login(login) => login.access_token,
-                Credential::ApiKey(_) => return Err(requires_login()),
+                Credential::ApiKey(_) => {
+                    return Err(self.requires_login(scope, LoginCommand::Discover(what, command)));
+                }
             },
-            Discovery::Environments => match self.resolve_organization(scope).await? {
-                ApiCredential::OrganizationToken(token) => token,
-                ApiCredential::ApiKey(_) => return Err(requires_login()),
-            },
+            Discovery::Environments => {
+                self.login_organization(scope, LoginCommand::Discover(what, command))
+                    .await?
+            }
         };
         self.list(scope, what, &token).await
+    }
+
+    /// Create `environment` in the scope's organization with the login's organization token,
+    /// returning the HTTP status. The write is recorded first, so Ctrl-C reports its ID.
+    pub async fn create_environment(
+        self,
+        scope: &Scope,
+        environment: &NewEnvironment,
+    ) -> Result<u16> {
+        let token = self
+            .login_organization(scope, LoginCommand::CreateEnvironment)
+            .await?;
+        let auth = self.account_auth(scope, self.flags.terminal())?;
+        self.submission
+            .record_auth_change(environment.environment_id, scope);
+        auth.create_environment(&token, environment).await
+    }
+
+    /// The organization token of a browser login, for `command`, which an API key cannot run.
+    async fn login_organization(self, scope: &Scope, command: LoginCommand) -> Result<Secret> {
+        match self.resolve_organization(scope).await? {
+            ApiCredential::OrganizationToken(token) => Ok(token),
+            ApiCredential::ApiKey(_) => Err(self.requires_login(scope, command)),
+        }
+    }
+
+    /// `command` needs a browser login; the error says which API key was used instead.
+    fn requires_login(self, scope: &Scope, command: LoginCommand) -> Error {
+        if ambient_api_key(self.flags).is_some() {
+            return Error::auth(format!(
+                "{command} needs a browser login, but this command used VOLTAGE_API_KEY from the environment"
+            ))
+            .with_hint(
+                "Pass --account NAME to use a saved browser login (`voltage login` creates one), or unset VOLTAGE_API_KEY.",
+            );
+        }
+        let used = self.settings.account_name(scope).unwrap_or_default();
+        Error::auth(format!(
+            "{command} needs a browser login, but the selected credential {used} is an API key"
+        ))
+        .with_hint("Select a browser login with --account NAME, or sign in with `voltage login`.")
     }
 
     /// One discovery listing with a token already in hand: the login's access token for
@@ -1129,6 +1267,32 @@ pub async fn import_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_only_command_is_named_as_typed() {
+        let named = |command: LoginCommand| command.to_string();
+        let discover = LoginCommand::Discover;
+        assert_eq!(
+            named(discover(Discovery::Organizations, DiscoveryCommand::List)),
+            "organizations list"
+        );
+        assert_eq!(
+            named(discover(Discovery::Organizations, DiscoveryCommand::Get)),
+            "organizations get"
+        );
+        assert_eq!(
+            named(discover(Discovery::Environments, DiscoveryCommand::List)),
+            "environments list"
+        );
+        assert_eq!(
+            named(discover(Discovery::Environments, DiscoveryCommand::Get)),
+            "environments get"
+        );
+        assert_eq!(
+            named(LoginCommand::CreateEnvironment),
+            "environments create"
+        );
+    }
 
     #[test]
     fn service_urls_require_https_except_on_loopback() {
@@ -1348,10 +1512,34 @@ mod tests {
         for field in ["id", "email", "organizations"] {
             assert!(has_property(&user, field), "current user lacks {field}");
         }
-        assert!(
-            spec["paths"]["/api/v1/organizations/{organization_id}/environments"]["get"]
-                .is_object()
+        let environments = &spec["paths"]["/api/v1/organizations/{organization_id}/environments"];
+        assert!(environments["get"].is_object());
+        // `environments create` sends exactly the contract's required `Environment` fields.
+        assert_eq!(
+            environments["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Environment"
         );
+        let body = serde_json::to_value(NewEnvironment {
+            environment_id: Uuid::nil(),
+            organization_id: Uuid::nil(),
+            name: "staging".into(),
+        })
+        .unwrap();
+        let mut sent: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut required: Vec<&str> = spec["components"]["schemas"]["Environment"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        sent.sort_unstable();
+        required.sort_unstable();
+        assert_eq!(sent, required);
         let errors = &spec["components"]["schemas"]["OAuthError"]["properties"];
         assert!(errors.get("error").is_some());
     }

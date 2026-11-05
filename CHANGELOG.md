@@ -4,6 +4,7 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- `voltage environments create --org ORG_ID --name NAME` adds an environment to an organization with a browser login. Without `--execute` it only describes the request and exits 6. The new environment's ID, generated unless you pass `--id`, is in `resource_id`.
 - `voltage context --format env` prints the effective organization, environment, and wallet as `VOLTAGE_*` dotenv lines, the names the `voltage-api` agent skill's helper reads, so a profile's scope can be handed to it. It leaves out unset values, never prints a credential, and fails with exit code 2 when more than one environment is selected.
 - A command that ignores a set `VOLTAGE_*` variable, because `--profile` or a flag such as `--wallet` takes precedence, says so on stderr with one `warning:` line per variable, even with `--quiet`. Before, only `voltage context` reported it, so the CLI and a tool that lets the variable win could act on different wallets in one shell. Stdout is unchanged. `auth import-key` and `profiles create`, which save what their flags name, do not warn about the flags they were given.
 - `organizations list`, `environments list`, and `profiles list` accept `--all` and ignore it, like the other lists that return every item at once. Before, they rejected it.

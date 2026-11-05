@@ -8,8 +8,8 @@ use crate::{
     api::{SubmissionState, profile_offer_interrupted},
     auth::{ApiCredential, Discovery, Resolver},
     cli::{
-        BodySource, Command, DiscoveryCommand, GlobalFlags, LocalCommand, ProfileCommand,
-        missing_wallet,
+        BodySource, Command, DiscoveryCommand, EnvironmentCommand, GlobalFlags, LocalCommand,
+        ProfileCommand, missing_wallet,
     },
     config::{Credential, Profile, Scope, Settings, shell_word},
     error::ErrorKind,
@@ -66,9 +66,14 @@ fn needs(command: &Command) -> Needs {
         Command::Local(LocalCommand::Organizations {
             command: DiscoveryCommand::Get,
         }) => Needs::new(true, false, false),
-        Command::Local(LocalCommand::Environments { command }) => {
-            Needs::new(true, *command == DiscoveryCommand::Get, false)
-        }
+        Command::Local(LocalCommand::Environments { command }) => Needs::new(
+            true,
+            matches!(
+                command,
+                EnvironmentCommand::Discovery(DiscoveryCommand::Get)
+            ),
+            false,
+        ),
         Command::Local(LocalCommand::Profiles {
             command: ProfileCommand::Create { .. },
         }) => Needs::new(true, true, false),
@@ -450,6 +455,10 @@ mod tests {
         );
         assert_eq!(
             needs_of(&["environments", "list"]),
+            Needs::new(true, false, false)
+        );
+        assert_eq!(
+            needs_of(&["environments", "create", "--name", "staging"]),
             Needs::new(true, false, false)
         );
         assert_eq!(
