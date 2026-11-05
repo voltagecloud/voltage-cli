@@ -27,39 +27,54 @@ git checkout shows the Cargo version alone.
 Project-local tool installs belong under the gitignored `.work/` directory, for example
 `cargo install --root .work/tools ...`, so the global `~/.cargo/bin` stays untouched.
 
-## Nix development shell (optional)
+## Kai development shell (optional)
 
-Install Nix with flakes enabled and run `nix develop` from the repository root. The
-committed `flake.lock` pins nixpkgs and rust-overlay; the shell reads the exact Rust
-version and components from `rust-toolchain.toml` and includes Python 3 and
-`cargo-machete`. On entry from the repository root it runs `cargo build --locked` and
-adds the checkout's `target/debug` to `PATH`, so `voltage --help` uses the development
-binary. Cargo's incremental build does not recompile unchanged sources. If the build
-fails, the shell remains available but does not add the binary to `PATH`. Once inside,
-run the [verification gate](#verification-gate) normally.
+### Install Kai
+
+Kai needs [Nix with flakes enabled](https://nixos.org/download). Use Kai **0.0.11**, the
+release `Kaifile.roc` names; Kai refuses a Kaifile written for another release. Either:
+
+- **Run it from Kai's flake** (Linux): `nix shell github:thebrandonlucas/kai/v0.0.11`
+  puts `kai` on `PATH` in a new shell. `nix run github:thebrandonlucas/kai/v0.0.11 -- shell`
+  runs one command instead.
+- **Download a release** (Linux): get `kai-0.0.11-<arch>-linux.tar.gz` and `SHA256SUMS`
+  from the [v0.0.11 release](https://github.com/thebrandonlucas/kai/releases/tag/v0.0.11),
+  check the archive with `sha256sum -c`, and put `kai` on `PATH`.
+
+Check with `kai --version`, which prints `0.0.11`. Kai has no macOS release yet, and its
+flake builds only for Linux. `Kaifile.roc` declares Apple Silicon macOS, so the shell is
+ready when Kai is available there. Until then, macOS and Windows developers use the
+rustup workflow below.
+
+### Use the shell
+
+Run `kai shell` from the repository root. `Kaifile.roc` reads the
+exact Rust version and components from `rust-toolchain.toml` through rust-overlay, and
+adds `llvm-tools-preview`, Python 3 and `cargo-machete`. The committed `.kai/lock.json`
+pins nixpkgs and rust-overlay. On entry from the repository root the shell runs
+`cargo build --locked` and adds the checkout's `target/debug` to `PATH`, so
+`voltage --help` uses the development binary. Cargo's incremental build does not
+recompile unchanged sources. If the build fails, the shell remains available but does
+not add the binary to `PATH`. Once inside, run the [verification gate](#verification-gate)
+normally.
 No OpenSSL or D-Bus development packages are required. Real Linux native keychain use
 still needs a running, unlocked Secret Service.
 
 For automatic activation, install direnv and enable its shell hook (for example,
-`eval "$(direnv hook zsh)"` in `.zshrc`, or use `bash` in `.bashrc`). Optionally install
-nix-direnv for cached activation, then run `direnv allow` in the repository root. Leave
-the directory to unload the shell. `.envrc` only activates the flake: it does not load
-`.env`, credentials, or staging endpoints.
+`eval "$(direnv hook zsh)"` in `.zshrc`, or use `bash` in `.bashrc`), then run
+`direnv allow` in the repository root. Leave the directory to unload the shell. `.envrc`
+only activates the Kai shell: it does not load `.env`, credentials, or staging endpoints.
 
-After editing Rust code in an already-open shell, run `cargo build --locked` to
-update the same `voltage` binary on `PATH` (or use `cargo run --locked -- ...` to
-build and run in one command). Direnv does not watch Rust source changes. After
-editing the shell, run `nix develop` again (or `direnv reload` if using direnv).
-To update the pinned sources deliberately, run `nix flake update`, review the
-`flake.lock` diff, rerun the full gate in `nix develop`, and commit the lock file.
-When changing Rust versions or components, update `rust-toolchain.toml` as well and
-verify `rustc --version` in the shell. Supported shell targets are aarch64/x86_64
-macOS and Linux; all four shell derivations evaluate, but only aarch64 macOS was built
-and tested with Nix. The other Nix shells remain unverified at runtime (CI builds those
-platforms using rustup). Native Windows Nix is not
-supported. This is a development environment, not a release artifact or a Nix package.
+After editing Rust code in an already-open shell, run `cargo build --locked` to update
+the same `voltage` binary on `PATH` (or use `cargo run --locked -- ...` to build and run
+in one command). Direnv does not watch Rust source changes. After editing
+`Kaifile.roc`, run `kai shell` again (or `direnv reload` if using direnv). To update the
+pinned sources deliberately, run `kai update`, review the `.kai/lock.json` diff, rerun the
+full gate in the shell, and commit the lock file. When changing Rust versions or
+components, update `rust-toolchain.toml` as well and verify `rustc --version` in the
+shell. This is a development environment, not a release artifact or a Nix package.
 
-Nix and direnv are not required: `rustup toolchain install` installs the pinned
+Kai, Nix, and direnv are not required: `rustup toolchain install` installs the pinned
 Rust toolchain, and `cargo install cargo-machete --version 0.9.2 --locked` supplies
 the extra verification tool for the existing rustup workflow.
 
