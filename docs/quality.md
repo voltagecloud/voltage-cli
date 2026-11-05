@@ -58,7 +58,8 @@ not precedent. Reviews must approve and document exceptions.
   `terminal`; the animated status line in `progress`; a payment wait's status
   lines in `timeline`; and the color palette and symbols in `style`. Keep which commands ask for missing scope, and in what
   order, in `pick`. Keep the default `--currency` of a payment, read from its
-  wallet's line of credit, in `wallet_currency`. Keep exit-code categories and
+  wallet's line of credit, in `wallet_currency`. Keep prefilled GitHub issue reports, their
+  scrubbing, and the panic hook that prints one in `feedback`. Keep exit-code categories and
   typed error detail in `error`.
 - Name each module for the operation that it performs. Do not give two modules
   the same capability name. For example, keep private-file mechanics in

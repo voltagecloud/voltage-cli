@@ -108,6 +108,48 @@ fn version_leads_with_the_cargo_version_and_marks_the_build_separately() {
 }
 
 #[test]
+fn feedback_prints_a_scrubbed_issue_link_without_configuration_or_a_browser() {
+    let dir = private_tempdir();
+    let wallet = "6f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f";
+    // An unreadable configuration directory does not matter: feedback reads no settings.
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
+        .arg("--config-dir")
+        .arg(dir.path().join("missing"))
+        .args([
+            "feedback", "--json", "--title", "Wallet", "--", "wallets", "get",
+        ])
+        .args([wallet, "--profile", "secret-profile", "--json"])
+        .assert()
+        .success();
+    let output = json_stdout(&result);
+    let data = &output["data"];
+    assert_eq!(data["opened"], false);
+    assert_eq!(data["reporter"], "agent");
+    assert_eq!(data["labels"], json!(["bug"]));
+    let url = data["url"].as_str().unwrap();
+    assert!(
+        url.starts_with(
+            "https://github.com/voltagecloud/voltage-cli/issues/new?title=Wallet&body="
+        )
+    );
+    let body = data["body"].as_str().unwrap();
+    assert!(
+        body.contains("- Command: `voltage wallets get --profile --json`"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- [x] An AI agent wrote this report"),
+        "{body}"
+    );
+    let stdout = stdout(&result);
+    assert!(
+        !stdout.contains(wallet) && !stdout.contains("secret-profile"),
+        "{stdout}"
+    );
+    assert!(result.get_output().stderr.is_empty());
+}
+
+#[test]
 fn human_runtime_errors_have_a_prefix_and_safe_hint() {
     let dir = private_tempdir();
     let result = Command::new(assert_cmd::cargo::cargo_bin!("voltage"))
@@ -6308,9 +6350,26 @@ async fn fully_on_a_terminal_ending(
     server: &MockServer,
     args: &[&str],
 ) -> (Option<i32>, String) {
+    on_one_terminal(dir, server, args, false).await
+}
+
+/// Run a command with stdout and stderr on one pseudo-terminal, and stdin on it too when
+/// `stdin_too`, else empty: its exit code and what it showed.
+#[cfg(unix)]
+async fn on_one_terminal(
+    dir: &Path,
+    server: &MockServer,
+    args: &[&str],
+    stdin_too: bool,
+) -> (Option<i32>, String) {
     use std::io::Read;
     use std::process::Stdio;
     let (mut controller, terminal) = open_pty();
+    let stdin = if stdin_too {
+        Stdio::from(terminal.try_clone().unwrap())
+    } else {
+        Stdio::null()
+    };
     // A UTF-8 color terminal, whatever the test runner's own, as `on_a_terminal` pins it.
     let child = human_process_at(dir, &server.uri())
         .env("TERM", "xterm-256color")
@@ -6320,7 +6379,7 @@ async fn fully_on_a_terminal_ending(
         .env_remove("VOLTAGE_SPINNER")
         .env("COLUMNS", "200")
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::from(terminal.try_clone().unwrap()))
         .stderr(Stdio::from(terminal))
         .spawn()
@@ -6336,6 +6395,75 @@ async fn fully_on_a_terminal_ending(
         .unwrap();
     let shown = strip_styles(&String::from_utf8_lossy(&reader.await.unwrap()));
     (output.status.code(), shown)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_on_a_terminal_prints_the_search_and_issue_links() {
+    let (server, dir) = fixture().await;
+    let wallet = "6f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f";
+    // A person at a terminal; `--no-browser` keeps the browser closed, so the issue link is
+    // printed.
+    let (code, shown) = on_one_terminal(
+        dir.path(),
+        &server,
+        &[
+            "feedback",
+            "--no-browser",
+            "--title",
+            "Broken",
+            "--",
+            "wallets",
+            "get",
+            wallet,
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(code, Some(0), "{shown}");
+    // A person's report leaves the agent box unchecked.
+    assert!(
+        shown.contains("-+%5B+%5D+An+AI+agent+wrote+this+report"),
+        "{shown}"
+    );
+    // Each link is an OSC 8 hyperlink, so the URL follows the label inside its escape.
+    let search = shown.find("Search existing issues first: ").expect(&shown);
+    let file = shown.find("File the issue: ").expect(&shown);
+    assert!(
+        shown[search..file].contains("https://github.com/voltagecloud/voltage-cli/issues?q="),
+        "{shown}"
+    );
+    assert!(
+        shown[file..]
+            .contains("https://github.com/voltagecloud/voltage-cli/issues/new?title=Broken&body="),
+        "{shown}"
+    );
+    assert!(search < file, "{shown}");
+    assert!(!shown.contains(wallet), "{shown}");
+    assert!(!shown.contains("\"reporter\""), "{shown}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_that_cannot_ask_shows_the_agent_report_rather_than_the_links() {
+    let (server, dir) = fixture().await;
+    // With `--no-input`, or with stdin piped, nobody can be asked, so this is an agent's or a
+    // script's report: its fields, marked as an agent's, and no links for a person.
+    for (args, stdin_too) in [
+        (&["feedback", "--no-input", "--title", "Broken"][..], true),
+        (&["feedback", "--title", "Broken"][..], false),
+    ] {
+        let (code, shown) = on_one_terminal(dir.path(), &server, args, stdin_too).await;
+        assert_eq!(code, Some(0), "{shown}");
+        assert!(!shown.contains("File the issue: "), "{shown}");
+        assert!(!shown.contains("Search existing issues first: "), "{shown}");
+        assert!(shown.contains("agent"), "{shown}");
+        assert!(
+            shown.contains("- [x] An AI agent wrote this report")
+                || shown.contains("-+%5Bx%5D+An+AI+agent+wrote+this+report"),
+            "{shown}"
+        );
+    }
 }
 
 #[cfg(unix)]
