@@ -2281,6 +2281,18 @@ fn local_modes(pty: &std::fs::File) -> libc::tcflag_t {
     unsafe { modes.assume_init() }.c_lflag
 }
 
+/// The bytes waiting in a terminal's input queue, or `None` if the terminal cannot be asked.
+/// In canonical mode Linux counts only complete lines, so a test that checks this should end
+/// its input with a newline.
+#[cfg(unix)]
+fn queued_input(pty: &std::fs::File) -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    let mut queued: libc::c_int = 0;
+    // SAFETY: the descriptor is open, and FIONREAD writes one int to the pointer.
+    let asked = unsafe { libc::ioctl(pty.as_raw_fd(), libc::FIONREAD as _, &mut queued) };
+    (asked == 0).then(|| usize::try_from(queued).unwrap())
+}
+
 /// How a test delivers Ctrl-C to a child on a pseudo-terminal.
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -2401,6 +2413,91 @@ async fn typed_ctrl_c_at_the_hidden_key_prompt_reports_an_interruption() {
     assert_eq!(code, Some(130), "{shown}");
     assert!(shown.contains("Interrupted before any resource change was submitted"));
     assert!(echo);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hidden_key_prompt_saves_the_edited_key_without_showing_it() {
+    let (server, dir) = fixture().await;
+    let import = [
+        "auth",
+        "import-key",
+        "--account",
+        "k",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--credential-store",
+        "file",
+    ];
+    // Ctrl-U clears the first attempt, and Backspace removes the X.
+    let keys = b"wrong\x15hidden-secX\x7fret\r";
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &import,
+        &[("Environment API key:", keys)],
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{}", run.shown);
+    assert_eq!(run.modes.0, run.modes.1);
+    assert!(!run.shown.contains("hidden"), "{}", run.shown);
+    let settings = Settings::open(dir.path().to_path_buf()).unwrap();
+    let Credential::ApiKey(key) = settings.read_credential("k").unwrap() else {
+        panic!("expected an API key");
+    };
+    assert_eq!(key.expose(), "hidden-secret");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hidden_key_prompt_refuses_a_key_over_its_limit_and_saves_nothing() {
+    // A paste far over the limit, ending in a newline, as from a file pasted by mistake. The
+    // read stops at the limit; the rest must not be left for the shell to run.
+    static TOO_LONG: [u8; 3001] = {
+        let mut paste = [b'k'; 3001];
+        paste[3000] = b'\r';
+        paste
+    };
+    let (server, dir) = fixture().await;
+    let import = [
+        "auth",
+        "import-key",
+        "--account",
+        "k",
+        "--org",
+        ORG,
+        "--env",
+        ENV,
+        "--credential-store",
+        "file",
+    ];
+    let run = on_a_terminal(
+        dir.path(),
+        &server,
+        &import,
+        &[("Environment API key:", &TOO_LONG)],
+    )
+    .await;
+    assert_eq!(run.code, Some(2), "{}", run.shown);
+    assert!(
+        run.shown.contains("The secret is longer than 1000 bytes"),
+        "{}",
+        run.shown
+    );
+    assert_eq!(run.modes.0, run.modes.1);
+    assert!(!run.shown.contains("kkkk"), "{}", run.shown);
+    // macOS revokes the terminal when the command, its session leader here, exits.
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            run.pending,
+            Some(0),
+            "the rest of the paste reached the shell"
+        );
+    }
+    let settings = Settings::open(dir.path().to_path_buf()).unwrap();
+    assert!(settings.read_credential("k").is_err());
 }
 
 #[cfg(unix)]
@@ -5236,6 +5333,10 @@ struct TerminalRun {
     modes: (libc::tcflag_t, libc::tcflag_t),
     shown: String,
     stdout: String,
+    /// Bytes still waiting in the terminal's input queue after the command exited, which the
+    /// shell would read as typed input. `None` where the terminal cannot be asked once the
+    /// command has exited: macOS revokes it when its session leader exits.
+    pending: Option<usize>,
 }
 
 /// Run a command with stdin and stderr on a pseudo-terminal and stdout piped. For each step,
@@ -5267,6 +5368,7 @@ async fn on_a_terminal_with(
     let (mut controller, terminal) = open_pty();
     let observer = controller.try_clone().unwrap();
     let before = local_modes(&observer);
+    let input_queue = terminal.try_clone().unwrap();
     let mut command = human_process_at(dir, &server.uri());
     // A UTF-8 color terminal, whatever the test runner's own, so symbols are predictable.
     command
@@ -5343,6 +5445,8 @@ async fn on_a_terminal_with(
     };
     let output = output.unwrap();
     let after = local_modes(&observer);
+    let pending = queued_input(&input_queue);
+    drop(input_queue);
     drop(command);
     let shown = tokio::time::timeout(Duration::from_secs(5), drain)
         .await
@@ -5353,6 +5457,7 @@ async fn on_a_terminal_with(
         modes: (before, after),
         shown,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        pending,
     }
 }
 
