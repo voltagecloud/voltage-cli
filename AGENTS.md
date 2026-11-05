@@ -108,8 +108,9 @@ Write one directory per issue, `docs/issues/<YYYY-MM-DD>-<short-slug>/`, with a
 4. **Status on other branches**: work is often on unmerged branches. Look at them
    (`git branch -a --no-merged origin/master`) and name any branch that fixes or reduces
    the issue.
-5. **Reproduction**: a reproducible setup in a `repro.sh` that runs in the Nix dev shell
-   (`nix develop --command ./docs/issues/<dir>/repro.sh`). Pin the commit it builds and
+5. **Reproduction**: a reproducible setup in a `repro.sh` that runs with the pinned
+   toolchain from `rust-toolchain.toml` (rustup, or on Linux the Kai shell:
+   `kai shell default -- ./docs/issues/<dir>/repro.sh`). Pin the commit it builds and
    use `scripts/voltage-local` or `scripts/voltage-staging` with placeholders for
    account-specific IDs. When the issue needs live state, such as an empty wallet, give
    the steps that create that state.
