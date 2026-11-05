@@ -218,3 +218,11 @@ an existing simpler pattern cannot satisfy it.
   exported for tests.
 - `Settings.dir` and `Settings.config` are public record fields so the
   integration suite can construct a configuration directory directly.
+- `environments create` sends an ID-bearing mutation to the auth service
+  without a journal entry. Journal records name a registry operation and
+  reconcile through the Voltage API, and an environment is neither. The auth
+  service stores the sent ID as the environment's unique ID, so a reused ID
+  never creates a second environment. A generated ID is new on each run, and
+  after a lost response the error reports the ID to find with
+  `environments list`. A reused `--id` is rejected by the server, today as an
+  HTTP 500 rather than a 409 (voltagecloud/auth-service#428), not locally.

@@ -617,16 +617,9 @@ pub async fn execute(
                 dry_run::announce(terminal, invocation, &described);
             }
             out.write(described, &[])?;
-            return Err(Error::new(
-                ErrorKind::NotExecuted,
-                format!(
-                    "Described this change without sending it; pass --execute or set {EXECUTE_VARIABLE}=1 to send it"
-                ),
-            ));
+            return Err(not_sent());
         }
-        Execution::SendFromEnvironment => global.terminal().notice(format!(
-            "Sending this change because {EXECUTE_VARIABLE} is set."
-        )),
+        Execution::SendFromEnvironment => sending_from_environment(global.terminal()),
         Execution::Send => {}
     }
     if operation.id.returns_one_time_secret() && !out.secure_destination() {
@@ -760,10 +753,10 @@ pub enum Execution {
 impl Execution {
     /// The flag decides first, then `VOLTAGE_EXECUTE`, then the default: reads are sent and
     /// changes are described.
-    pub fn resolve(invocation: &ApiInvocation, execute_variable: Option<bool>) -> Self {
-        match invocation.requested {
+    pub fn resolve(requested: Requested, method: Method, execute_variable: Option<bool>) -> Self {
+        match requested {
             Requested::Execute => Self::Send,
-            Requested::Unspecified if invocation.operation.method == Method::Get => Self::Send,
+            Requested::Unspecified if method == Method::Get => Self::Send,
             Requested::Unspecified if execute_variable == Some(true) => Self::SendFromEnvironment,
             Requested::Unspecified => Self::DescribeChange,
         }
@@ -773,6 +766,23 @@ impl Execution {
     pub fn describes(self) -> bool {
         self == Self::DescribeChange
     }
+}
+
+/// The error after a described change, whose exit code tells a script nothing was sent.
+pub fn not_sent() -> Error {
+    Error::new(
+        ErrorKind::NotExecuted,
+        format!(
+            "Described this change without sending it; pass --execute or set {EXECUTE_VARIABLE}=1 to send it"
+        ),
+    )
+}
+
+/// Say that `VOLTAGE_EXECUTE`, not the command line, sends this change.
+pub fn sending_from_environment(terminal: Terminal) {
+    terminal.notice(format!(
+        "Sending this change because {EXECUTE_VARIABLE} is set."
+    ));
 }
 
 pub const OFFSET_PAGINATION_DEPRECATED: &str =
@@ -1359,7 +1369,7 @@ pub(crate) enum SessionChange {
 }
 
 struct SubmittedWrite {
-    operation: OperationId,
+    payment: bool,
     resource_id: Option<Uuid>,
     organization_id: Option<Uuid>,
     environment_ids: Vec<Uuid>,
@@ -1369,10 +1379,21 @@ impl SubmissionState {
     /// A command sends at most one mutation, so the first record is the only one.
     fn record(&self, operation: OperationId, resource_id: Option<Uuid>, scope: &Scope) {
         let _ = self.write.set(SubmittedWrite {
-            operation,
+            payment: operation.submits_payment(),
             resource_id,
             organization_id: scope.org,
             environment_ids: scope.envs.clone(),
+        });
+    }
+
+    /// `record` for a change sent to the auth service, which is never a payment.
+    pub(crate) fn record_auth_change(&self, resource_id: Uuid, scope: &Scope) {
+        let _ = self.write.set(SubmittedWrite {
+            payment: false,
+            resource_id: Some(resource_id),
+            organization_id: scope.org,
+            // An auth-service change is not made in the profile's environments.
+            environment_ids: Vec::new(),
         });
     }
 
@@ -1442,7 +1463,7 @@ impl SubmissionState {
             };
         };
         let message = match write.resource_id {
-            Some(id) if write.operation.submits_payment() => format!(
+            Some(id) if write.payment => format!(
                 "Interrupted after payment {id} may have been submitted; query its original ID before resubmitting. The payment was not cancelled."
             ),
             _ => "Interrupted after the request may have been submitted; check its result before retrying. The request was not cancelled.".to_owned(),
@@ -2421,6 +2442,20 @@ mod tests {
     }
 
     #[test]
+    fn interruption_after_an_auth_change_names_its_resource_and_no_environments() {
+        let submission = SubmissionState::default();
+        let created = Uuid::from_u128(7);
+        let profile = scope();
+        assert!(!profile.envs.is_empty());
+        submission.record_auth_change(created, &profile);
+        let detail = serde_json::to_value(submission.interrupted().detail.unwrap()).unwrap();
+        assert_eq!(detail["resource_id"], created.to_string());
+        assert_eq!(detail["organization_id"], json!(profile.org));
+        assert_eq!(detail["environment_ids"], json!([]));
+        assert_eq!(detail["outcome"], "unknown");
+    }
+
+    #[test]
     fn journal_rejects_the_same_id_for_a_different_request() {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -2488,7 +2523,10 @@ mod tests {
 
     #[test]
     fn the_flag_decides_then_voltage_execute_then_reads_send_and_changes_are_described() {
-        let resolve = |args: &[&str], variable| Execution::resolve(&invocation(args), variable);
+        let resolve = |args: &[&str], variable| {
+            let invocation = invocation(args);
+            Execution::resolve(invocation.requested, invocation.operation.method, variable)
+        };
         let change = ["wallets", "delete", WALLET];
         let execute = ["wallets", "delete", WALLET, "--execute"];
         for variable in [None, Some(false), Some(true)] {

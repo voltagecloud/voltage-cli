@@ -204,7 +204,7 @@ pub enum LocalCommand {
     /// Environments in the selected organization
     Environments {
         #[command(subcommand)]
-        command: DiscoveryCommand,
+        command: EnvironmentCommand,
     },
     /// Named organization, environment, and credential selections
     Profiles {
@@ -373,6 +373,47 @@ impl DiscoveryCommand {
             Self::Get => "get",
         }
     }
+}
+
+/// What `environments` does: list or show, as for `organizations`, or create one.
+#[derive(Debug, Subcommand)]
+pub enum EnvironmentCommand {
+    #[command(flatten)]
+    Discovery(DiscoveryCommand),
+    /// Create an environment in the selected organization
+    Create(CreateEnvironmentFlags),
+}
+
+/// Flags for `environments create`. The organization comes from the scope.
+#[derive(Debug, Args)]
+pub struct CreateEnvironmentFlags {
+    /// Environment name
+    #[arg(long, value_parser = parse_name, help_heading = "Environment")]
+    pub name: String,
+    /// Optional new environment UUID; generated when omitted
+    #[arg(long, value_name = "UUID", help_heading = "Environment")]
+    pub id: Option<Uuid>,
+    /// Send this change. Without it or VOLTAGE_EXECUTE=1, the change is only described
+    #[arg(long, help_heading = "Safety")]
+    pub execute: bool,
+}
+
+impl CreateEnvironmentFlags {
+    pub fn requested(&self) -> Requested {
+        if self.execute {
+            Requested::Execute
+        } else {
+            Requested::Unspecified
+        }
+    }
+}
+
+/// A name with at least one character that is not whitespace.
+fn parse_name(value: &str) -> std::result::Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("the name must not be empty".into());
+    }
+    Ok(value.to_owned())
 }
 
 #[derive(Debug, Subcommand, Eq, PartialEq)]
@@ -1464,6 +1505,10 @@ fn local_examples(path: &[&str]) -> Option<&'static str> {
             "  # Save an environment API key read from stdin
   voltage auth import-key --account ci --stdin < key.txt"
         }
+        ["environments", "create"] => {
+            "  # Show the request without --execute, then create the environment
+  voltage environments create --account work --org ORG_ID --name staging --execute"
+        }
         ["profiles", "create"] => {
             "  # Save an organization, environment, and credential as `prod`
   voltage profiles create prod --org ORG_ID --env ENV_ID --account work"
@@ -1771,7 +1816,7 @@ mod tests {
         assert!(matches!(
             parse(&["environments", "list", "--all"]),
             Ok(Command::Local(LocalCommand::Environments {
-                command: DiscoveryCommand::List
+                command: EnvironmentCommand::Discovery(DiscoveryCommand::List)
             }))
         ));
         assert!(matches!(

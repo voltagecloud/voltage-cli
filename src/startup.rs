@@ -5,18 +5,19 @@ use crate::{
     api::{self, Execution, SubmissionState},
     auth::{self, Discovery, Resolver},
     cli::{
-        self, AuthCommand, Command, ContextFlags, ContextFormat, ConvertFlags, DiscoveryCommand,
-        FeedbackFlags, GlobalFlags, Invocation, LocalCommand, ParseFailure, PriceFlags,
-        ProfileCommand,
+        self, AuthCommand, Command, ContextFlags, ContextFormat, ConvertFlags,
+        CreateEnvironmentFlags, DiscoveryCommand, EnvironmentCommand, FeedbackFlags, GlobalFlags,
+        Invocation, LocalCommand, ParseFailure, PriceFlags, ProfileCommand,
     },
     config::{self, Precedence, Profile, Scope, Settings},
-    context,
+    context, environment,
     error::{CredentialSources, ErrorKind},
     feedback::{self, Reporter},
     greeting,
     output::{Envelope, NextStep, Output, OutputFormat, report_error, write_stdout},
     pick,
     price::{PRICE_URL, PriceService},
+    registry::Method,
     style::ColorChoice,
     wallet_currency, wallet_shortlist,
 };
@@ -151,13 +152,20 @@ async fn execute(invocation: Invocation, submission: &SubmissionState) -> Result
         }
         Command::Api(mut api) => {
             // `VOLTAGE_EXECUTE` and every local check run before the wallet is read.
-            let execution = Execution::resolve(&api, config::execute_variable()?);
+            let execution = Execution::resolve(
+                api.requested,
+                api.operation.method,
+                config::execute_variable()?,
+            );
             let resolver = session.resolver();
             wallet_shortlist::require(&api, &global, resolver, &session.scope).await?;
             wallet_currency::fill(&mut api, &global, resolver, &session.scope).await?;
             let mut out = output(!execution.describes())?;
             api::execute(&api, execution, &global, resolver, &session.scope, &mut out).await
         }
+        Command::Local(LocalCommand::Environments {
+            command: EnvironmentCommand::Create(flags),
+        }) => session.create_environment(&flags, output).await,
         // Dotenv lines for another tool, not a result envelope.
         Command::Local(LocalCommand::Context(ContextFlags {
             format: Some(ContextFormat::Env),
@@ -254,6 +262,27 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// `environments create`, which writes its own output: a description goes to stdout and
+    /// never reserves `--output-file`, like an API change.
+    async fn create_environment(
+        &self,
+        flags: &CreateEnvironmentFlags,
+        output: impl FnOnce(bool) -> Result<Output>,
+    ) -> Result<()> {
+        let execution =
+            Execution::resolve(flags.requested(), Method::Post, config::execute_variable()?);
+        let mut out = output(!execution.describes())?;
+        environment::create(
+            flags,
+            execution,
+            self.global,
+            self.resolver(),
+            &self.scope,
+            &mut out,
+        )
+        .await
+    }
+
     fn resolver(&self) -> Resolver<'_> {
         Resolver {
             settings: &self.settings,
@@ -296,9 +325,9 @@ impl<'a> Session<'a> {
             LocalCommand::Organizations { command } => {
                 discover(self.resolver(), scope, Discovery::Organizations, command).await
             }
-            LocalCommand::Environments { command } => {
-                discover(self.resolver(), scope, Discovery::Environments, command).await
-            }
+            LocalCommand::Environments {
+                command: EnvironmentCommand::Discovery(command),
+            } => discover(self.resolver(), scope, Discovery::Environments, command).await,
             LocalCommand::Context(_) => {
                 Envelope::settings(context::inspect(&self.settings, global)?)
                     .map(|context| context.titled("voltage context"))
@@ -310,6 +339,10 @@ impl<'a> Session<'a> {
             | LocalCommand::Feedback(_)
             | LocalCommand::Price(_)
             | LocalCommand::Convert(_) => Err(Error::usage("This command needs no configuration")),
+            // `execute` runs it, because a description must not reserve --output-file.
+            LocalCommand::Environments {
+                command: EnvironmentCommand::Create(_),
+            } => Err(Error::usage("This command writes its own output")),
         }
     }
 }
