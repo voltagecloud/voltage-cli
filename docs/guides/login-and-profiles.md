@@ -29,7 +29,7 @@ secret-manager-command | voltage auth import-key --stdin --account ci --org ORG_
 VOLTAGE_API_KEY=... voltage wallets list --org ORG_ID
 ```
 
-An imported key remembers the organization and environment it belongs to, and a command that selects a different one fails before any request is sent. `VOLTAGE_API_KEY` is used only when neither `--profile` nor `--account` is given. `organizations list` and `environments list` require a browser login.
+An imported key remembers the organization and environment it belongs to, and a command that selects a different one fails before any request is sent. `VOLTAGE_API_KEY` is used only when neither `--profile` nor `--account` is given. `organizations list|get` and `environments list|get` require a browser login.
 
 With several saved credentials, select one with `--account` or through a profile.
 
@@ -57,6 +57,14 @@ voltage payments receive --currency btc --kind bolt11 --amount 1000 --unit sats 
 ```
 
 The picker offers every wallet in the environment and shows a wallet's currency when its balances report one. A wallet with no balance yet shows no currency. For this example, pick a BTC wallet. Typing filters on the whole label, so `btc` matches wallets that show `BTC` and any wallet with `btc` in its name. A wallet on a USD line of credit needs a quote for every payment, so the API rejects the receive with `quote_required` unless you pass `--quote QUOTE_ID` from `voltage quotes create`.
+
+The same pickers browse your resources. `organizations get` and `environments get` show the organization or environment that the scope selects (`--org`, `--env`, or a profile), and a read of one wallet, such as `wallets get`, shows the wallet that `WALLET_ID` or `--wallet` names. When none is selected, a terminal picks it and shows it:
+
+```sh
+voltage organizations get                       # asks for the organization, then shows it
+voltage environments get --org ORG_ID           # asks for the environment
+voltage wallets get --profile prod              # asks for the wallet
+```
 
 An API key cannot list organizations or environments, so with a key the CLI offers only wallets; pass `--org` and `--env` or use a profile. Esc leaves the scope unchanged, and the command then reports what is missing. Ctrl-C exits with code 130. Picking a scope never sends a change: changes still need `--execute`. The CLI never asks when stdin or stderr is not a terminal, when stdout is piped without `--output table` (as in `voltage wallets list | jq`), or with `--no-input`, `--json`, or `--output json|ndjson`. In those cases, the command fails with the same error as before.
 
