@@ -28,7 +28,7 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 uuid = { version = "=1.29.0", features = ["v4", "serde"] }
 sha2 = "=0.11.1"
 hex = "=0.4.3"
-webbrowser = "=1.2.5"
+webbrowser = "=1.2.6"
 futures-util = "=0.3.34"
 url = "=2.5.8"
 zeroize = { version = "=1.9.1", features = ["serde"] }
@@ -46,7 +46,7 @@ keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 comfy-table = { version = "=8.0.1", default-features = false }
 # Display widths, to find a table column after layout and color it; comfy-table already
 # depends on it, so it adds no crate.
-unicode-width = "=0.2.2"
+unicode-width = "=0.2.3"
 # The terminal backend: width, raw mode for hidden prompts (it saves and restores the
 # terminal's modes), key events, and the screen and cursor commands. Without its `windows`
 # feature, crossterm refuses to compile on Windows. `events` and `bracketed-paste` are
@@ -60,7 +60,7 @@ inquire = { version = "=0.9.4", default-features = false, features = ["crossterm
 libc = "=0.2.191"
 # Safe termios calls: the hidden prompt flushes the rest of an over-long paste from the
 # terminal's input queue. keyring already builds it on Linux through zbus.
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "termios"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "termios"] }
 
 [build-dependencies]
 serde_json = "=1.0.154"
