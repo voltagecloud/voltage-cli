@@ -13,6 +13,7 @@ pub mod config;
 mod context;
 mod dry_run;
 mod error;
+mod feedback;
 mod greeting;
 mod input;
 mod output;

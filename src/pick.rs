@@ -87,6 +87,7 @@ fn needs(command: &Command) -> Needs {
             | LocalCommand::Context(_)
             | LocalCommand::Price(_)
             | LocalCommand::Convert(_)
+            | LocalCommand::Feedback(_)
             | LocalCommand::Completions { .. },
         ) => Needs::default(),
     }
