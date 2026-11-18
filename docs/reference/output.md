@@ -29,6 +29,21 @@ The JSON envelope is stable:
 
 API fields stay inside `data`. With `--all`, JSON output collects the pages into `data.pages`, and NDJSON writes one envelope per page as it arrives.
 
+## Errors
+
+API errors keep their codes in JSON output. With `--json`, or when stdout is not a terminal, an error is one JSON object on stderr. When the API rejects a request, `error.detail.http_status` is the HTTP status, and `error.detail.data` is the API's response body. That body includes the API's error `type`, `code`, `detail`, and `context`, and any other fields the API sends, such as a request ID. The CLI does not rename, remap, or remove these fields. The only change is that it replaces secret values, such as `api_key`, with `[REDACTED]`.
+
+```json
+{"error":{"message":"Voltage API returned HTTP 400: Quote is required for payment","exit_code":1,"hint":"A wallet on a USD line of credit needs a quote for each payment. ...","detail":{"http_status":400,"data":{"error":{"type":"quote_required","code":"required","detail":"Quote is required for payment","context":{"field":"quote_id","required":true}}}}}}
+```
+
+- Branch on `error.detail.http_status` and `error.detail.data.error.type` or `.code`. These values come from the API unchanged.
+- `exit_code` is the CLI's failure class, not the HTTP status: 3 for HTTP 401 and 403, and 1 for other API errors. See [exit codes](exit-codes.md).
+- `message` and `hint` are written for people and can change between releases. Do not match on them.
+- A response body that is not JSON, such as an HTML error page from a proxy, is omitted. `message` is `HTTP STATUS: non-JSON response omitted`, and `error.detail` is `null`, so the status is only in `message`. A 403 to `VOLTAGE_API_KEY` is the exception: its `error.detail` has only `credential_sources`.
+- A request that gets no response, such as a timeout or a failed connection, has no `http_status`. It exits with code 4 or 5.
+- Human output shows the API's error as `details:` lines, without the reason that `error:` already gives. Use JSON to get the complete response.
+
 ## Streams
 
 Diagnostics, prompts, and progress go to stderr. Interactive stderr shows an animated spinner for network requests and waits, with the time waited so far on payment waits and device approval and on any wait past two seconds, and a countdown to when login stops waiting for approval (the code's expiry, or 10 minutes at most); it is cut to the terminal's width and cleared when the wait ends or is cancelled. `VOLTAGE_SPINNER=0` (or `false`) or `TERM=dumb` draws it as a still line; a Windows console without ANSI support shows none. Redirected stderr gets no spinner or control codes.
@@ -37,6 +52,6 @@ On interactive stderr a payment wait reads as a timeline: `› Payment ID accept
 
 Human output and help are colored on a terminal: `error:` is red, `hint:` cyan, and `details:` dim, and color only marks a label, so the words read the same without it. `--color always|never` (or `--no-color`) decides; otherwise `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR_FORCE`, `CLICOLOR`, `TERM=dumb`, and whether each stream is a terminal decide, in that order, separately for stdout and stderr. Help headers and usage are Voltage orange: 24-bit with `COLORTERM=truecolor`, 256-color on a `256color` terminal, and bold elsewhere; every other color is one of the 16 basic colors your terminal theme sets. JSON, NDJSON, `--output-file`, and completions are never colored, even with `--color always`.
 
-Human errors start with `error:`, which leads with the API's reason when it rejects a request with a client error (HTTP 4xx), and may include a safe `hint:` and an indented `details:` block of `field  value` lines. `--json` reports the complete API response in `error.detail`, and makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
+Human errors start with `error:`, which leads with the API's reason when it rejects a request with a client error (HTTP 4xx), and may include a safe `hint:` and an indented `details:` block of `field  value` lines. `--json` reports the complete API response in `error.detail` (see [Errors](#errors)), and makes command-line parse errors machine-readable as well as runtime errors. A downstream consumer that closes stdout early is treated as successful pipeline completion.
 
 Related: [scripting](../guides/scripting.md), [safety model](../concepts/safety-model.md#secrets-and-redaction).
