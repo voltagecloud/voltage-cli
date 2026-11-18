@@ -17,6 +17,13 @@ pub fn follow_updates(query: &mut Vec<(String, String)>) {
     );
 }
 
+/// The pause before the next refresh. `Retry-After` is the least time the server asks for,
+/// so it can lengthen the watch's own pause, `--interval` or the backoff after a failure,
+/// but never shorten it: a hint of zero, or a date already past, must not refresh at once.
+pub fn pause(hint: Option<Duration>, own: Duration) -> Duration {
+    hint.map_or(own, |hint| hint.max(own))
+}
+
 /// A refresh the server could not serve now: a transport failure, a 429, or any 5xx, with or
 /// without a JSON body.
 pub fn retries(error: &Error) -> bool {
@@ -130,6 +137,16 @@ mod tests {
                 ("sort_order", "DESC")
             ]
         );
+    }
+
+    #[test]
+    fn a_retry_hint_lengthens_a_pause_but_never_shortens_it() {
+        let five = Duration::from_secs(5);
+        assert_eq!(pause(None, five), five);
+        assert_eq!(pause(Some(Duration::ZERO), five), five);
+        assert_eq!(pause(Some(Duration::from_secs(1)), five), five);
+        let longer = Duration::from_secs(30);
+        assert_eq!(pause(Some(longer), five), longer);
     }
 
     #[test]

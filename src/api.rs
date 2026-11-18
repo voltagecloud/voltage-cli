@@ -966,9 +966,9 @@ impl Call<'_> {
     /// screen that marks payments new or changed since the last read; other output gets one
     /// event envelope per payment, `snapshot` for the first read, then `new` or `updated`.
     /// A refresh the server could not serve (a 5xx, a 429, or a transport failure) is retried
-    /// after its `Retry-After`, or after a growing pause; a rejected credential (401) is
-    /// resolved again once, since a saved login's organization token is short-lived; any
-    /// other failure ends the watch.
+    /// after a growing pause, or after its `Retry-After` when that is longer; a rejected
+    /// credential (401) is resolved again once, since a saved login's organization token is
+    /// short-lived; any other failure ends the watch.
     async fn watch(&mut self, mut response: Response, interval: Duration) -> Result<()> {
         // Each read would otherwise draw a status line over the table.
         self.api.terminal = self.api.terminal.quieted();
@@ -977,7 +977,7 @@ impl Call<'_> {
         let mut seen = watch::Seen::default();
         let mut failure = None;
         let mut backoff = Backoff::new(interval, watch::BACKOFF_CEILING);
-        let mut pause = response.retry_after.unwrap_or(interval);
+        let mut pause = watch::pause(response.retry_after, interval);
         let mut reauthorized = false;
         loop {
             let changes = seen.update(&response.body);
@@ -1008,7 +1008,7 @@ impl Call<'_> {
                 .await;
             match sent {
                 Ok(next) => {
-                    pause = next.retry_after.unwrap_or(interval);
+                    pause = watch::pause(next.retry_after, interval);
                     response = next;
                     failure = None;
                     reauthorized = false;
@@ -1021,7 +1021,7 @@ impl Call<'_> {
                     pause = Duration::ZERO;
                 }
                 Err(error) if watch::retries(&error) => {
-                    pause = error.retry_after.unwrap_or_else(|| backoff.pause());
+                    pause = watch::pause(error.retry_after, backoff.pause());
                     failure = Some(error);
                 }
                 Err(error) => return Err(error),
