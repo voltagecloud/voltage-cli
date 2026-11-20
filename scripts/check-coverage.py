@@ -10,7 +10,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 METHODS = {'get', 'post', 'put', 'patch', 'delete', 'head', 'options'}
-EXPECTED_OPERATIONS = 47
+EXPECTED_OPERATIONS = 48
 
 # Commands that talk to the auth service or only to local state, with the routes they call.
 # `auth.rs` is the source; its contract test pins the same endpoints.

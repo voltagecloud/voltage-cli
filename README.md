@@ -90,3 +90,5 @@ Report security issues as described in [SECURITY.md](SECURITY.md). Report other 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+For USDC/USDT receives, see the [stablecoin quote and receive guide](docs/stablecoin-receives.md).

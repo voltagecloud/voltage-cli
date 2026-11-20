@@ -4152,6 +4152,228 @@ async fn qr_implies_invoice_readiness_wait() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stablecoin_receive_waits_for_completion_and_preserves_receipts() {
+    let (server, dir) = fixture().await;
+    let principal = json!({"currency":"usd","amount":2000});
+    route("POST", payments_path())
+        .and(body_json(json!({"id":RESOURCE,"wallet_id":WALLET,
+        "payment_kind":"stablecoin","quote_id":ORG,"amount":principal})))
+        .respond_with(accepted())
+        .expect(1)
+        .mount(&server)
+        .await;
+    let address = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+    let ready = json!({"id":RESOURCE,"direction":"receive","type":"stablecoin","status":"receiving",
+        "data":{"address":address,"receipts":[]}});
+    let mut completed = ready.clone();
+    completed["status"] = json!("completed");
+    completed["data"]["receipts"] = json!([{"type":"Stablecoin"},{"type":"stablecoin"}]);
+    route("GET", payment_path())
+        .respond_with(in_order(vec![ok(ready), ok(completed.clone())]))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let result = cli(dir.path(), &server)
+        .env("VOLTAGE_WALLET_ID", WALLET)
+        .args([
+            "payments",
+            "receive",
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--id",
+            RESOURCE,
+            "--currency",
+            "usd",
+            "--kind",
+            "stablecoin",
+            "--amount",
+            "20",
+            "--unit",
+            "usd",
+            "--quote",
+            ORG,
+            "--wait",
+            "completed",
+            "--qr",
+            "--execute",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["outcome"], "completed");
+    assert!(stderr(&result).contains("Scan to pay:"));
+    assert!(String::from_utf8_lossy(&result.get_output().stdout).contains("Stablecoin"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stablecoin_get_qr_reaches_ready_without_waiting_for_credit() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", payment_path()),
+        ok(json!({"id":RESOURCE,
+        "direction":"receive","type":"stablecoin","status":"receiving",
+        "data":{"address":"CaseSensitiveAddress"}})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments", "get", RESOURCE, "--org", ORG, "--env", ENV, "--qr",
+        ])
+        .assert()
+        .success();
+    assert_eq!(json_stdout(&result)["outcome"], "ready");
+    assert!(stderr(&result).contains("Scan to pay:"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stablecoin_qr_identifies_deployments_sharing_an_address() {
+    for network in ["ethereum_mainnet", "ethereum_sepolia"] {
+        let (server, dir) = fixture().await;
+        let deployment = format!("usdc:{network}:0x1111111111111111111111111111111111111111:6");
+        respond_once(
+            &server,
+            route("GET", payment_path()),
+            ok(json!({"id":RESOURCE,
+            "type":"stablecoin", "status":"receiving", "direction":"receive",
+            "data":{"address":"0x2222222222222222222222222222222222222222",
+                "amount":{"currency":deployment,"amount":15000000}}})),
+        )
+        .await;
+        let result = cli(dir.path(), &server)
+            .args([
+                "payments", "get", RESOURCE, "--org", ORG, "--env", ENV, "--qr", "--output",
+                "table", "--color", "never",
+            ])
+            .assert()
+            .success();
+        assert!(stderr(&result).contains(&format!("Token deployment: {deployment}")));
+        assert!(!stderr(&result).contains("15 USDC"));
+        assert!(String::from_utf8_lossy(&result.get_output().stdout).contains(&deployment));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_stablecoin_address_is_never_presented() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", payment_path()),
+        ok(json!({"id":RESOURCE,"direction":"receive",
+        "type":"stablecoin","status":"expired","data":{"address":"LnbcCaseSensitiveAddress"}})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args([
+            "payments",
+            "get",
+            RESOURCE,
+            "--org",
+            ORG,
+            "--env",
+            ENV,
+            "--wait",
+            "completed",
+            "--qr",
+            "--copy",
+        ])
+        .assert()
+        .code(1);
+    assert!(!stderr(&result).contains("Scan to pay:"));
+    assert!(!stderr(&result).contains("clipboard"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_stablecoin_address_is_never_presented() {
+    for wait in ["ready", "completed"] {
+        let (server, dir) = fixture().await;
+        respond_once(&server, route("GET", payment_path()), ok(json!({"id":RESOURCE,"direction":"receive",
+            "type":"stablecoin","status":"completed","data":{"address":"LnbcCaseSensitiveAddress"}}))).await;
+        let result = cli(dir.path(), &server)
+            .args([
+                "payments", "get", RESOURCE, "--org", ORG, "--env", ENV, "--wait", wait, "--qr",
+                "--copy",
+            ])
+            .assert()
+            .success();
+        assert_eq!(json_stdout(&result)["outcome"], "completed");
+        assert!(!stderr(&result).contains("Scan to pay"));
+        assert!(!stderr(&result).contains("clipboard"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stablecoin_receive_rejections_append_scoped_guidance() {
+    for (status, kind, hint) in [
+        (403, "access_rights", "allowlist"),
+        (422, "invalid_data", "matching unexpired"),
+    ] {
+        let (server, dir) = fixture().await;
+        respond(
+            &server,
+            route("POST", payments_path()),
+            ResponseTemplate::new(status)
+                .set_body_json(json!({"error":{"type":kind,"detail":"rejected"}})),
+            2,
+        )
+        .await;
+        let result = cli(dir.path(), &server)
+            .args([
+                "payments",
+                "receive",
+                "--org",
+                ORG,
+                "--env",
+                ENV,
+                "--wallet",
+                WALLET,
+                "--currency",
+                "usd",
+                "--kind",
+                "stablecoin",
+                "--amount",
+                "20",
+                "--unit",
+                "usd",
+                "--quote",
+                ORG,
+                "--id",
+                RESOURCE,
+                "--execute",
+            ])
+            .assert()
+            .failure();
+        assert!(stderr(&result).contains(hint), "{}", stderr(&result));
+        if status == 403 {
+            assert!(stderr(&result).contains("permission"));
+        }
+        let other = cli(dir.path(), &server)
+            .args([
+                "payments",
+                "receive",
+                "--org",
+                ORG,
+                "--env",
+                ENV,
+                "--wallet",
+                WALLET,
+                "--currency",
+                "btc",
+                "--kind",
+                "bolt11",
+                "--id",
+                WALLET,
+                "--execute",
+            ])
+            .assert()
+            .failure();
+        assert!(!stderr(&other).contains("allowlist"));
+        assert!(!stderr(&other).contains("matching unexpired"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wait_tolerates_projection_delay_and_distinguishes_invoice_from_settlement() {
     let (server, dir) = fixture().await;
     respond_once(&server, route("POST", payments_path()), accepted()).await;
@@ -4210,7 +4432,7 @@ async fn api_rejections_lead_with_the_reason_and_keep_the_response_for_json() {
         "Voltage API returned HTTP 400: Quote is required for payment\n\
          hint: A wallet on a USD line of credit needs a quote for each payment. Create one with \
          `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass \
-         --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.\n\
+         --quote QUOTE_ID. For stablecoin receives, quote USD with --to usdc:<network>:<contract>:<decimals> (or usdt), then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.\n\
          details:\n  \
          code              required\n  \
          context.field     quote_id\n  \
@@ -7452,6 +7674,7 @@ const EXAMPLE_INVOICE: &str = "lntbs10n1p4ft36app509h8j7cecenwaktcsrshu6cx4xscza
 fn placeholder(word: &str) -> &str {
     match word {
         "BOLT11_INVOICE" => EXAMPLE_INVOICE,
+        "DEPLOYMENT" => "usdc:solana_devnet:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU:6",
         "BITCOIN_ADDRESS" => "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
         id if id.ends_with("_ID") && id.chars().all(|c| c.is_ascii_uppercase() || c == '_') => {
             RESOURCE

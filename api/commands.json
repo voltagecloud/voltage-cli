@@ -345,5 +345,12 @@
       "allowed-origins"
     ],
     "target": "session_id"
+  },
+  "get_wallet_summary": {
+    "command": [
+      "wallets",
+      "summary"
+    ],
+    "target": null
   }
 }

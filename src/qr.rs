@@ -26,7 +26,17 @@ pub fn show(
     terminal: Terminal,
     now: i64,
 ) -> Result<()> {
-    let code = encode(invoice)?;
+    let code = encode(invoice, view.kind.as_deref() != Some("stablecoin"))?;
+    if view.kind.as_deref() == Some("stablecoin")
+        && let Some(deployment) = view
+            .data
+            .amount
+            .as_ref()
+            .and_then(|amount| amount.get("currency"))
+            .and_then(serde_json::Value::as_str)
+    {
+        terminal.important(format!("Token deployment: {deployment}"));
+    }
     if !terminal.decorates() {
         let image = render(&code, false)
             .iter()
@@ -36,7 +46,11 @@ pub fn show(
         terminal.important(format!("\nScan to pay:\n\n{image}\n"));
         return Ok(());
     }
-    let network = network.or_else(|| invoice_network(invoice));
+    let network = if view.kind.as_deref() == Some("stablecoin") {
+        None
+    } else {
+        network.or_else(|| invoice_network(invoice))
+    };
     let depth = Depth::detect(|name| std::env::var(name).ok());
     terminal.important_line(Line::default());
     terminal.important_line(caption(view, network, terminal.glyphs(), depth, now));
@@ -47,8 +61,8 @@ pub fn show(
 }
 
 /// Whether `invoice` can be drawn, for a caller to know before it writes anything else.
-pub fn check(invoice: &str) -> Result<()> {
-    encode(invoice).map(|_| ())
+pub fn check(invoice: &str, view: &PaymentView) -> Result<()> {
+    encode(invoice, view.kind.as_deref() != Some("stablecoin")).map(|_| ())
 }
 
 /// The code as lines: framed black on bright white with color, so it scans on any theme.
@@ -70,9 +84,17 @@ fn image(code: &QrCode, colored: bool) -> Vec<Line> {
 
 /// BOLT11 is case-insensitive. Uppercase enables QR alphanumeric mode, and low error
 /// correction keeps the code small enough for a terminal.
-fn encode(invoice: &str) -> Result<QrCode> {
-    QrCode::with_error_correction_level(invoice.to_ascii_uppercase(), EcLevel::L)
+fn encode(invoice: &str, bolt11: bool) -> Result<QrCode> {
+    QrCode::with_error_correction_level(qr_payload(invoice, bolt11), EcLevel::L)
         .map_err(|_| Error::transport("Could not encode the invoice as a QR code"))
+}
+
+fn qr_payload(value: &str, bolt11: bool) -> String {
+    if bolt11 {
+        value.to_ascii_uppercase()
+    } else {
+        value.to_owned()
+    }
 }
 
 /// Two modules per character cell. `framed` adds a quiet zone of `QUIET_MODULES`: half that
@@ -154,7 +176,12 @@ fn caption(
     }
     line = line.styled(Role::Emphasis, "Scan to pay");
     let facts = [
-        view.data.amount.as_ref().and_then(readable_amount),
+        // Token data.amount becomes cumulative settled units after a deposit.
+        view.data
+            .amount
+            .as_ref()
+            .filter(|_| view.kind.as_deref() != Some("stablecoin"))
+            .and_then(readable_amount),
         view.memo().map(str::to_owned),
         view.expires_at()
             .map(|expires| format!("expires {}", relative_time(expires, now))),
@@ -188,8 +215,33 @@ mod tests {
     }
 
     #[test]
+    fn partial_stablecoin_caption_does_not_request_settled_units() {
+        let view = PaymentView::from_body(&json!({"type":"stablecoin","status":"receiving",
+            "data":{"amount":{"currency":"usdc:solana_devnet:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU:6","amount":15000000},"address":"LnbcMixedCase"}}));
+        let line = caption(&view, None, Glyphs::UNICODE, Depth::Basic, 0);
+        assert_eq!(strip(&line), "Scan to pay");
+    }
+
+    #[test]
+    fn stablecoin_qr_preserves_address_case() {
+        let address = "LnbcC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        assert_eq!(qr_payload(address, false), address);
+        assert_eq!(qr_payload("lnbc123abc", true), "LNBC123ABC");
+        assert!(
+            check(
+                address,
+                &PaymentView {
+                    kind: Some("stablecoin".into()),
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn a_framed_code_draws_dark_modules_in_the_foreground_inside_a_quiet_zone() {
-        let code = encode(INVOICE).unwrap();
+        let code = encode(INVOICE, true).unwrap();
         let width = code.width();
         let dark: Vec<bool> = code
             .to_colors()
@@ -220,7 +272,7 @@ mod tests {
 
     #[test]
     fn without_color_the_code_is_the_compact_form_and_carries_no_styles() {
-        let code = encode(INVOICE).unwrap();
+        let code = encode(INVOICE, true).unwrap();
         let colored = image(&code, true);
         assert_eq!(colored.len(), render(&code, true).len());
         assert!(
@@ -231,7 +283,7 @@ mod tests {
         let plain = image(&code, false);
         assert_eq!(plain.len(), render(&code, false).len());
         assert!(plain.iter().all(|line| !line.as_str().contains('\u{1b}')));
-        assert!(check(INVOICE).is_ok());
+        assert!(check(INVOICE, &PaymentView::default()).is_ok());
     }
 
     #[test]
