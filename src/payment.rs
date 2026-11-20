@@ -164,8 +164,50 @@ pub enum ReceiveKind {
     Bolt11,
     Onchain,
     Bip21,
+    Stablecoin,
     #[value(skip)]
     Taprootasset,
+}
+
+/// The deployment text extends the API snapshot's currency grammar at backend c19a7785.
+/// Return the asset and decimal precision; preserve the contract's case.
+pub fn stablecoin_deployment(value: &str) -> Option<(&str, usize)> {
+    let parts: Vec<_> = value.split(':').collect();
+    let [asset, network, contract, decimals] = parts.as_slice() else {
+        return None;
+    };
+    if !matches!(*asset, "usdc" | "usdt")
+        || !matches!(
+            *network,
+            "ethereum_mainnet"
+                | "ethereum_sepolia"
+                | "ethereum_hoodi"
+                | "solana_mainnet"
+                | "solana_devnet"
+        )
+    {
+        return None;
+    }
+    let valid_contract = if network.starts_with("ethereum_") {
+        contract.strip_prefix("0x").is_some_and(|hex| {
+            hex.len() == 40
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && hex.bytes().any(|b| b != b'0')
+        })
+    } else {
+        (32..=44).contains(&contract.len())
+            && contract
+                .bytes()
+                .all(|b| b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(&b))
+    };
+    let decimal_text = *decimals;
+    let decimals: usize = decimals.parse().ok()?;
+    if decimals.to_string() != decimal_text {
+        return None;
+    }
+    (valid_contract && decimals <= 9).then_some((*asset, decimals))
 }
 
 /// Wallet networks the convenience flags can name.
@@ -249,6 +291,8 @@ pub struct PaymentData {
 /// Read view over a payment projection; unknown fields and shapes stay in the raw body.
 #[derive(Debug, Default, Deserialize)]
 pub struct PaymentView {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub id: Option<Uuid>,
     #[serde(default)]
@@ -299,16 +343,37 @@ impl PaymentView {
             .filter(|memo| !memo.is_empty())
     }
 
-    /// The BOLT11 invoice, once generated.
+    /// The payer-facing invoice or stablecoin deposit address, once generated.
     pub fn invoice(&self) -> Option<&str> {
+        let value = if self.kind.as_deref() == Some("stablecoin") {
+            self.data.address.as_deref()
+        } else {
+            self.data.payment_request.as_deref()
+        };
+        value.filter(|value| !value.is_empty())
+    }
+
+    /// Validated deployment carried by the projection, required for payer presentation.
+    pub fn deployment(&self) -> Option<&str> {
         self.data
-            .payment_request
-            .as_deref()
-            .filter(|invoice| !invoice.is_empty())
+            .amount
+            .as_ref()?
+            .get("currency")?
+            .as_str()
+            .filter(|value| stablecoin_deployment(value).is_some())
+    }
+
+    /// A credited stablecoin quote must not invite another deposit.
+    pub fn can_present(&self) -> bool {
+        self.kind.as_deref() != Some("stablecoin")
+            || self.progress(WaitTarget::Ready) == WaitProgress::Reached(Outcome::Ready)
     }
 
     /// A receive is ready once the payer-facing request exists.
     fn is_ready(&self) -> bool {
+        if self.kind.as_deref() == Some("stablecoin") {
+            return self.invoice().is_some();
+        }
         [
             self.data.payment_request.as_deref(),
             self.data.address.as_deref(),
@@ -342,6 +407,86 @@ impl PaymentView {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn deployment_text_preserves_case_and_bounds_precision() {
+        let mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        for asset in ["usdc", "usdt"] {
+            for network in ["solana_devnet", "solana_mainnet"] {
+                assert_eq!(
+                    stablecoin_deployment(&format!("{asset}:{network}:{mint}:9")),
+                    Some((asset, 9))
+                );
+            }
+            for network in ["ethereum_mainnet", "ethereum_sepolia", "ethereum_hoodi"] {
+                assert_eq!(
+                    stablecoin_deployment(&format!(
+                        "{asset}:{network}:0x1111111111111111111111111111111111111111:6"
+                    )),
+                    Some((asset, 6))
+                );
+            }
+        }
+        for value in [
+            "usdc",
+            "btc:x:y:6",
+            "usdc:unknown:abc:6",
+            "usdc:solana_devnet:invalid:6",
+            "usdc:ethereum_mainnet:0x0000000000000000000000000000000000000000:6",
+            "usdc:ethereum_mainnet:0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:6",
+            "usdc:ethereum_mainnet:1111111111111111111111111111111111111111:6",
+        ] {
+            assert_eq!(stablecoin_deployment(value), None, "{value}");
+        }
+        for decimals in ["10", "06", "x"] {
+            assert_eq!(
+                stablecoin_deployment(&format!("usdc:solana_devnet:{mint}:{decimals}")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn stablecoin_ignores_other_payment_kinds_request_fields() {
+        let view = PaymentView::from_body(&json!({"type":"stablecoin", "status":"receiving",
+            "bip21_uri":"bitcoin:alternate", "data":{"address":"", "payment_request":"lnbc-alternate"}}));
+        assert_eq!(view.invoice(), None);
+        assert_eq!(view.progress(WaitTarget::Ready), WaitProgress::Pending);
+        assert!(!view.can_present());
+    }
+
+    #[test]
+    fn stablecoin_address_readiness_and_completion_are_distinct() {
+        for (status, address, expected) in [
+            ("generating", Value::Null, WaitProgress::Pending),
+            ("receiving", Value::Null, WaitProgress::Pending),
+            ("receiving", json!(""), WaitProgress::Pending),
+            (
+                "receiving",
+                json!("AbCaseSensitive"),
+                WaitProgress::Reached(Outcome::Ready),
+            ),
+            (
+                "completed",
+                json!("AbCaseSensitive"),
+                WaitProgress::Reached(Outcome::Completed),
+            ),
+        ] {
+            for receipt in ["Stablecoin", "stablecoin"] {
+                let view = PaymentView::from_body(
+                    &json!({"status":status,"direction":"receive","type":"stablecoin",
+                    "data":{"address":address,"receipts":[{"type":receipt}]}}),
+                );
+                assert_eq!(view.progress(WaitTarget::Ready), expected);
+                if status == "receiving" {
+                    assert_eq!(view.progress(WaitTarget::Completed), WaitProgress::Pending);
+                }
+                if address.as_str().is_some_and(|a| !a.is_empty()) {
+                    assert_eq!(view.invoice(), Some("AbCaseSensitive"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn an_expiration_in_seconds_keeps_the_view_and_dates_the_expiry() {

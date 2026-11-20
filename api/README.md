@@ -1,6 +1,6 @@
 # API contracts
 
-`openapi.json` is the unmodified Voltage API snapshot from [the public OpenAPI endpoint](https://voltageapi.com/v1/openapi/docs.json), refreshed on 2026-10-22. It contains 47 operations. Snapshot SHA-256: `782f57935dd9991a75991ad17e25ec34daf7ba85f2bcba677adda7781bd8f3c1`. `commands.json` explicitly assigns each operation a human-facing command and positional resource ID.
+`openapi.json` is the unmodified Voltage API snapshot from [the public OpenAPI endpoint](https://voltageapi.com/v1/openapi/docs.json), refreshed on 2026-11-20. It contains 48 operations. Snapshot SHA-256: `9ded3df713d9e0db11c61a3dcae6833c32d531e1f1a00b971850de718f2999ea`. `commands.json` explicitly assigns each operation a human-facing command and positional resource ID.
 
 `build.rs` derives HTTP methods, paths, authentication selection, parameters with their closed value sets, and body support from the snapshot, and takes each operation's command words and positional target from `commands.json`. The build fails on a snapshot operation without a mapping, a mapping without an operation, a command that is not lowercase kebab-case words, or a target that is not a placeholder in the operation's path. `src/registry.rs` deserializes the result into closed enums, so an operation ID, auth scheme, method, or target the code does not know fails `cargo test`. The integration suite exercises every registered operation through a mock HTTP server, including every query parameter, complete JSON bodies, empty responses, and credential selection.
 
@@ -13,3 +13,8 @@
 To update the API contract, fetch the endpoint into `openapi.json`, review its diff, update the command registry and any new authentication/pagination behavior, regenerate the command reference with `python3 scripts/check-coverage.py --write`, and run the full Rust checks. Never silently rename existing commands as part of generation.
 
 To update the auth contract, fetch the public document into `auth-openapi.json`, review its diff, and run `cargo test --locked`; adjust `auth.rs` and its contract test together when a field or endpoint changes. The price contract refreshes the same way from `coinprice-openapi.json` and `price.rs`.
+
+Stablecoin receive preview: [two-step quote flow](../docs/stablecoin-receives.md).
+The convenience flags follow backend #2374 at `c19a77852aca5bc292987e057b50f00baee40d47`;
+the 2026-11-20 public snapshot still omits deployment text from the Currency pattern.
+It adds the organization wallet summary operation, exposed as `wallets summary`.

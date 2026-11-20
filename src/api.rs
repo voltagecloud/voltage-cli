@@ -19,7 +19,10 @@ use crate::{
     error::{CredentialSources, ErrorDetail, ErrorKind, ResponseLimit},
     input::{PaginationMode, Request},
     output::{Envelope, LiveScreen, NextStep, Outcome, Output},
-    payment::{Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget},
+    payment::{
+        Currency, PaymentDirection, PaymentView, ReceiveKind, WaitProgress, WaitTarget,
+        stablecoin_deployment,
+    },
     price::{PRICE_URL, PriceService, UsdPerBtc},
     qr,
     registry::{AuthScheme, Method, Operation, OperationId, operation},
@@ -240,6 +243,7 @@ impl Api {
         query: &[(String, String)],
         body: Option<&Value>,
     ) -> Result<Response> {
+        let stablecoin = stablecoin_request(method, path, body);
         let read_only = method.is_read_only();
         let _progress = self.terminal.progress(if read_only {
             "Waiting for API response..."
@@ -325,7 +329,17 @@ impl Api {
                 status
             };
             let hint = self.authorization.rejection_hint(rejected_as);
-            if let Some(hint) = hint.or_else(|| rejection.hint().map(Cow::Borrowed)) {
+            let specific = if stablecoin {
+                rejection.stablecoin_hint()
+            } else {
+                None
+            };
+            let hint = match (hint, specific) {
+                (Some(hint), Some(specific)) => Some(Cow::Owned(format!("{hint} {specific}"))),
+                (None, Some(specific)) => Some(Cow::Borrowed(specific)),
+                (hint, None) => hint.or_else(|| rejection.hint().map(Cow::Borrowed)),
+            };
+            if let Some(hint) = hint {
                 error = error.with_hint(hint);
             }
             error.retry_after = retry_after;
@@ -417,10 +431,24 @@ pub(crate) enum BodyFailure {
 }
 
 /// How to get the quote that each payment from a wallet on a USD line of credit needs.
-const QUOTE_HINT: &str = "A wallet on a USD line of credit needs a quote for each payment. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.";
+fn stablecoin_request(method: Method, path: &str, body: Option<&Value>) -> bool {
+    method == Method::Post
+        && body.is_some_and(|body| {
+            (path.ends_with("/payments")
+                && body.get("payment_kind").and_then(Value::as_str) == Some("stablecoin"))
+                || (path.ends_with("/quotes")
+                    && body
+                        .get("to")
+                        .and_then(Value::as_str)
+                        .and_then(stablecoin_deployment)
+                        .is_some())
+        })
+}
+
+const QUOTE_HINT: &str = "A wallet on a USD line of credit needs a quote for each payment. Create one with `voltage quotes create`, wait until `voltage quotes get QUOTE_ID` shows it, then pass --quote QUOTE_ID. For stablecoin receives, quote USD with --to usdc:<network>:<contract>:<decimals> (or usdt), then pass --quote QUOTE_ID. A wallet on a BTC line of credit needs no quote.";
 
 /// How to quote a payment so that the API accepts the quoted amount.
-const QUOTE_MISMATCH_HINT: &str = "A quote must convert to exactly the payment's amount; `voltage quotes get QUOTE_ID` shows what it converts to. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount: --unit sats --to usd. To receive a USD amount, quote it: --unit usd --to btc.";
+const QUOTE_MISMATCH_HINT: &str = "A quote must convert to exactly the payment's amount; `voltage quotes get QUOTE_ID` shows what it converts to. To pay a BTC invoice from a USD wallet, quote the invoice's BTC amount: --unit sats --to usd. To receive a USD amount, quote it: --unit usd --to btc, or --to usdc:<network>:<contract>:<decimals> for stablecoin.";
 
 /// Error types the CLI explains specially; the API's other types are shown as detail.
 #[derive(Debug, Default, Deserialize, Eq, PartialEq)]
@@ -430,6 +458,8 @@ enum ApiErrorType {
     /// Staging and production answer a key they do not recognize this way, not with 401.
     MissingCredentials,
     QuoteRequired,
+    AccessRights,
+    InvalidData,
     /// A quote that does not convert to exactly the payment's amount, among other currency
     /// mismatches; only the quote mismatch gets a hint.
     InvalidCurrency,
@@ -471,6 +501,18 @@ impl ApiErrorBody {
         }
     }
 
+    fn stablecoin_hint(&self) -> Option<&'static str> {
+        match self.kind {
+            ApiErrorType::AccessRights => Some(
+                "Check your receive permission and organization stablecoin receive allowlist with Voltage.",
+            ),
+            ApiErrorType::InvalidData => Some(
+                "For stablecoin receives, use a positive USD principal and a matching unexpired USD-to-deployment market quote. Omit description, expiration, and required_confirmations.",
+            ),
+            _ => None,
+        }
+    }
+
     /// The next step an error type names. The CLI has not read the wallet, so a missing
     /// quote describes the wallets that need one rather than this wallet. The API also
     /// returns `invalid_currency` for currency mismatches that are not about a quote, so only
@@ -486,7 +528,9 @@ impl ApiErrorBody {
                 // quoted amount X against requested amount Y". Change both sides together.
                 .filter(|detail| detail.contains("quoted amount "))
                 .map(|_| QUOTE_MISMATCH_HINT),
-            ApiErrorType::FeatureFlagDisabled
+            ApiErrorType::AccessRights
+            | ApiErrorType::InvalidData
+            | ApiErrorType::FeatureFlagDisabled
             | ApiErrorType::MissingCredentials
             | ApiErrorType::Other => None,
         }
@@ -677,10 +721,7 @@ pub async fn wallets(
     let operation = operation(OperationId::GetAllOrganizationsWalletsAsUser);
     let request = Request::scoped(operation, scope)?;
     let api = Api::new(global, None, Authorization::Account(credential, sources))?;
-    Ok(api
-        .send(operation.method, &request.path, &request.query, None)
-        .await?
-        .body)
+    wallet_pages(&api, request, true, global.timeout).await
 }
 
 /// One organization's wallets for `wallets list --all-orgs`, with the command's filters and
@@ -699,10 +740,51 @@ pub async fn organization_wallets(
     let credential = ApiCredential::OrganizationToken(token);
     let mut api = Api::new(global, None, Authorization::Account(credential, None))?;
     api.terminal = global.terminal().quieted();
-    Ok(api
-        .send(Method::Get, &request.path, &request.query, None)
-        .await?
-        .body)
+    wallet_pages(&api, request, invocation.all, global.timeout).await
+}
+
+/// Read wallet pages with one deadline, retaining filters as the cursor advances.
+async fn wallet_pages(
+    api: &Api,
+    mut request: Request,
+    follow: bool,
+    timeout: Duration,
+) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
+    let mut wallets = Vec::new();
+    let mut cursors = BTreeSet::new();
+    loop {
+        let body = tokio::time::timeout_at(
+            deadline,
+            api.send(Method::Get, &request.path, &request.query, None),
+        )
+        .await
+        .map_err(|_| {
+            Error::timeout("Wallet pagination deadline exceeded; use a longer --timeout")
+        })??
+        .body;
+        if body.is_object() {
+            PageView::deserialize(&body)
+                .map_err(|_| Error::transport("Invalid wallet pagination metadata"))?;
+        }
+        let next = if follow {
+            next_page(&body, &request)?
+        } else {
+            None
+        };
+        let items = body
+            .as_array()
+            .or_else(|| body.get("items").and_then(Value::as_array))
+            .ok_or_else(|| Error::transport("API returned an invalid wallet list"))?;
+        wallets.extend(items.iter().cloned());
+        let Some((name, value)) = next else {
+            return Ok(Value::Array(wallets));
+        };
+        if !cursors.insert((name.clone(), value.clone())) {
+            return Err(Error::transport("Pagination did not advance"));
+        }
+        request.advance(name, value);
+    }
 }
 
 /// The currency of a wallet's line of credit, which decides how its payments are
@@ -1231,9 +1313,14 @@ fn check_invoice_flags(invocation: &ApiInvocation, request: &Request) -> Result<
             "--qr and --copy are only available for payments receive and payments get",
         ));
     }
-    if receive_alias && request.receive_kind() != Some(ReceiveKind::Bolt11) {
+    if receive_alias
+        && !matches!(
+            request.receive_kind(),
+            Some(ReceiveKind::Bolt11 | ReceiveKind::Stablecoin)
+        )
+    {
         return Err(Error::usage(
-            "--qr and --copy require a BOLT11 receive (--kind bolt11)",
+            "--qr and --copy require a BOLT11 or stablecoin receive (--kind bolt11 or stablecoin)",
         ));
     }
     Ok(())
@@ -1514,24 +1601,27 @@ impl Call<'_> {
         let mut invoice_presented = false;
         loop {
             let view = PaymentView::from_body(&response.body);
+            let presents_invoice = invocation.presents_invoice() && view.can_present();
             if let Some(status) = &view.status {
                 timeline.status(status);
             }
             // Waiting on to settlement needs the invoice now; a wait that ends at `ready` shows
             // it after the result, so the code is what stays on screen.
-            if invocation.presents_invoice()
+            if presents_invoice
                 && until == WaitTarget::Completed
                 && !invoice_presented
+                && matches!(
+                    view.progress(WaitTarget::Ready),
+                    WaitProgress::Reached(Outcome::Ready)
+                )
                 && let Some(invoice) = view.invoice()
             {
                 let network = self.wallet_network(&view).await;
-                present_invoice(invoice, &view, network.as_deref(), invocation, api.terminal)?;
+                invoice_presented =
+                    present_invoice(invoice, &view, network.as_deref(), invocation, api.terminal)?;
                 timeline.expires_at(view.expires_at());
-                invoice_presented = true;
-                if until == WaitTarget::Completed {
-                    api.terminal
-                        .notice("Invoice is ready; continuing to poll for settlement.");
-                }
+                api.terminal
+                    .notice("Invoice is ready; continuing to poll for settlement.");
             }
             match view.progress(until) {
                 WaitProgress::Unsuccessful => {
@@ -1541,7 +1631,7 @@ impl Call<'_> {
                         .redacted(&api.secrets()));
                 }
                 WaitProgress::Reached(outcome) => {
-                    let invoice = (invocation.presents_invoice() && !invoice_presented)
+                    let invoice = (presents_invoice && !invoice_presented)
                         .then(|| {
                             view.invoice().map(str::to_owned).ok_or_else(|| {
                                 Error::usage("The ready payment does not contain a BOLT11 invoice")
@@ -1552,7 +1642,7 @@ impl Call<'_> {
                     if let Some(invoice) = &invoice
                         && invocation.qr
                     {
-                        qr::check(invoice)?;
+                        qr::check(invoice, &view)?;
                     }
                     // The record first, then how the wait ended, so the outcome is what
                     // stays on screen; a ready invoice's code follows it.
@@ -1571,7 +1661,8 @@ impl Call<'_> {
                         network.as_deref(),
                         invocation,
                         api.terminal,
-                    );
+                    )
+                    .map(|_| ());
                 }
                 WaitProgress::Pending => {}
             }
@@ -1608,7 +1699,10 @@ impl Call<'_> {
     /// signet invoices share a prefix, so the wallet says which it is. Best effort: without
     /// it, the invoice's prefix stands in.
     async fn wallet_network(&self, view: &PaymentView) -> Option<String> {
-        if !self.invocation.qr || !self.api.terminal.decorates() {
+        if view.kind.as_deref() == Some("stablecoin")
+            || !self.invocation.qr
+            || !self.api.terminal.decorates()
+        {
             return None;
         }
         let path = format!(
@@ -1660,14 +1754,20 @@ fn watch_header(interval: Duration, failure: Option<&Error>, terminal: Terminal)
     line
 }
 
-/// Copy and render a ready BOLT11 invoice as requested; both go to stderr.
+/// Copy and render as requested; return false when missing deployment data suppresses output.
 fn present_invoice(
     invoice: &str,
     view: &PaymentView,
     network: Option<&str>,
     invocation: &ApiInvocation,
     terminal: Terminal,
-) -> Result<()> {
+) -> Result<bool> {
+    if view.kind.as_deref() == Some("stablecoin") && view.deployment().is_none() {
+        terminal.important(
+            "QR and clipboard suppressed: the stablecoin payment has no valid token deployment.",
+        );
+        return Ok(false);
+    }
     if invocation.copy {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(invoice)) {
             Ok(()) => terminal.notice("Invoice copied to the clipboard."),
@@ -1684,7 +1784,7 @@ fn present_invoice(
             });
         qr::show(invoice, view, network, terminal, now)?;
     }
-    Ok(())
+    Ok(true)
 }
 
 impl Call<'_> {
@@ -1850,6 +1950,40 @@ fn next_page(body: &Value, request: &Request) -> Result<Option<(String, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stablecoin_quote_requests_receive_scoped_error_hints() {
+        let body = serde_json::json!({"to":"usdc:ethereum_sepolia:0x1111111111111111111111111111111111111111:6"});
+        assert!(stablecoin_request(
+            Method::Post,
+            "/credit-lines/id/quotes",
+            Some(&body)
+        ));
+        assert!(!stablecoin_request(
+            Method::Get,
+            "/credit-lines/id/quotes",
+            Some(&body)
+        ));
+        assert!(!stablecoin_request(Method::Post, "/payments", Some(&body)));
+        assert!(!stablecoin_request(
+            Method::Post,
+            "/quotes",
+            Some(&serde_json::json!({"to":"btc"}))
+        ));
+        assert!(!stablecoin_request(Method::Post, "/quotes", None));
+    }
+
+    #[test]
+    fn stablecoin_rejections_give_permission_and_quote_next_steps() {
+        for (kind, expected) in [
+            ("access_rights", "allowlist"),
+            ("invalid_data", "matching unexpired"),
+        ] {
+            let body: ApiErrorBody =
+                serde_json::from_value(serde_json::json!({"type":kind})).unwrap();
+            assert!(body.stablecoin_hint().unwrap().contains(expected));
+        }
+    }
 
     #[test]
     fn empty_lists_suggest_a_command_that_exists() {
@@ -2566,7 +2700,7 @@ mod tests {
         let request = Request::build(&onchain, &scope(), None).unwrap();
         assert_eq!(
             check_invoice_flags(&onchain, &request).unwrap_err().message,
-            "--qr and --copy require a BOLT11 receive (--kind bolt11)"
+            "--qr and --copy require a BOLT11 or stablecoin receive (--kind bolt11 or stablecoin)"
         );
         let create = invocation(&["payments", "create", "--data", "-", "--qr"]);
         let error = check_invoice_flags(&create, &list_request(&["payments", "list"])).unwrap_err();

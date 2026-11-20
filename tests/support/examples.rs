@@ -14,6 +14,7 @@ pub fn user_docs() -> Vec<(PathBuf, String)> {
         "docs/README.md",
         "docs/getting-started.md",
         "docs/development.md",
+        "docs/stablecoin-receives.md",
     ]
     .map(|path| root.join(path))
     .to_vec();

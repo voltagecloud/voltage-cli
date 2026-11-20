@@ -531,10 +531,10 @@ struct WatchFlags {
 
 #[derive(Debug, Args)]
 struct InvoiceFlags {
-    /// Render a ready BOLT11 invoice as a QR code to scan; implies --wait ready
+    /// Render a ready BOLT11 invoice or stablecoin address as a QR code to scan; implies --wait ready
     #[arg(long, help_heading = "Waiting and presentation")]
     qr: bool,
-    /// Copy a ready BOLT11 invoice to the clipboard; implies --wait ready
+    /// Copy a ready BOLT11 invoice or stablecoin address to the clipboard; implies --wait ready
     #[arg(long, help_heading = "Waiting and presentation")]
     copy: bool,
 }
@@ -662,9 +662,9 @@ pub struct QuoteFlags {
     /// Unit of --amount; its currency is the one converted from
     #[arg(long, value_enum)]
     pub unit: Option<AmountUnit>,
-    /// Currency to convert into: the other of btc and usd
-    #[arg(long, value_enum)]
-    pub to: Option<Currency>,
+    /// Target currency: btc, usd, or usdc|usdt:<network>:<contract>:<decimals>
+    #[arg(long)]
+    pub to: Option<String>,
 }
 
 /// Friendly flags for `webhooks create`.
@@ -1724,8 +1724,8 @@ mod tests {
 
     #[test]
     fn all_is_accepted_by_every_list_and_pages_only_a_paginated_one() {
-        // `wallets list` returns every wallet at once, so `--all` changes nothing.
-        assert!(!api(&["wallets", "list", "--all"]).all);
+        // Wallet lists support optional cursor pagination.
+        assert!(api(&["wallets", "list", "--all"]).all);
         assert!(!api(&["webhooks", "list", "--all"]).all);
         assert!(api(&["payments", "list", "--all"]).all);
         // A command that is not a list still rejects it.
