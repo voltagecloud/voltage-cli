@@ -4,6 +4,8 @@ User-visible changes to `voltage`, newest first. Each pull request that changes 
 
 ## Unreleased
 
+- Reject malformed wallet pagination and Solana mints with an invalid decoded size.
+
 - Refresh the public API contract, expose `wallets summary`, and follow wallet cursor pages for pickers and `--all-orgs --all`. Wallet listings gain cursor/filter flags; wallet policy updates no longer accept the admin-only OFAC field.
 
 - Receive USDC/USDT with an explicit USD-to-deployment quote, display token amounts using deployment decimals, and show the address with `--qr` or `--copy`. Stablecoin receives require organization enablement; QR/copy requires a valid deployment in the response.

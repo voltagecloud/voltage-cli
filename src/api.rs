@@ -743,6 +743,14 @@ pub async fn organization_wallets(
     wallet_pages(&api, request, invocation.all, global.timeout).await
 }
 
+fn validate_wallet_page(body: &Value) -> Result<()> {
+    if body.is_object() {
+        PageView::deserialize(body)
+            .map_err(|_| Error::transport("Invalid wallet pagination metadata"))?;
+    }
+    Ok(())
+}
+
 /// Read wallet pages with one deadline, retaining filters as the cursor advances.
 async fn wallet_pages(
     api: &Api,
@@ -763,10 +771,7 @@ async fn wallet_pages(
             Error::timeout("Wallet pagination deadline exceeded; use a longer --timeout")
         })??
         .body;
-        if body.is_object() {
-            PageView::deserialize(&body)
-                .map_err(|_| Error::transport("Invalid wallet pagination metadata"))?;
-        }
+        validate_wallet_page(&body)?;
         let next = if follow {
             next_page(&body, &request)?
         } else {
@@ -1831,6 +1836,9 @@ impl Call<'_> {
         let mut pages = Vec::new();
         let mut cursors = BTreeSet::new();
         loop {
+            if self.invocation.operation.id == OperationId::GetAllOrganizationsWalletsAsUser {
+                validate_wallet_page(&response.body)?;
+            }
             let next = if follow {
                 next_page(&response.body, &self.request)?
             } else {

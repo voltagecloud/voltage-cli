@@ -8702,3 +8702,26 @@ async fn wallet_page_failures_do_not_produce_a_shortlist() {
         assert!(!stdout(&result).contains("shortlist"));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wallet_list_all_rejects_a_malformed_later_cursor() {
+    let (server, dir) = fixture().await;
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)).and(query_param_is_missing("cursor")),
+        ok(json!({"items":[],"has_more":true,"next_cursor":"second"})),
+    )
+    .await;
+    respond_once(
+        &server,
+        route("GET", wallets_path(ORG)).and(query_param("cursor", "second")),
+        ok(json!({"items":[],"has_more":true,"next_cursor":12})),
+    )
+    .await;
+    let result = cli(dir.path(), &server)
+        .args(["wallets", "list", "--org", ORG, "--env", ENV, "--all"])
+        .assert()
+        .failure();
+    assert!(stderr(&result).contains("Invalid wallet pagination metadata"));
+    assert!(!stdout(&result).contains("pages"));
+}
