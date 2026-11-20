@@ -197,10 +197,7 @@ pub fn stablecoin_deployment(value: &str) -> Option<(&str, usize)> {
                 && hex.bytes().any(|b| b != b'0')
         })
     } else {
-        (32..=44).contains(&contract.len())
-            && contract
-                .bytes()
-                .all(|b| b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(&b))
+        solana_mint(contract).is_some()
     };
     let decimal_text = *decimals;
     let decimals: usize = decimals.parse().ok()?;
@@ -208,6 +205,33 @@ pub fn stablecoin_deployment(value: &str) -> Option<(&str, usize)> {
         return None;
     }
     (valid_contract && decimals <= 9).then_some((*asset, decimals))
+}
+
+/// Decode a bounded Base58 mint into exactly 32 bytes, including leading zeroes.
+fn solana_mint(text: &str) -> Option<[u8; 32]> {
+    if !(32..=44).contains(&text.len()) {
+        return None;
+    }
+    let mut decoded = [0u8; 32];
+    for byte in text.bytes() {
+        let mut carry = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+            .iter()
+            .position(|&digit| digit == byte)? as u16;
+        for digit in decoded.iter_mut().rev() {
+            carry += u16::from(*digit) * 58;
+            *digit = carry as u8;
+            carry >>= 8;
+        }
+        if carry != 0 {
+            return None;
+        }
+    }
+    let leading = text.bytes().take_while(|&byte| byte == b'1').count();
+    let significant = decoded
+        .iter()
+        .position(|&byte| byte != 0)
+        .map_or(0, |i| 32 - i);
+    (leading + significant == 32).then_some(decoded)
 }
 
 /// Wallet networks the convenience flags can name.
@@ -444,6 +468,25 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn solana_mints_require_exactly_32_decoded_bytes() {
+        for mint in [
+            "1".repeat(31),
+            "1".repeat(33),
+            "1".repeat(45),
+            "0".repeat(32),
+            "2".repeat(32),
+            "z".repeat(44),
+        ] {
+            assert_eq!(solana_mint(&mint), None);
+            assert_eq!(
+                stablecoin_deployment(&format!("usdc:solana_devnet:{mint}:6")),
+                None
+            );
+        }
+        assert_eq!(solana_mint(&"1".repeat(32)), Some([0; 32]));
     }
 
     #[test]
