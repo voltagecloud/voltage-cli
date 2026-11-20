@@ -43,7 +43,7 @@ IDs are positional, or passed as `--id ID`; enclosing scope uses flags. Paths ar
 | Command | Method | Path | Query flags |
 |---|---|---|---|
 | `voltage assets list` | GET | `/organizations/{organization_id}/assets` | `--network` |
-| `voltage wallets list` | GET | `/organizations/{organization_id}/wallets` | `--env`, `--inactive` |
+| `voltage wallets list` | GET | `/organizations/{organization_id}/wallets` | `--env`, `--inactive`, `--pagination`, `--cursor`, `--limit`, `--sort-key`, `--sort-order`, `--network`, `--line-of-credit-ids` |
 | `voltage wallets create` | POST | `/organizations/{organization_id}/wallets` |  |
 | `voltage wallets get WALLET_ID` | GET | `/organizations/{organization_id}/wallets/{wallet_id}` |  |
 | `voltage wallets delete WALLET_ID` | DELETE | `/organizations/{organization_id}/wallets/{wallet_id}` |  |
@@ -89,3 +89,4 @@ IDs are positional, or passed as `--id ID`; enclosing scope uses flags. Paths ar
 | `voltage checkout sessions create` | POST | `/organizations/{organization_id}/environments/{environment_id}/checkout/sessions` |  |
 | `voltage checkout sessions get SESSION_ID` | GET | `/checkout/sessions/{session_id}` |  |
 | `voltage checkout sessions allowed-origins SESSION_ID` | GET | `/checkout/sessions/{session_id}/allowed-origins` |  |
+| `voltage wallets summary` | GET | `/organizations/{organization_id}/wallets/summary` |  |

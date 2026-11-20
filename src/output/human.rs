@@ -10,6 +10,7 @@
 use super::{Envelope, Layout, Outcome};
 use crate::{
     Result,
+    payment::stablecoin_deployment,
     style::{Depth, Glyphs, Line as Styled, Role},
     terminal::scrub_line,
 };
@@ -619,10 +620,29 @@ fn amount(value: &Value) -> Option<String> {
         Some(negative) if negative.as_bool()? => "-",
         Some(_) | None => "",
     };
-    Some(scrub_line(&format!(
-        "{sign}{}",
+    let rendered = if let Some((asset, decimals)) = stablecoin_deployment(currency) {
+        let digits = amount.to_string();
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let padded = format!("{digits:0>width$}", width = decimals + 1);
+        let split = padded.len() - decimals;
+        let (whole, fraction) = padded.split_at(split);
+        let fraction = fraction.trim_end_matches('0');
+        let decimal = if fraction.is_empty() {
+            String::new()
+        } else {
+            format!(".{fraction}")
+        };
+        format!(
+            "{}{decimal} {} ({currency})",
+            grouped(whole),
+            asset.to_ascii_uppercase()
+        )
+    } else {
         friendly(&amount.to_string(), unit)
-    )))
+    };
+    Some(scrub_line(&format!("{sign}{rendered}")))
 }
 
 /// The readable form of a whole number of `unit`: every BTC amount in sats, with up to three
@@ -807,6 +827,23 @@ mod tests {
         let mut out = Vec::new();
         render(&mut out, &envelope, view(width)).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn token_amounts_use_the_deployment_precision() {
+        for (decimals, units, expected) in [
+            (6, 1234567, "1.234567 USDC"),
+            (9, 1, "0.000000001 USDC"),
+            (0, 20, "20 USDC"),
+        ] {
+            let currency = format!(
+                "usdc:solana_devnet:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU:{decimals}"
+            );
+            assert_eq!(
+                amount(&serde_json::json!({"currency":currency,"amount":units})).as_deref(),
+                Some(format!("{expected} ({currency})").as_str())
+            );
+        }
     }
 
     #[test]

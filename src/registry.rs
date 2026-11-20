@@ -19,6 +19,7 @@ pub enum OperationId {
     GetAllOrganizationsWalletsAsUser,
     CreateWallet,
     GetWallet,
+    GetWalletSummary,
     DeleteWallet,
     UpdateWallet,
     GetWalletLedgerAsUser,
@@ -66,11 +67,12 @@ pub enum OperationId {
 
 impl OperationId {
     /// Every variant, in contract order, for exhaustiveness checks.
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::GetAllOrganizationSupportedAssets,
         Self::GetAllOrganizationsWalletsAsUser,
         Self::CreateWallet,
         Self::GetWallet,
+        Self::GetWalletSummary,
         Self::DeleteWallet,
         Self::UpdateWallet,
         Self::GetWalletLedgerAsUser,
@@ -522,14 +524,10 @@ mod tests {
 
     #[test]
     fn only_lists_without_paging_return_everything_at_once() {
-        for id in [
-            OperationId::GetAllOrganizationsWalletsAsUser,
-            OperationId::GetWebhooksAsUser,
-        ] {
-            assert!(operation(id).lists_everything_at_once(), "{id:?}");
-        }
+        assert!(operation(OperationId::GetWebhooksAsUser).lists_everything_at_once());
         // A paginated list, a single read, and a change are not.
         for id in [
+            OperationId::GetAllOrganizationsWalletsAsUser,
             OperationId::GetPayments,
             OperationId::GetWallet,
             OperationId::CreateWallet,

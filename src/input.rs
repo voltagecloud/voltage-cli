@@ -11,7 +11,9 @@ use crate::{
         UpdateWalletFlags, UpdateWebhookFlags, WalletFlags, WebhookFlags,
     },
     config::{InputSource, ORGANIZATION_HINT, Scope, WALLET_HINT, WEBHOOK_HINT},
-    payment::{Amount, AmountUnit, Currency, Network, PaymentDirection, ReceiveKind},
+    payment::{
+        Amount, AmountUnit, Currency, Network, PaymentDirection, ReceiveKind, stablecoin_deployment,
+    },
     registry::{Method, Operation, OperationId, Parameter, ParameterLocation, ScopeParameter},
     terminal::read_detached,
 };
@@ -338,7 +340,7 @@ struct QuoteBody {
     line_of_credit_id: Uuid,
     network: Network,
     amount: Amount,
-    to: Currency,
+    to: String,
 }
 
 #[derive(Serialize)]
@@ -454,6 +456,28 @@ fn receive_kind(flags: &PaymentFlags) -> Result<ReceiveKind> {
         return Err(Error::usage(
             "Receive commands do not accept send destination or fee flags",
         ));
+    }
+    if kind == ReceiveKind::Stablecoin {
+        if flags.description.is_some() || flags.expiration.is_some() {
+            return Err(Error::usage(
+                "Stablecoin receives do not accept --description or --expiration",
+            ));
+        }
+        require(flags.quote, "quote")?;
+        let amount = require_text(flags.amount.as_deref(), "amount")?;
+        let unit = flags.unit.unwrap_or(AmountUnit::Cents);
+        let principal = Amount::parse(&amount, unit)?;
+        if principal.currency != Currency::Usd || principal.amount == 0 {
+            return Err(Error::usage(
+                "Stablecoin receives require a positive USD amount (--unit usd or cents)",
+            ));
+        }
+        if flags
+            .currency
+            .is_some_and(|currency| currency != Currency::Usd)
+        {
+            return Err(Error::usage("Stablecoin receives require --currency usd"));
+        }
     }
     Ok(kind)
 }
@@ -575,11 +599,21 @@ fn quote(flags: &QuoteFlags) -> Result<QuoteBody> {
     let line_of_credit_id = require(flags.credit_line, "credit-line")?;
     let network = require(flags.network, "network")?;
     let unit = require(flags.unit, "unit")?;
-    let to = require(flags.to, "to")?;
+    let to = require_text(flags.to.as_deref(), "to")?;
+    if to != "btc" && to != "usd" && stablecoin_deployment(&to).is_none() {
+        return Err(Error::usage(
+            "--to requires btc, usd, or a full stablecoin deployment",
+        ));
+    }
+    if stablecoin_deployment(&to).is_some() && unit.currency() != Currency::Usd {
+        return Err(Error::usage(
+            "Stablecoin receive quotes require --unit usd or cents",
+        ));
+    }
     // A quote converts between BTC and USD, and the line of credit must be one of the two.
     // With both sides in one currency there is nothing to convert, and a line in the other
     // currency rejects it with `mismatch_currency`.
-    if unit.currency() == to {
+    if unit.currency().to_string() == to {
         return Err(Error::usage(format!(
             "--unit {} is already in the --to currency, {to}; a quote converts between btc and usd",
             unit.name()
@@ -905,6 +939,118 @@ mod tests {
             panic!("expected an API command");
         };
         Request::build(&api, &scope(), None)
+    }
+
+    const DEPLOYMENT: &str = "usdc:solana_devnet:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU:6";
+
+    #[test]
+    fn stablecoin_receive_matches_backend_c19a7785() {
+        for (amount, unit) in [("20", "usd"), ("2000", "cents")] {
+            let request = build(&[
+                "payments",
+                "receive",
+                "--kind",
+                "stablecoin",
+                "--currency",
+                "usd",
+                "--amount",
+                amount,
+                "--unit",
+                unit,
+                "--quote",
+                ORG,
+                "--id",
+                WALLET,
+            ])
+            .unwrap();
+            assert_eq!(
+                request.body.unwrap(),
+                json!({"id":WALLET, "wallet_id":WALLET,
+                "payment_kind":"stablecoin", "amount":{"currency":"usd","amount":2000}, "quote_id":ORG})
+            );
+        }
+    }
+
+    #[test]
+    fn stablecoin_receive_rejects_invalid_principal_and_unsupported_flags() {
+        let args = [
+            "payments",
+            "receive",
+            "--kind",
+            "stablecoin",
+            "--currency",
+            "usd",
+            "--quote",
+            ORG,
+        ];
+        assert!(build(&args).is_err());
+        for (amount, unit) in [("0", "usd"), ("1", "sats"), ("0.001", "usd")] {
+            let mut full = args.to_vec();
+            full.extend(["--amount", amount, "--unit", unit]);
+            assert!(build(&full).is_err());
+        }
+        for extra in [
+            ["--description", "memo"],
+            ["--expiration", "60"],
+            ["--currency", "btc"],
+        ] {
+            let mut full = vec![
+                "payments",
+                "receive",
+                "--kind",
+                "stablecoin",
+                "--quote",
+                ORG,
+                "--amount",
+                "1",
+                "--unit",
+                "usd",
+            ];
+            full.extend(extra);
+            assert!(build(&full).is_err());
+        }
+        assert!(
+            build(&[
+                "payments",
+                "receive",
+                "--kind",
+                "stablecoin",
+                "--currency",
+                "usd",
+                "--amount",
+                "1"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stablecoin_quote_preserves_deployment_and_usd_wire_amount() {
+        let args = [
+            "quotes",
+            "create",
+            "--credit-line",
+            WALLET,
+            "--network",
+            "mutinynet",
+            "--amount",
+            "20",
+            "--unit",
+            "usd",
+            "--to",
+            DEPLOYMENT,
+            "--id",
+            ORG,
+        ];
+        let body = build(&args).unwrap().body.unwrap();
+        assert_eq!(body["to"], DEPLOYMENT);
+        assert_eq!(body["amount"], json!({"currency":"usd","amount":2000}));
+        let mut bad = args;
+        bad[9] = "sats";
+        assert!(build(&bad).is_err());
+        let mut bad = args;
+        bad[11] = "usdc:invalid";
+        assert!(build(&bad).is_err());
     }
 
     #[test]
